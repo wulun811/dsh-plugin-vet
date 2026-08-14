@@ -184,7 +184,16 @@ async function attemptRound<T>(
 }
 
 function summarizeStatic(staticReport: { verdict: string; staticScore: number; findings: unknown[] }): string {
-  return `静态报告: verdict=${staticReport.verdict}, staticScore=${staticReport.staticScore}, findings=${staticReport.findings.length}`
+  return `verdict=${staticReport.verdict}, staticScore=${staticReport.staticScore}, findings=${staticReport.findings.length}`
+}
+
+/** 统一轮次输入帧：静态报告 + 有序段落（消重复模板，malong duplication 反馈）。 */
+function frame(staticReport: { verdict: string; staticScore: number; findings: unknown[] }, sections: [string, string][]): string {
+  const lines = ['静态报告:', summarizeStatic(staticReport)]
+  for (const [title, body] of sections) {
+    lines.push('', `${title}:`, body)
+  }
+  return lines.join('\n')
 }
 
 /**
@@ -205,11 +214,7 @@ export async function runAudit(
 
   // 轮 1 总览
   const r1 = await attemptRound(deps, 1, prompts.round1,
-    `静态报告:
-${summarizeStatic(staticReport)}
-
-代码:
-${input.codeChunks[0] ?? ''}`,
+    frame(staticReport, [['代码', input.codeChunks[0] ?? '']]),
     validateRound1)
   if (!r1.ok) return { error: 'audit-failed', reason: r1.error }
   log('audit-plugin-vet/request', { pluginName: input.pluginName, round: 1, inputBytes: input.codeChunks[0]?.length ?? 0, provider: deps.route.provider, model: deps.route.model })
@@ -218,14 +223,7 @@ ${input.codeChunks[0] ?? ''}`,
   const findings: LlmFinding[] = []
   for (const chunk of input.codeChunks) {
     const r2 = await attemptRound(deps, 2, prompts.round2,
-      `静态报告:
-${summarizeStatic(staticReport)}
-
-轮 1 总览:
-${JSON.stringify(r1.value)}
-
-代码块:
-${chunk}`,
+      frame(staticReport, [['轮 1 总览', JSON.stringify(r1.value)], ['代码块', chunk]]),
       validateRound2)
     if (r2.ok) {
       findings.push(...r2.value.findings)
@@ -247,34 +245,14 @@ ${chunk}`,
 
   // 轮 3 质量
   const r3 = await attemptRound(deps, 3, prompts.round3,
-    `静态报告:
-${summarizeStatic(staticReport)}
-
-轮 1 总览:
-${JSON.stringify(r1.value)}
-
-轮 2 发现:
-${JSON.stringify(findings)}
-
-代码:
-${input.codeChunks.join('\n---\n')}`,
+    frame(staticReport, [['轮 1 总览', JSON.stringify(r1.value)], ['轮 2 发现', JSON.stringify(findings)], ['代码', input.codeChunks.join('\n---\n')]]),
     validateRound3)
   if (r3.ok) partial = partial || false
   else partial = true
 
   // 轮 4 汇总
   const r4 = await attemptRound(deps, 4, prompts.round4,
-    `静态报告:
-${summarizeStatic(staticReport)}
-
-轮 1 总览:
-${JSON.stringify(r1.value)}
-
-轮 2 发现:
-${JSON.stringify(findings)}
-
-轮 3 质量:
-${r3.ok ? JSON.stringify(r3.value) : '(轮 3 失败)'}`,
+    frame(staticReport, [['轮 1 总览', JSON.stringify(r1.value)], ['轮 2 发现', JSON.stringify(findings)], ['轮 3 质量', r3.ok ? JSON.stringify(r3.value) : '(轮 3 失败)']]),
     validateRound4)
   log('audit-plugin-vet/result', { pluginName: input.pluginName, llmSection: r4.ok ? r4.value : { error: 'round4-failed' } })
 
