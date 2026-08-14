@@ -222,7 +222,7 @@ describe('apply 装配', () => {
     const ctx = new FakeCtx()
     ctx.invariants = { register: vi.fn() }
     apply(ctx as never, cfg())
-    expect(ctx.tools.register).toHaveBeenCalledTimes(1)
+    expect(ctx.tools.register).toHaveBeenCalledTimes(2)
     expect(ctx.handlers.has('internal/plugin')).toBe(true)
     expect(ctx.handlers.has('tools/execute')).toBe(true)
     expect(ctx.invariants!.register).toHaveBeenCalledWith(PACKAGE_NAME, expect.any(Function))

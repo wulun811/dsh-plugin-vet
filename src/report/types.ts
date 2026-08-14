@@ -22,11 +22,12 @@ export interface PluginScorecard {
 
 export type LlmSection =
   | {
-      qualityScore: number
+      /** deep:false 或部分轮次失败时缺省（渲染为 n/a）——不合成不存在的主观分（D9）。 */
+      qualityScore?: number
       findings: LlmFinding[]
       summary: string
       recommendation: 'approve' | 'review' | 'reject'
       confidence: 'high' | 'medium' | 'low'
       partial: boolean
     }
-  | { error: 'audit-failed'; reason: string }
+  | { error: 'audit-failed' | 'audit-skipped'; reason: string }

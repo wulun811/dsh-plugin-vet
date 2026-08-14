@@ -19,7 +19,8 @@ export function renderScorecard(card: PluginScorecard): string {
   }
   if (card.llm !== undefined) {
     if ('error' in card.llm) {
-      lines.push(`LLM 审计: 失败 (${card.llm.reason})`)
+      const label = card.llm.error === 'audit-skipped' ? '跳过' : '失败'
+      lines.push(`LLM 审计: ${label} (${card.llm.reason})`)
     } else {
       const partial = card.llm.partial ? ' (partial)' : ''
       lines.push(`LLM 审计: quality=${card.llm.qualityScore} recommendation=${card.llm.recommendation} confidence=${card.llm.confidence}${partial}`)

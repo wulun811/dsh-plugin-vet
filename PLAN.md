@@ -684,3 +684,13 @@ defineTool({
 | D7 | scanner-bin 路径：lib/scanner/client.js → ../scanner-bin/index.js（import.meta.url） | 构建布局 |
 | D8 | 客户端协议类型与 scanner-bin 重复（跨 rootDir 无法单源共享），KEEP IN SYNC 注释 + 往返测试保证一致 | 构建约束 |
 
+
+### v1.1 阶段 3 实现决策（已记录）
+
+| # | 决策 | 依据 |
+|---|---|---|
+| D9 | LlmSection 成功形态 qualityScore 可缺省（deep:false 或部分轮次失败时渲染 n/a，不合成不存在的主观分） | report/types.ts |
+| D10 | 审计事件不能走 session.append（无 ignorable 参数，coordinator.ts:1063 对未知非 ignorable 类型拒读）→ inject 增加 sessionPersistence，走 persistence.append 完整信封 + ignorable: true；SessionEventMap 声明合并（session-events.ts） | coordinator.ts:1063；session/src/index.ts:604 |
+| D11 | GenerateOptions.purpose 是闭联合（compaction/session-title，llm:355）→ 审计调用省略 purpose（A1 修正落地） | llm/lib/types/types.d.ts:355 |
+| D12 | critical 短路返回 llm: { error: 'audit-skipped', reason }（错误变体扩为 audit-failed/audit-skipped），渲染区分"跳过/失败" | PLAN.md §6.4 附注落地 |
+

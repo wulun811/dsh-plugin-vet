@@ -7,14 +7,14 @@ import type { ScanRequest } from '../scanner/protocol.js'
 import type { PluginScorecard } from '../report/types.js'
 import { renderScorecard } from '../report/render.js'
 
-interface ScanPluginArgs {
+export interface ScanPluginArgs {
   target: 'dynamic-code' | 'package' | 'file'
   source?: string
   packagePath?: string
   reason?: string
 }
 
-function buildRequest(args: ScanPluginArgs): { request: ScanRequest; pluginName: string } {
+export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; pluginName: string } {
   if (args.target === 'dynamic-code') {
     if (typeof args.source !== 'string') throw new Error('vet: dynamic-code 需要 source')
     return {
