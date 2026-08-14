@@ -22,7 +22,7 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
       const callee = n.expression
       const name = ts.isIdentifier(callee) ? callee.text : undefined
       if (name === 'eval') {
-        add(n, 'high', 'certain', 'eval() 动态执行')
+        add(n, 'high', 'certain', 'eval 动态执行（任意代码执行）')
         return
       }
       if (name === 'Function') {
