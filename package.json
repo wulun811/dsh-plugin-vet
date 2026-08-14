@@ -1,0 +1,36 @@
+{
+  "name": "@jieai/dsh-plugin-vet",
+  "version": "0.1.0",
+  "description": "Plugin trust pipeline for deepseek-harness: deterministic static scan + LLM audit + two-score scorecard.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "import": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run build:scanner",
+    "build:scanner": "tsc -p tsconfig.scanner.json",
+    "typecheck": "tsc -p tsconfig.scanner.json --noEmit",
+    "test": "npm run build && vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "typescript": "^5.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.9",
+    "@types/node": "^22.10.0"
+  }
+}
