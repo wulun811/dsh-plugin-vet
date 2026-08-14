@@ -19,18 +19,34 @@
     "README.md"
   ],
   "scripts": {
-    "build": "npm run build:scanner",
+    "build": "npm run build:scanner && npm run build:src",
     "build:scanner": "tsc -p tsconfig.scanner.json",
-    "typecheck": "tsc -p tsconfig.scanner.json --noEmit",
+    "build:src": "tsc -p tsconfig.src.json",
+    "typecheck": "npm run typecheck:scanner && npm run typecheck:src",
+    "typecheck:scanner": "tsc -p tsconfig.scanner.json --noEmit",
+    "typecheck:src": "tsc -p tsconfig.src.json --noEmit",
     "test": "npm run build && vitest run",
     "test:watch": "vitest"
   },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-invariants": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-session": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1"
+  },
   "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
     "typescript": "^5.5.0"
   },
   "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-invariants": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-session": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1",
+    "@types/node": "^22.10.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.1.9",
-    "@types/node": "^22.10.0"
+    "vitest": "^2.1.9"
   }
 }

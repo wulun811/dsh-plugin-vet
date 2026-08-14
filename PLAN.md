@@ -670,3 +670,17 @@ defineTool({
 | B3 | §6.3 明确 ctx.tools.register | tools/schema.ts:1037 |
 | FIX | §9.1 escape-workflow.js 期望修正（R3 不适用） | 无 process 标识符 |
 | IMPL | §7 scanner-bin 构建产出 lib/scanner-bin | 构建决策 |
+
+### v1.1 阶段 2 实现决策（已记录）
+
+| # | 决策 | 依据 |
+|---|---|---|
+| D1 | dsh-tools 的 ValueSchemaSpec/ParameterPropertySpec **不支持 enum 字段**（类型无此声明，会使 defineTool 泛型推断崩）→ 参数选项写入 description，运行时校验照常 | node_modules/@deepseek-ai/dsh-tools/lib/types/index.d.ts |
+| D2 | 输出 schema 必须**内联**在 defineTool 调用里（模块级常量丢失字面量推断，type: string 宽化报错）；object items 需带 additionalProperties | tool-skill 同款；schema.ts 泛型推断 |
+| D3 | schemastery Schema 实例是**可调用**的（schema(value) 校验+归一化+抛错），无 .validate() 方法 | node_modules/@deepseek-ai/schemastery/lib/types/index.d.ts:123 |
+| D4 | schemastery 可选字段用 .required(false)（无 .optional()） | 仓库 apiproxy 同款 |
+| D5 | internal/plugin 事件在 cordis 事件表**有类型**（internal/plugin(fiber: Fiber)），无需 as never；fiber.entry 是 typert loader 附加元数据，用 Fiber & { entry? } 交集访问 | node_modules/@deepseek-ai/cordis/lib/types/events.d.ts:218 |
+| D6 | deny 路径用 scanSync（spawnSync）在 observer 内**同步**判定 + 抛错（fiber.ts:299-306 同步 observer 可回滚挂载）；report 路径异步 | fiber.ts 发布语义 |
+| D7 | scanner-bin 路径：lib/scanner/client.js → ../scanner-bin/index.js（import.meta.url） | 构建布局 |
+| D8 | 客户端协议类型与 scanner-bin 重复（跨 rootDir 无法单源共享），KEEP IN SYNC 注释 + 往返测试保证一致 | 构建约束 |
+
