@@ -259,19 +259,17 @@ function fmtRam(mb: number): string {
   return Math.round(mb) + ' MB'
 }
 
-/** 介绍栏（D30 修复）：portal 到 body + fixed 定位，从视口左缘固定偏移弹出，
- * 不随盾牌按钮位置移动——按钮在会话标题旁，标题短时按钮靠左，旧定位会卡进左侧栏。 */
-const INTRO_LEFT = 320 // 距视口左缘固定像素（避开侧栏；可按需调整）
+/** 右侧介绍栏：绝对定位贴住主面板右缘（主面板位置固定），等高；width 由调用方传入。 */
 function VetIntroPanel({ pal, width, t }: { pal: MorandiPalette; width: number; t: T }): ReactNode {
-  return createPortal(
+  return (
     <aside
       role="dialog"
       aria-label={t('intro.aria')}
       style={{
-        position: 'fixed',
-        top: 16,
-        maxHeight: 'min(92vh, 800px)',
-        left: INTRO_LEFT,
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        left: 'calc(100% + 8px)',
         width,
         background: pal.bg,
         border: '1px solid ' + pal.border,
@@ -328,8 +326,6 @@ function VetIntroPanel({ pal, width, t }: { pal: MorandiPalette; width: number; 
         {t('intro.cost')}
       </div>
     </aside>
-    ,
-    document.body,
   )
 }
 
@@ -514,12 +510,12 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
         )}
       </button>
 
-      {open && (
+      {open && createPortal(
         <div
           style={{
-            position: 'absolute',
-            top: 'calc(100% + 6px)',
-            right: 0,
+            position: 'fixed',
+            top: 16,
+            left: 320,
             zIndex: 1000,
           }}
         >
@@ -720,6 +716,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
 
         {helpOpen && <VetIntroPanel pal={pal} width={280} t={t} />}
         </div>
+        ,
+        document.body,
       )}
     </div>
   )
