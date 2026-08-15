@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import * as vetPlugin from '../lib/index.js'
 import { apply } from '../lib/index.js'
 import { createScanPluginTool } from '../lib/tools/scan-plugin.js'
 import { installToolExecuteGuard } from '../lib/guards/tool-execute.js'
@@ -226,5 +228,28 @@ describe('apply 装配', () => {
     expect(ctx.handlers.has('internal/plugin')).toBe(true)
     expect(ctx.handlers.has('tools/execute')).toBe(true)
     expect(ctx.invariants!.register).toHaveBeenCalledWith(PACKAGE_NAME, expect.any(Function))
+  })
+})
+
+describe('真实 cordis harness 挂载（防启动崩溃回归，B3）', () => {
+  it('提供全部 inject 服务后挂载 vet：apply 执行、双工具注册、无 invariants 服务不崩', async () => {
+    const ctx = new Context()
+    const registered: string[] = []
+    ctx.provide('tools', { register: (t: { name: string }) => { registered.push(t.name) } } as never)
+    ctx.provide('llm', {} as never)
+    ctx.provide('sessions', {} as never)
+    ctx.provide('sessionPersistence', { append: async () => {} } as never)
+    let fiber: PromiseLike<unknown> | undefined
+    expect(() => { fiber = ctx.plugin(vetPlugin) as PromiseLike<unknown> }).not.toThrow()
+    await fiber
+    expect(registered).toContain('scan_plugin')
+    expect(registered).toContain('audit_plugin')
+  })
+
+  it('installInvariant：invariants 属性访问抛错（cordis proxy 未注入行为）时不崩', () => {
+    const ctx = {
+      get invariants(): never { throw new Error('service not injected') },
+    }
+    expect(() => installInvariant(ctx as never)).not.toThrow()
   })
 })

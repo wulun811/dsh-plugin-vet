@@ -12,7 +12,12 @@ interface InvariantRegistryLike {
  * 存在性检查按仓库约定改为"事件/数据关系"：插件可用 ⟺ scanner 子进程可产出报告。
  */
 export function installInvariant(ctx: Context): void {
-  const invariants = (ctx as Context & { invariants?: InvariantRegistryLike }).invariants
+  let invariants: InvariantRegistryLike | undefined
+  try {
+    invariants = (ctx as Context & { invariants?: InvariantRegistryLike }).invariants
+  } catch {
+    return // harness 未提供 invariants 服务——cordis proxy 对未注入属性直接抛错而非返回 undefined
+  }
   if (invariants === undefined) return
   invariants.register(PACKAGE_NAME, async (_child, fail) => {
     const res = await scan({ kind: 'code', language: 'js', code: '' })
