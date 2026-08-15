@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { scan } from '../lib/scanner-bin/engine.js'
@@ -183,13 +183,16 @@ describe('供应链扫描（R10，package.json）', () => {
 })
 
 describe('真实 DSH 插件误报测试（官方包，不得误杀 critical）', () => {
+  // 依赖本机 dsh-src/ 源码副本（gitignored，开源仓库没有）——目录存在才验证，否则跳过
   const REAL = [
-    ['session-title-llm', '/home/chen/1q/plugin-vet/dsh-src/packages/session/session-title-llm/src'],
-    ['timeout-policy', '/home/chen/1q/plugin-vet/dsh-src/packages/guard/timeout-policy/src'],
-    ['tool-skill', '/home/chen/1q/plugin-vet/dsh-src/packages/skill/tool-skill/src'],
+    ['session-title-llm', 'dsh-src/packages/session/session-title-llm/src'],
+    ['timeout-policy', 'dsh-src/packages/guard/timeout-policy/src'],
+    ['tool-skill', 'dsh-src/packages/skill/tool-skill/src'],
   ] as const
-  for (const [name, dir] of REAL) {
-    it(`${name} 无 false-critical`, () => {
+  for (const [name, relDir] of REAL) {
+    const dir = join(import.meta.dirname, '..', relDir)
+    const exists = (() => { try { return statSync(dir).isDirectory() } catch { return false } })()
+    it.skipIf(!exists)(`${name} 无 false-critical`, () => {
       const res = scan({ kind: 'files', files: [dir] })
       expect(res.ok).toBe(true)
       const r = res.report!
