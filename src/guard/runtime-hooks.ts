@@ -192,7 +192,9 @@ export function pluginFromStack(stack: string | undefined, roots: Map<string, st
     if (path.startsWith('file://')) path = path.slice('file://'.length)
     let best: { len: number; name: string } | undefined
     for (const [root, name] of roots) {
-      if (path.startsWith(root) && (best === undefined || root.length > best.len)) {
+      // M4：要求路径边界——/node_modules/foo 不能匹配 /node_modules/foobar/index.js
+      if ((path === root || path.startsWith(root + '/') || path.startsWith(root + '\\'))
+        && (best === undefined || root.length > best.len)) {
         best = { len: root.length, name }
       }
     }

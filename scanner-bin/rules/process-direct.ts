@@ -34,6 +34,21 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
         severity = 'high'
         message = `直接访问 process.${member}`
       }
+    } else if (parent !== undefined && ts.isElementAccessExpression(parent) && parent.expression === n) {
+      // F4：process['exit'] 括号访问此前只报 info——同样致命，按属性访问口径判定
+      const arg = parent.argumentExpression
+      const member = ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg) ? arg.text : undefined
+      evidence = parent.getText(sf)
+      if (member !== undefined && CRITICAL_MEMBERS.has(member)) {
+        severity = 'critical'
+        message = `直接访问 process['${member}']（Node 能力逃逸通道）`
+      } else if (member !== undefined) {
+        severity = 'high'
+        message = `直接访问 process['${member}']`
+      } else {
+        severity = 'high'
+        message = '直接访问 process[...]（动态成员）'
+      }
     }
 
     if (severity === 'critical' && ctx.runtime === 'sandbox') severity = 'high'

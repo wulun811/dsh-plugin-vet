@@ -79,6 +79,14 @@ interface LoaderLike {
  * 每次 install 前先 dispose 旧实例（恢复 fs/child_process 原始函数 + 终止旧哨兵），再装新的。 */
 let prevGuardDisposer: (() => void) | undefined
 
+/** H2：守卫已关闭（off/dispose）——pending 的 respawn 定时器检查此标志，禁止复活孤儿哨兵。 */
+let guardDisabled = false
+
+/** 守卫当前是否禁用（供 respawn 定时器/外部查询）。 */
+export function isGuardDisabled(): boolean {
+  return guardDisabled
+}
+
 export function installRuntimeGuard(ctx: Context, config: VetConfig, status: VetStatus): () => void {
   // 先卸载上一个实例（热重载/重复 apply 场景：旧钩子/旧哨兵必须清理，否则叠加）
   if (prevGuardDisposer !== undefined) {
@@ -90,6 +98,8 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     prevGuardDisposer = undefined
   }
   if (config.runtimeGuard !== 'watch') {
+    // H2：置位 disabled，pending respawn 定时器将检查并放弃复活
+    guardDisabled = true
     // 关闭守卫必须真正停掉监控：kill 遗留哨兵（env 注册表，跨重载有效）
     killSidecarFromEnv(ctx.logger)
     // 蜜罐依赖 T2 钩子：guard 未开时蜜罐静默不生效——显式告警，避免用户以为开了其实没开
@@ -119,6 +129,8 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   let respawnCount = 0
   const spawnSidecar = (): void => {
     if (stopping) return
+    // H2：守卫已关（off/dispose）→ 不复活哨兵（pending respawn 定时器触发时走到这里）
+    if (guardDisabled) return
     // env 注册表：已有存活哨兵（热重载前的实例）→ 复用，不重复 spawn（D30 单例）
     const existing = envSidecarPid()
     if (existing !== undefined && pidAlive(existing)) {
@@ -126,6 +138,7 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       child = undefined
       sidecarAlive = true
       ctx.logger.info(`vet: 复用既有哨兵 (pid=${existing})——跳过重复 spawn`)
+      guardDisabled = false
       return
     }
     child = spawn(process.execPath, [sidecarPath, '--vet-sidecar', ...watchArgs], {
@@ -135,15 +148,20 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     sidecarSpawned = true
     sidecarAlive = true
     child.stdout?.setEncoding('utf8')
+    // L2：JSON 行可能跨 chunk 截断——累积行缓冲，只在遇到完整换行时解析
+    let lineBuf = ''
     child.stdout?.on('data', (chunk: string) => {
-      for (const line of chunk.split('\n')) {
-        const trimmed = line.trim()
-        if (trimmed === '') continue
+      lineBuf += chunk
+      let nl: number
+      while ((nl = lineBuf.indexOf('\n')) !== -1) {
+        const line = lineBuf.slice(0, nl).trim()
+        lineBuf = lineBuf.slice(nl + 1)
+        if (line === '') continue
         try {
-          const a = JSON.parse(trimmed) as WatchAlarm
+          const a = JSON.parse(line) as WatchAlarm
           status.record({ ...a, source: 't1' })
         } catch {
-          ctx.logger.warn(`vet: 哨兵输出无法解析: ${trimmed.slice(0, 120)}`)
+          ctx.logger.warn(`vet: 哨兵输出无法解析: ${line.slice(0, 120)}`)
         }
       }
     })

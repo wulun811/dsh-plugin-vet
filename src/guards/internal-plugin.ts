@@ -66,7 +66,27 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       const files = listSourceFiles(root)
       if (files.length === 0) return
       const res = scanSync({ kind: 'files', files, osv: config.osvCheck === true }, { timeoutMs: config.scannerTimeoutMs })
-      if (!res.ok || res.report === undefined) return
+      if (!res.ok || res.report === undefined) {
+        // M9：deny 模式扫描失败必须 fail-closed（拦截 + 告警），否则恶意包可借
+        // 扫描超时/异常静默放行；report 模式记录告警（扫描器失活本身是异常信号）
+        const msg = `vet: 扫描失败 ${entryName}：${res.error ?? 'unknown'}`
+        ctx.logger.error(msg)
+        status?.record({
+          id: `scan-fail:${entryName}`,
+          severity: 'yellow',
+          source: 'scan',
+          kind: 'scan-fail',
+          message: msg,
+          target: entryName,
+          pluginHint: entryName,
+          at: Date.now(),
+        })
+        if (config.mode === 'deny') {
+          void fiber.dispose()
+          throw new Error(`vet: 扫描失败，拒绝加载 ${entryName}（fail-closed）`)
+        }
+        return
+      }
       const { verdict, staticScore } = res.report
       ctx.logger.info(`vet: auto-scan ${entryName} → ${verdict} (${staticScore})`)
       status?.noteScan({ pluginName: entryName, verdict, staticScore, at: Date.now() })

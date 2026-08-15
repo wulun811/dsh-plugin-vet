@@ -17,7 +17,7 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
     if (arg === undefined) return
     const sv = stringyValue(arg, sf)
     if (sv === undefined) return
-    if (!/return\s+\w*process|this\.constructor|process\./.test(sv.text)) return
+    if (!/return\s+\w*(?:globalThis|global|window)?\.?\s*process\b|this\.constructor|process(?:\[|\()/.test(sv.text)) return
     found.push({
       rule: 'R1',
       severity: 'critical',

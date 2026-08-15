@@ -2,7 +2,9 @@ import ts from 'typescript'
 import type { Finding, RuleContext, Severity, Confidence } from '../protocol.js'
 import { walk, stringyValue, lineOf } from '../ast.js'
 
-const ESCAPE_RE = /return\s+\w*process|this\.constructor|process\./
+// F2：globalThis/global/window 前缀 + 括号访问都算逃逸特征（return globalThis.process /
+// process['exit'] 此前漏报）
+const ESCAPE_RE = /return\s+\w*(?:globalThis|global|window)?\.?\s*process\b|this\.constructor|process(?:\[|\()/
 const VM_EXEC = new Set(['runInContext', 'runInNewContext'])
 
 /**
