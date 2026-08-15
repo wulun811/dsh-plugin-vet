@@ -21,12 +21,12 @@ export function loadAuditProtocolContent(): string {
 /** 注册审计协议 skill（apply 时调用；返回 disposer）。 */
 export function registerAuditProtocolSkill(ctx: { skills?: { register?: (reg: unknown) => () => void } }): (() => void) | undefined {
   const skills = ctx.skills
-  const reg = skills?.register
-  if (skills === undefined || typeof reg !== 'function') return undefined
-  return reg!({
+  if (skills === undefined || typeof skills.register !== 'function') return undefined
+  return skills.register!({
     name: AUDIT_PROTOCOL_SKILL_NAME,
     description: 'Review a DSH plugin before install: static verdict via scan_plugin, then read sources, verify findings, deep-dive capabilities, and archive a health record. 新插件安装前按 vet 审计协议审查并落盘健康档案。',
     whenToUse: 'User asks to install, evaluate, or review a DSH plugin; a new plugin is about to be added; a suspicious plugin needs investigation.',
+    source: 'runtime', // SkillSource 标识（DSH 加载校验必需，index.ts:764）
     content: loadAuditProtocolContent(),
     resourceBase: { kind: 'opaque', description: 'vet audit protocol (AUDIT_PROTOCOL.md)' },
   })
