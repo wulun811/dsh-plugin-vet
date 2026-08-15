@@ -16,16 +16,23 @@ export interface OsvQueryOptions {
   fetchImpl?: typeof fetch
 }
 
-/** 查询某 npm 包的全部已知漏洞（OSV 返回按相关度排序，取前 N 由调用方决定）。 */
-export async function queryOsv(name: string, options: OsvQueryOptions = {}): Promise<OsvVuln[]> {
-  const { timeoutMs = 4000, fetchImpl = fetch } = options
+/**
+ * 查询某 npm 包在指定版本下受影响的已知漏洞（F15：带 version 查询——OSV 服务端按
+ * affected ranges 过滤，只返回该版本实际受影响的漏洞；原来只按包名查，已修复版本
+ * 也会被报 high → 误判 suspicious）。
+ */
+export async function queryOsv(name: string, options: OsvQueryOptions & { version?: string } = {}): Promise<OsvVuln[]> {
+  const { timeoutMs = 4000, fetchImpl = fetch, version } = options
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const res = await fetchImpl('https://api.osv.dev/v1/query', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ package: { name, ecosystem: 'npm' } }),
+      body: JSON.stringify({
+        package: { name, ecosystem: 'npm' },
+        ...(version !== undefined && version !== '' ? { version } : {}),
+      }),
       signal: controller.signal,
     })
     if (!res.ok) throw new Error('osv http ' + res.status)

@@ -143,16 +143,21 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions): Promise<Fi
   if (request.osv !== true) return []
   const pkgFile = request.files?.find(f => basename(f) === 'package.json')
   if (pkgFile === undefined) return []
-  let pkg: { name?: unknown }
+  let pkg: { name?: unknown; version?: unknown }
   try {
-    pkg = JSON.parse(readOrDefault(pkgFile)) as { name?: unknown }
+    pkg = JSON.parse(readOrDefault(pkgFile)) as { name?: unknown; version?: unknown }
   } catch {
     return []
   }
   if (typeof pkg.name !== 'string' || pkg.name === '') return []
   let vulns: OsvVuln[]
   try {
-    vulns = await queryOsv(pkg.name, { timeoutMs: opts.osvTimeoutMs, fetchImpl: opts.fetchImpl })
+    // F15：带 version 查询——OSV 服务端按 affected ranges 过滤，已修复版本不再误报
+    vulns = await queryOsv(pkg.name, {
+      timeoutMs: opts.osvTimeoutMs,
+      fetchImpl: opts.fetchImpl,
+      version: typeof pkg.version === 'string' ? pkg.version : undefined,
+    })
   } catch {
     return [] // 网络失败/超时：静默降级，不影响静态判定
   }

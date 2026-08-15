@@ -15,6 +15,10 @@ const ESCAPE_SOURCES = new Set([
  */
 export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const found: Finding[] = []
+  // F12：R4 只针对沙箱（code 模式）——workflow globals（agent/log/phase 等）只存在于
+  // 沙箱运行时；files 模式（npm 包/插件源码）里它们是未定义自由变量，
+  // log.constructor === Object 这类探测是常见合法代码，报 critical 是误报。
+  if (ctx.request.kind !== 'code') return found
   walk(sf, n => {
     if (!ts.isIdentifier(n) || !ESCAPE_SOURCES.has(n.text)) return
     if (isShadowed(n.text, n)) return
