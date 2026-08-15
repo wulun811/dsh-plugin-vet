@@ -58,6 +58,7 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
   - **T1 哨兵**：旁路子进程每 `runtimeIntervalMs` 读宿主 /proc（VmRSS / 子进程数 / fd 数），报警 JSON 行回传宿主 → 盾牌变黄/红。
   - **T2 钩子**：进程内包装 fs / child_process，危险操作（敏感路径写入/删除、读密钥文件、第三方 spawn）取栈归因到插件包名后报警；官方包归因的 spawn 降噪（能力授权）。**从不阻断调用**。
 - **GUI 盾牌（D22）**：浏览器半区注册进 `conversation.session.header.actions`，轮询 /vet/status.json 显示绿/黄/红灯 + 报警计数。激活需 `dsh web` 重启（重启后 client-modules 才扫描到 `dsh.client` 声明）。
+  - 交互：**可点击**——点击展开报警面板（级别说明、最近报警列表含严重度/归因、最近扫描回显、刷新按钮、更新时刻），外部点击自动关闭；有报警时盾牌旁显示计数徽标（绿/黄/红主题色，明暗自适应）。
 
 ## 静态规则表（R1-R11）
 
