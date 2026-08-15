@@ -1,8 +1,10 @@
+
 /**
  * vet 盾牌状态灯（D22）：会话头部动作区的守护指示器。
  * 数据：轮询宿主 webServer /vet/status.json（5s）。alarm-only：面板只展示与建议，
  * 唯一动作是「开启运行时守卫」按钮——用户主动点击，vet 按其指令写自己的配置（重启生效）。
- * 设计：莫兰迪色系（暖灰底 + 鼠尾草绿/燕麦赭石/灰玫瑰/雾蓝），纯静态 inline 样式，无动画无库。
+ * 设计：莫兰迪色系双套（浅色暖灰 / 深色暖炭，跟随 DSH 主题自动切换），纯静态 inline 样式，无动画无库。
+ * 主题检测：优先读 --dsw-alias-bg-base 的计算值亮度判断明暗；变量缺失时回退 prefers-color-scheme。
  * 版本号由构建脚本注入（__VET_VERSION__，esbuild define）。
  */
 import { useEffect, useRef, useState } from 'react'
@@ -37,33 +39,69 @@ export interface ShieldSnapshotWire {
   level: 'green' | 'yellow' | 'red'
   alarmCount: number
   alarms: VetAlarmWire[]
-  lastScan?: { pluginName: string; verdict: string; staticScore: number }
+  lastScan?: { pluginName: string; verdict: string; staticScore: number; at?: number }
   runtimeGuard?: 'off' | 'watch'
   metrics?: VetMetricsWire
 }
 
 const POLL_MS = 5000
 
-/** 莫兰迪色系（暖灰底 + 低饱和尘色调）。 */
-const M = {
-  sage: '#7E9A7C',     // 鼠尾草绿：守护
-  ochre: '#B39263',    // 燕麦赭石：警告
-  rose: '#A87171',     // 灰玫瑰：风险
-  slate: '#6E7E99',    // 雾蓝：主按钮
-  ink: '#4B4A45',      // 墨色：主文本
-  muted: '#837D73',    // 灰褐：次文本
-  faint: '#A39D90',    // 浅褐：弱文本
-  bg: '#F1EEE7',       // 暖米：面板底
-  card: '#E8E4DA',     // 暖灰：卡片
-  cardSoft: '#EDEAE2', // 更浅卡片
-  border: '#D8D2C4',   // 暖灰边框
-  borderSoft: '#E0DBCD',
+/** 莫兰迪色板（每套：背景/卡片/边框 + 尘色调状态色 + 墨色文字）。 */
+export interface MorandiPalette {
+  sage: string
+  ochre: string
+  rose: string
+  slate: string
+  ink: string
+  muted: string
+  faint: string
+  bg: string
+  card: string
+  cardSoft: string
+  border: string
+  borderSoft: string
+  /** slate 主按钮上的文字色（浅色板深字 / 深色板浅字）。 */
+  onSlate: string
 }
 
-const COLOR: Record<'green' | 'yellow' | 'red', string> = {
-  green: M.sage,
-  yellow: M.ochre,
-  red: M.rose,
+/** 浅色板：暖米底 + 低饱和尘色（默认）。 */
+const M: MorandiPalette = {
+  sage: '#7E9A7C',
+  ochre: '#B39263',
+  rose: '#A87171',
+  slate: '#6E7E99',
+  ink: '#4B4A45',
+  muted: '#837D73',
+  faint: '#A39D90',
+  bg: '#F1EEE7',
+  card: '#E8E4DA',
+  cardSoft: '#EDEAE2',
+  border: '#D8D2C4',
+  borderSoft: '#E0DBCD',
+  onSlate: '#F6F4EE',
+}
+
+/** 深色板：暖炭底 + 提亮的尘色（暗色主题分支）。 */
+const MD: MorandiPalette = {
+  sage: '#93B191',
+  ochre: '#C2A378',
+  rose: '#BE8B8B',
+  slate: '#8CA3C0',
+  ink: '#E6E2D8',
+  muted: '#B5AEA0',
+  faint: '#8D8578',
+  bg: '#23211C',
+  card: '#2C2923',
+  cardSoft: '#353128',
+  border: '#464138',
+  borderSoft: '#37332B',
+  onSlate: '#22201B',
+}
+
+const COLOR: Record<'green' | 'yellow' | 'red', keyof MorandiPalette> = {
+  green: 'sage',
+  yellow: 'ochre',
+  red: 'rose',
 }
 
 const LABEL: Record<'green' | 'yellow' | 'red', string> = {
@@ -74,8 +112,8 @@ const LABEL: Record<'green' | 'yellow' | 'red', string> = {
 
 const LEVEL_TEXT: Record<'green' | 'yellow' | 'red', string> = {
   green: '当前无报警，静态扫描与运行时守护正常。',
-  yellow: '有警告或可疑扫描结果，建议查看详情。',
-  red: '检测到高风险报警，请查看详情并在 DSH 中处置（vet 只报警不代劳）。',
+  yellow: '有警告或可疑扫描结果。',
+  red: '检测到高风险报警，请查看下方报警列表并在 DSH 中处置（vet 只报警不代劳）。',
 }
 
 const SUGGEST: Record<string, string> = {
@@ -100,23 +138,67 @@ const GUARD_HELP = [
   '写入配置后需重启 dsh web 生效。',
 ].join('\n')
 
-const panelStyle: CSSProperties = {
-  position: 'absolute',
-  top: 'calc(100% + 6px)',
-  right: 0,
-  zIndex: 1000,
-  width: 340,
-  maxHeight: 500,
-  overflow: 'auto',
-  background: M.bg,
-  border: `1px solid ${M.border}`,
-  borderRadius: 12,
-  boxShadow: 'var(--dsw-shadow-lv2, 0 10px 28px rgba(74,70,60,0.22))',
-  fontSize: 12,
-  color: M.ink,
-  padding: '14px 14px 10px',
-  textAlign: 'left',
-  lineHeight: 1.5,
+/* ------------------------- 主题检测 ------------------------- */
+
+function linearize(c: number): number {
+  const v = c / 255
+  return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+}
+
+/** 解析 #rgb/#rrggbb/rgb()/rgba() → WCAG 相对亮度（0 黑 ~ 1 白）。解析失败返回 null。 */
+function parseLuma(value: string): number | null {
+  const t = value.trim()
+  if (t === '') return null
+  let m = /^#([0-9a-f]{6})$/i.exec(t)
+  if (m === null) m = /^#([0-9a-f]{3})$/i.exec(t)
+  if (m !== null) {
+    let hex = m[1]
+    if (hex.length === 3) hex = hex.split('').map(c => c + c).join('')
+    const r = parseInt(hex.slice(0, 2), 16)
+    const g = parseInt(hex.slice(2, 4), 16)
+    const b = parseInt(hex.slice(4, 6), 16)
+    return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b)
+  }
+  m = /^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(t)
+  if (m !== null) {
+    return 0.2126 * linearize(Number(m[1])) + 0.7152 * linearize(Number(m[2])) + 0.0722 * linearize(Number(m[3]))
+  }
+  return null
+}
+
+/** 当前是否暗色：优先读 DSH 主题变量 --dsw-alias-bg-base 的计算值，缺失时回退系统配色。 */
+function isDark(): boolean {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue('--dsw-alias-bg-base')
+    const luma = parseLuma(v)
+    if (luma !== null) return luma < 0.28
+  } catch {
+    // 继续走媒体查询回退
+  }
+  return typeof matchMedia !== 'undefined' && matchMedia('(prefers-color-scheme: dark)').matches
+}
+
+/* ------------------------- 视图片段 ------------------------- */
+
+function panelStyle(pal: MorandiPalette): CSSProperties {
+  return {
+    position: 'absolute',
+    top: 'calc(100% + 6px)',
+    right: 0,
+    zIndex: 1000,
+    width: 340,
+    maxHeight: 500,
+    overflow: 'auto',
+    background: pal.bg,
+    border: '1px solid ' + pal.border,
+    borderRadius: 12,
+    boxShadow: 'var(--dsw-shadow-lv2, 0 10px 28px rgba(20,18,14,0.35))',
+    fontSize: 12,
+    color: pal.ink,
+    padding: '14px 14px 10px',
+    textAlign: 'left',
+    lineHeight: 1.5,
+  }
 }
 
 function ShieldIcon({ color, size = 20 }: { color: string; size?: number }): ReactNode {
@@ -127,22 +209,22 @@ function ShieldIcon({ color, size = 20 }: { color: string; size?: number }): Rea
   )
 }
 
-function SectionLabel({ children }: { children: ReactNode }): ReactNode {
+function SectionLabel({ pal, children }: { pal: MorandiPalette; children: ReactNode }): ReactNode {
   return (
-    <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: M.faint, margin: '12px 0 6px', fontWeight: 700 }}>
+    <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: pal.faint, margin: '12px 0 6px', fontWeight: 700 }}>
       {children}
     </div>
   )
 }
 
-function Metric({ label, value, hint }: { label: string; value: string; hint?: string }): ReactNode {
+function Metric({ pal, label, value, hint }: { pal: MorandiPalette; label: string; value: string; hint?: string }): ReactNode {
   return (
     <div
       title={hint}
-      style={{ background: M.card, borderRadius: 8, padding: '6px 10px', display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}
+      style={{ background: pal.card, borderRadius: 8, padding: '6px 10px', display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}
     >
-      <span style={{ fontSize: 10, color: M.faint }}>{label}</span>
-      <span style={{ fontSize: 12.5, fontWeight: 700, color: M.ink, wordBreak: 'break-word' }}>{value}</span>
+      <span style={{ fontSize: 10, color: pal.faint }}>{label}</span>
+      <span style={{ fontSize: 12.5, fontWeight: 700, color: pal.ink, wordBreak: 'break-word' }}>{value}</span>
     </div>
   )
 }
@@ -150,7 +232,13 @@ function Metric({ label, value, hint }: { label: string; value: string; hint?: s
 function fmtTime(at: number): string {
   const d = new Date(at)
   const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
+}
+
+/** 内存：≥1 GB 显示 GB（1 位小数），否则 MB 取整。 */
+function fmtRam(mb: number): string {
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB'
+  return Math.round(mb) + ' MB'
 }
 
 /**
@@ -162,6 +250,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   const [loadedAt, setLoadedAt] = useState(0)
   const [toggleMsg, setToggleMsg] = useState<string | null>(null)
   const [toggling, setToggling] = useState(false)
+  const [dark, setDark] = useState<boolean>(() => isDark())
   const rootRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
 
@@ -173,6 +262,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
         if (!alive) return
         const text = await res.text()
         setSnap(JSON.parse(text) as ShieldSnapshotWire)
+        setDark(isDark())
         setLoadedAt(Date.now())
       } catch {
         // 路由不可用/非 JSON（SPA fallback）→ 保持上次状态
@@ -185,6 +275,15 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
       alive = false
       window.clearInterval(timer)
     }
+  }, [])
+
+  // 系统配色变化时即时切换色板（DSH 主题切换也会在下次轮询时被 isDark() 捕获）。
+  useEffect(() => {
+    if (typeof matchMedia === 'undefined') return
+    const mq = matchMedia('(prefers-color-scheme: dark)')
+    const update = (): void => setDark(isDark())
+    mq.addEventListener('change', update)
+    return () => mq.removeEventListener('change', update)
   }, [])
 
   useEffect(() => {
@@ -214,8 +313,9 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
     }
   }
 
+  const pal = dark ? MD : M
   const level = snap?.level ?? 'green'
-  const color = COLOR[level]
+  const color = pal[COLOR[level]]
   const count = snap?.alarmCount ?? 0
   const alarms = snap?.alarms ?? []
   const lastScan = snap?.lastScan
@@ -228,8 +328,8 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
         type="button"
         onClick={() => setOpen(v => !v)}
         aria-expanded={open}
-        aria-label={`vet ${LABEL[level]}（${count} 条报警）`}
-        title={`vet ${LABEL[level]}${count > 0 ? `：${count} 条报警（点击查看详情）` : ''}`}
+        aria-label={'vet ' + LABEL[level] + '（' + count + ' 条报警）'}
+        title={'vet ' + LABEL[level] + (level !== 'green' ? '（点击查看详情）' : '') + (count > 0 ? '：' + count + ' 条报警' : '')}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -237,7 +337,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           padding: '2px 8px',
           height: 28,
           border: 'none',
-          background: open ? M.cardSoft : 'transparent',
+          background: open ? pal.cardSoft : 'transparent',
           cursor: 'pointer',
           borderRadius: 8,
           transition: 'background 120ms ease',
@@ -246,10 +346,10 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
         <ShieldIcon color={color} />
         {metrics !== undefined && metrics.rssMb > 0 && (
           <span
-            style={{ fontSize: 10, color: M.muted, fontWeight: 600, lineHeight: 1 }}
-            title="DSH + 全部插件总内存（同一进程，仅总量）"
+            style={{ fontSize: 10, color: pal.muted, fontWeight: 600, lineHeight: 1 }}
+            title="RAM = DSH 宿主 + 全部插件总内存（同一进程，仅总量）"
           >
-            ≈{Math.round(metrics.rssMb)}M
+            RAM {fmtRam(metrics.rssMb)}
           </span>
         )}
         {count > 0 && (
@@ -258,7 +358,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
               fontSize: 11,
               fontWeight: 700,
               color,
-              background: M.card,
+              background: pal.card,
               borderRadius: 9,
               padding: '1px 5px',
               lineHeight: 1.4,
@@ -272,33 +372,59 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
       </button>
 
       {open && (
-        <div style={panelStyle} role="dialog" aria-label="vet 报警面板">
+        <div style={panelStyle(pal)} role="dialog" aria-label="vet 报警面板">
           {/* 头部 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: color, display: 'inline-block' }} />
             <span style={{ fontWeight: 800, fontSize: 13.5, letterSpacing: '0.02em' }}>vet {LABEL[level]}</span>
-            <span style={{ marginLeft: 'auto', fontSize: 11, color: M.muted, background: M.card, borderRadius: 9, padding: '1px 8px' }}>
+            <span style={{ marginLeft: 'auto', fontSize: 11, color: pal.muted, background: pal.card, borderRadius: 9, padding: '1px 8px' }}>
               {count} 条报警
             </span>
           </div>
-          <div style={{ color: M.muted, marginTop: 5 }}>{LEVEL_TEXT[level]}</div>
+          <div style={{ color: pal.muted, marginTop: 5 }}>
+            {level === 'yellow'
+              ? (alarms.length > 0 ? '有警告报警，详见下方报警列表。' : '有可疑扫描结果，详见下方「预警详情」。')
+              : LEVEL_TEXT[level]}
+          </div>
+
+          {/* 黄灯且无报警：唯一来源是最近扫描 suspicious → 直接展示预警详情（这就是可点的「详情」） */}
+          {level === 'yellow' && alarms.length === 0 && lastScan !== undefined && (
+            <div style={{ marginTop: 8, background: pal.card, borderRadius: 8, borderLeft: '3px solid ' + pal.ochre, padding: '8px 10px' }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: pal.ochre, letterSpacing: '0.02em' }}>
+                预警详情 · 最近扫描存在可疑结果
+              </div>
+              <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {lastScan.pluginName}
+                </span>
+                <span style={{ marginLeft: 'auto', fontWeight: 700, color: pal[COLOR[level]], flexShrink: 0 }}>
+                  {lastScan.verdict}
+                </span>
+                <span style={{ fontSize: 11, color: pal.faint, flexShrink: 0 }}>{lastScan.staticScore} 分</span>
+              </div>
+              <div style={{ marginTop: 3, fontSize: 10.5, color: pal.faint }}>
+                {lastScan.at !== undefined ? '扫描于 ' + fmtTime(lastScan.at) + ' · ' : ''}
+                静态判定存疑（非结论）：可对该插件执行深度审计复核；vet 只报警不代劳。
+              </div>
+            </div>
+          )}
 
           {/* 实时指标 */}
           {metrics !== undefined && (
             <>
-              <SectionLabel>实时指标</SectionLabel>
+              <SectionLabel pal={pal}>实时指标</SectionLabel>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
-                <Metric label="总内存" value={`${metrics.rssMb} MB`} hint="DSH 宿主 + 全部插件 + vet（同一进程，OS 仅见总量）" />
-                <Metric label="V8 堆" value={`${metrics.heapUsedMb} / ${metrics.heapTotalMb} MB`} />
-                <Metric label="原生 + 外部" value={`${metrics.externalMb} MB`} />
-                <Metric label="MCP 服务" value={`${metrics.mcpRssMb} MB · ${metrics.mcpCount} 个`} hint="独立 MCP 服务进程（命令行含 mcp，如 dsh-malong-bridge），不在 DSH 进程内、单独统计" />
-                <Metric label="CPU" value={`${metrics.cpuPct}%`} />
-                <Metric label="I/O 读" value={`${metrics.ioReadMb} MB`} />
-                <Metric label="I/O 写" value={`${metrics.ioWriteMb} MB`} />
-                <Metric label="子进程" value={`${metrics.childCount >= 0 ? metrics.childCount : '—'}`} />
+                <Metric pal={pal} label="总内存" value={metrics.rssMb + ' MB'} hint="DSH 宿主 + 全部插件 + vet（同一进程，OS 仅见总量）" />
+                <Metric pal={pal} label="V8 堆" value={metrics.heapUsedMb + ' / ' + metrics.heapTotalMb + ' MB'} />
+                <Metric pal={pal} label="原生 + 外部" value={metrics.externalMb + ' MB'} />
+                <Metric pal={pal} label="MCP 服务" value={metrics.mcpRssMb + ' MB · ' + metrics.mcpCount + ' 个'} hint="独立 MCP 服务进程（命令行含 mcp，如 dsh-malong-bridge），不在 DSH 进程内、单独统计" />
+                <Metric pal={pal} label="CPU" value={metrics.cpuPct + '%'} />
+                <Metric pal={pal} label="I/O 读" value={metrics.ioReadMb + ' MB'} />
+                <Metric pal={pal} label="I/O 写" value={metrics.ioWriteMb + ' MB'} />
+                <Metric pal={pal} label="子进程" value={metrics.childCount >= 0 ? String(metrics.childCount) : '—'} />
               </div>
               {metrics.fdCount >= 0 && (
-                <div style={{ marginTop: 5, fontSize: 10.5, color: M.faint }}>
+                <div style={{ marginTop: 5, fontSize: 10.5, color: pal.faint }}>
                   fd：{metrics.fdCount}
                 </div>
               )}
@@ -306,9 +432,9 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           )}
 
           {/* 运行时守卫：状态 + ? 提示 */}
-          <SectionLabel>运行时守卫</SectionLabel>
-          <div style={{ display: 'flex', alignItems: 'center', background: M.card, borderRadius: 8, padding: '8px 10px' }}>
-            <span style={{ width: 8, height: 8, borderRadius: 4, background: guard === 'watch' ? M.sage : M.faint, display: 'inline-block' }} />
+          <SectionLabel pal={pal}>运行时守卫</SectionLabel>
+          <div style={{ display: 'flex', alignItems: 'center', background: pal.card, borderRadius: 8, padding: '8px 10px' }}>
+            <span style={{ width: 8, height: 8, borderRadius: 4, background: guard === 'watch' ? pal.sage : pal.faint, display: 'inline-block' }} />
             <span style={{ fontWeight: 700, marginLeft: 8 }}>{guard === 'watch' ? '已开启（watch）' : '未开启'}</span>
             {guard === 'off' && (
               <button
@@ -318,8 +444,8 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
                 style={{
                   marginLeft: 'auto',
                   border: 'none',
-                  background: M.slate,
-                  color: '#F6F4EE',
+                  background: pal.slate,
+                  color: pal.onSlate,
                   borderRadius: 7,
                   padding: '3px 14px',
                   fontSize: 11.5,
@@ -338,8 +464,8 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
                 width: 16,
                 height: 16,
                 borderRadius: 8,
-                background: M.cardSoft,
-                color: M.faint,
+                background: pal.cardSoft,
+                color: pal.faint,
                 fontSize: 10.5,
                 fontWeight: 700,
                 display: 'inline-flex',
@@ -353,51 +479,51 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
             </span>
           </div>
           {toggleMsg !== null && (
-            <div style={{ marginTop: 6, fontSize: 11, color: M.ochre }}>{toggleMsg}</div>
+            <div style={{ marginTop: 6, fontSize: 11, color: pal.ochre }}>{toggleMsg}</div>
           )}
 
           {/* 最近扫描 */}
           {lastScan !== undefined && (
             <>
-              <SectionLabel>最近扫描</SectionLabel>
-              <div style={{ background: M.card, borderRadius: 8, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <SectionLabel pal={pal}>最近扫描</SectionLabel>
+              <div style={{ background: pal.card, borderRadius: 8, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lastScan.pluginName}</span>
-                <span style={{ marginLeft: 'auto', fontWeight: 700, color: lastScan.verdict === 'clean' ? M.sage : lastScan.verdict === 'suspicious' ? M.ochre : M.rose }}>
+                <span style={{ marginLeft: 'auto', fontWeight: 700, color: lastScan.verdict === 'clean' ? pal.sage : lastScan.verdict === 'suspicious' ? pal.ochre : pal.rose }}>
                   {lastScan.verdict}
                 </span>
-                <span style={{ fontSize: 11, color: M.faint }}>{lastScan.staticScore} 分</span>
+                <span style={{ fontSize: 11, color: pal.faint }}>{lastScan.staticScore} 分</span>
               </div>
             </>
           )}
 
           {/* 报警列表 */}
-          <SectionLabel>报警</SectionLabel>
+          <SectionLabel pal={pal}>报警</SectionLabel>
           {alarms.length === 0 ? (
-            <div style={{ color: M.faint, padding: '4px 2px' }}>暂无报警记录</div>
+            <div style={{ color: pal.faint, padding: '4px 2px' }}>暂无报警记录</div>
           ) : (
             <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
               {alarms.slice(0, 8).map((a, i) => (
                 <li
                   key={i}
                   style={{
-                    background: M.card,
+                    background: pal.card,
                     borderRadius: 8,
-                    borderLeft: `3px solid ${a.severity === 'red' ? M.rose : a.severity === 'yellow' ? M.ochre : 'transparent'}`,
+                    borderLeft: '3px solid ' + (a.severity === 'red' ? pal.rose : a.severity === 'yellow' ? pal.ochre : 'transparent'),
                     padding: '7px 10px',
                     marginBottom: 5,
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ fontSize: 10, fontWeight: 700, background: M.cardSoft, borderRadius: 4, padding: '1px 6px', color: M.muted }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, background: pal.cardSoft, borderRadius: 4, padding: '1px 6px', color: pal.muted }}>
                       {a.kind}
                     </span>
                     {a.pluginHint !== undefined && (
-                      <span style={{ fontSize: 10.5, color: M.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
+                      <span style={{ fontSize: 10.5, color: pal.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
                     )}
                   </div>
                   <div style={{ marginTop: 3, wordBreak: 'break-word' }}>{a.message}</div>
                   {SUGGEST[a.kind] !== undefined && (
-                    <div style={{ marginTop: 3, fontSize: 11, color: M.ochre }}>建议：{SUGGEST[a.kind]}</div>
+                    <div style={{ marginTop: 3, fontSize: 11, color: pal.ochre }}>建议：{SUGGEST[a.kind]}</div>
                   )}
                 </li>
               ))}
@@ -405,18 +531,18 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           )}
 
           {/* 底部 */}
-          <div style={{ display: 'flex', alignItems: 'center', marginTop: 12, paddingTop: 8, borderTop: `1px solid ${M.borderSoft}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', marginTop: 12, paddingTop: 8, borderTop: '1px solid ' + pal.borderSoft }}>
             {loadedAt > 0 && (
-              <span style={{ fontSize: 10.5, color: M.faint }}>更新于 {fmtTime(loadedAt)}</span>
+              <span style={{ fontSize: 10.5, color: pal.faint }}>更新于 {fmtTime(loadedAt)}</span>
             )}
             <button
               type="button"
               onClick={() => { loadRef.current() }}
               style={{
                 marginLeft: 'auto',
-                border: `1px solid ${M.border}`,
+                border: '1px solid ' + pal.border,
                 background: 'transparent',
-                color: M.muted,
+                color: pal.muted,
                 borderRadius: 7,
                 padding: '2px 12px',
                 cursor: 'pointer',
