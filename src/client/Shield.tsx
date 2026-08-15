@@ -202,10 +202,31 @@ function panelStyle(pal: MorandiPalette): CSSProperties {
   }
 }
 
-function ShieldIcon({ color, size = 20 }: { color: string; size?: number }): ReactNode {
+/**
+ * 盾牌图标（三态符号，纯路径绘制不依赖字体）：
+ * green → 盾内 √；yellow → 盾内 ?；red → 盾内 !。
+ */
+const SHIELD_PATH = 'M8 0.9 L13.1 2.9 V7 C13.1 10.7 11 13.3 8 14.3 C5 13.3 2.9 10.7 2.9 7 V2.9 Z'
+
+function ShieldIcon({ level, color, size = 20 }: { level: 'green' | 'yellow' | 'red'; color: string; size?: number }): ReactNode {
+  const symbol =
+    level === 'green' ? (
+      <path d="M5.2 8.2 L7.1 10.1 L10.8 5.9" stroke="#FFFFFF" strokeWidth={2} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    ) : level === 'red' ? (
+      <>
+        <line x1={8} y1={4.5} x2={8} y2={9.3} stroke="#FFFFFF" strokeWidth={2} strokeLinecap="round" />
+        <circle cx={8} cy={11.4} r={1.15} fill="#FFFFFF" />
+      </>
+    ) : (
+      <>
+        <path d="M6.3 5.5 C6.3 4.4 7 3.8 8 3.8 C9 3.8 9.7 4.4 9.7 5.3 C9.7 6.2 9.1 6.6 8.6 7.1 C8.1 7.6 8 8 8 8.8" stroke="#FFFFFF" strokeWidth={1.7} fill="none" strokeLinecap="round" />
+        <circle cx={8} cy={11.3} r={0.95} fill="#FFFFFF" />
+      </>
+    )
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M8 1 L13 3 V7 C13 10.6 10.9 13.2 8 14.2 C5.1 13.2 3 10.6 3 7 V3 Z" fill={color} opacity="0.92" />
+      <path d={SHIELD_PATH} fill={color} stroke={color} strokeWidth={0.6} opacity="0.95" />
+      {symbol}
     </svg>
   )
 }
@@ -425,7 +446,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           transition: 'background 120ms ease',
         }}
       >
-        <ShieldIcon color={color} />
+        <ShieldIcon level={level} color={color} />
         {metrics !== undefined && metrics.rssMb > 0 && (
           <span
             style={{ fontSize: 10, color: pal.muted, fontWeight: 600, lineHeight: 1 }}
