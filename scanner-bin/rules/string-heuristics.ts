@@ -21,6 +21,15 @@ const PATTERNS: { re: RegExp; desc: string }[] = [
  * full expression text is tested too (source-adjacent heuristic). */
 const CONCAT_RE = /\breturn\b[\s\S]*?\+[\s\S]*?\bprocess\b/
 
+/** 混淆特征：出现在调用表达式文本（String.fromCharCode / atob / charCodeAt / Buffer.from base64），
+ * 而非字符串字面量内容——矩阵测试发现的 R6 漏检面。 */
+const OBFS_CALL_PATTERNS: { re: RegExp; desc: string }[] = [
+  { re: /String\.fromCharCode/, desc: '混淆特征 String.fromCharCode' },
+  { re: /Buffer\.from\(.+base64\)/, desc: '混淆特征 Buffer.from(base64)' },
+  { re: /atob\(/, desc: '混淆特征 atob(' },
+  { re: /charCodeAt/, desc: '混淆特征 charCodeAt 循环' },
+]
+
 export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
   const found: Finding[] = []
   const push = (desc: string, text: string, n: ts.Node): void => {
@@ -37,6 +46,14 @@ export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
     if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
       const text = n.getText(sf)
       if (CONCAT_RE.test(text)) push('拼接逃逸特征：return + process', text, n)
+      return
+    }
+    if (ts.isCallExpression(n)) {
+      // 调用表达式文本命中混淆特征（矩阵发现的漏检面）
+      const text = n.getText(sf)
+      for (const p of OBFS_CALL_PATTERNS) {
+        if (p.re.test(text)) push(p.desc, text, n)
+      }
       return
     }
     if (!ts.isStringLiteral(n) && !ts.isNoSubstitutionTemplateLiteral(n) && !ts.isTemplateExpression(n)) return

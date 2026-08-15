@@ -240,7 +240,7 @@ function checkR1(node: ts.Node, sf: ts.SourceFile): Finding[] {
 
 **动机**：模板拼接、编码混淆绕过 AST 精细匹配时的兜底层。
 
-**模式**（字符串字面量/模板串内容正则，全部 `confidence: 'heuristic'`，级别 info，绝不参与 verdict 升级）：
+**模式**（字符串字面量/模板串内容 + 拼接/调用表达式文本正则——混淆特征出现在代码而非字符串里，矩阵测试发现的漏检面（D13）；全部 `confidence: 'heuristic'`，级别 info，绝不参与 verdict 升级）：
 - `/return\s*[+ ]*\s*['"]?process/`（拼接 `"return " + "process"`）
 - `/getBuiltinModule/`
 - `/child_process/`、`/require\(\s*['"](child_process|fs|net|vm)/`
@@ -693,4 +693,11 @@ defineTool({
 | D10 | 审计事件不能走 session.append（无 ignorable 参数，coordinator.ts:1063 对未知非 ignorable 类型拒读）→ inject 增加 sessionPersistence，走 persistence.append 完整信封 + ignorable: true；SessionEventMap 声明合并（session-events.ts） | coordinator.ts:1063；session/src/index.ts:604 |
 | D11 | GenerateOptions.purpose 是闭联合（compaction/session-title，llm:355）→ 审计调用省略 purpose（A1 修正落地） | llm/lib/types/types.d.ts:355 |
 | D12 | critical 短路返回 llm: { error: 'audit-skipped', reason }（错误变体扩为 audit-failed/audit-skipped），渲染区分"跳过/失败" | PLAN.md §6.4 附注落地 |
+
+
+### v1.1 审核补漏（D13）
+
+| # | 决策 | 依据 |
+|---|---|---|
+| D13 | R2 补 vm.runInContext/runInNewContext（PLAN.md §4.3 命中清单核对补漏）；R6 混淆特征扫描面扩展至调用表达式文本（String.fromCharCode/atob/charCodeAt/Buffer.from base64，矩阵测试发现"代码里的混淆特征"漏检）；新增 28 用例对抗矩阵 test/plugins-matrix.test.ts（真实 DSH 插件 0 误报） | 审核对照 §4.3；矩阵测试 |
 
