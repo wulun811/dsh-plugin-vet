@@ -1,5 +1,6 @@
 # @jieai/dsh-plugin-vet 挂载补丁（bundle patch，insert 语义，最后写入者胜）
-# config 全静态字面量——verify-cordis-config 要求 metadata 静态（PLAN.md §7）
+# 作为 dsh.profile.bundles 层在 profile 空根上做一次 insert；后到的 bundle 层与用户
+# cordis.patch.yml 按行 id 覆盖。config 保持静态字面量（Loader 表达式求值约束）。
 - insert:
     - id: plugin-vet
       name: '@jieai/dsh-plugin-vet'

@@ -6,6 +6,11 @@
 ## [Unreleased]
 
 - 开源发布准备：MIT 许可证、CONTRIBUTING/SECURITY/CODE_OF_CONDUCT、公开架构文档、npm 元数据。
+- 安装可用性对照 DSH 官方 bundle 契约验证并修正：
+  - peerDependencies 对齐 DSH 0.1.0-rc.6 版本族（原 `^0.0.1-rc.1` 与真实安装版本不符，纯属侥幸可用）。
+  - 新增 `prepublishOnly`：发布前强制构建，防止 lib/（含 client bundle）缺失或过期。
+  - 清理 cordis.patch.yml 中指向已删除 PLAN.md 的内部注释。
+  - 端到端模拟全新用户安装全链路通过：`dsh plugin --profile <name> add <tarball>` → reconcilePlugins 识别 `dsh.bundle` → loadProfile 解析 bundle 层 → composeEntries 挂载 vet 条目 → client-registry 条件（`dsh.client`/exports["./client"]/inject 边）全部满足。
 
 ## [0.1.0] - 2026-08-16
 

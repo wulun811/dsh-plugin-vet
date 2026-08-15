@@ -31,6 +31,10 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 安装即生效链路：pnpm 安装 → `reconcilePlugins` 读 `dsh.bundle` → 下次启动 `loadProfile`
 解析 bundle 挂载插件。默认配置见下方 Config（fail-open：只报告不拦截）。
 
+> **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer 范围 `^0.1.0-rc.6`）。安装时 pnpm 可能提示
+> unmet peer dependency——这是预期的：profile 模板 `autoInstallPeers: false`，运行期从 DSH 安装闭包
+> （`$DSH_HOME/profiles/node_modules` 回退层）解析，无需也不能在 profile 里另装一份 cordis 全家桶。
+
 > **监控范围 = 安装 vet 的 profile。** vet 的守卫是进程内事件（`internal/plugin`）——
 > vet 装进哪个 profile，就只守那个 profile 实例加载的插件。多 profile 部署时，
 > 每个要守的 profile 都要装一份 vet（`dsh plugin --profile <name> add @jieai/dsh-plugin-vet`），
