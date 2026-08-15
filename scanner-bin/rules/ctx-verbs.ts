@@ -1,6 +1,6 @@
 import ts from 'typescript'
 import type { Finding, RuleContext } from '../protocol.js'
-import { walk, isShadowed, lineOf } from '../ast.js'
+import { walk, lineOf } from '../ast.js'
 
 /** The sandbox ctx whitelist (guard.ts:636) — legitimate fiber verbs, NOT dangerous. */
 const CTX_VERBS = new Set(['effect', 'on', 'once', 'provide', 'timeout', 'interval', 'setTimeout', 'setInterval', 'throttle', 'debounce'])
@@ -23,7 +23,7 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
     if (!ts.isPropertyAccessExpression(n)) return
     const obj = n.expression
     if (!ts.isIdentifier(obj) || !CTX_NAMES.has(obj.text)) return
-    if (isShadowed(obj.text, obj)) return
+    // 不查 isShadowed：apply(ctx) 的 ctx 恰是函数参数，遮蔽检查会把参数当"用户遮蔽"而漏报（现场审计发现）
     const prop = n.name.text
     if (CTX_VERBS.has(prop) || CTX_FAÇADE.has(prop)) return
     found.push({

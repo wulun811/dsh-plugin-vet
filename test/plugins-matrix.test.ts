@@ -54,7 +54,9 @@ const SAMPLES: Sample[] = [
   { name: 'sk- API key', code: `const k = 'sk-abcdefghijklmnopqrstuvwxyz1234567890'`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R7'] },
   { name: 'env 密钥赋值', code: `const KEY = 'DEEPSEEK_API_KEY=sk-123456789012345678901234567890'`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R7'] },
   // --- ctx 逃逸尝试（R5，medium 不升级 verdict） ---
-  { name: 'ctx.plugin（withheld）', code: `ctx.plugin({})`, language: 'js', runtime: 'sandbox', verdict: 'clean', rules: ['R5'] },
+  { name: 'ctx.plugin（withheld，真实 apply(ctx) 形态）', code: `export function apply(ctx) { ctx.plugin({}) }`, language: 'js', runtime: 'sandbox', verdict: 'clean', rules: ['R5'] },
+  { name: 'ctx.fs（未声明服务，withheld）', code: `export function apply(ctx) { ctx.fs.readFile('x') }`, language: 'js', runtime: 'sandbox', verdict: 'clean', rules: ['R5'] },
+  { name: 'ctx.on 白名单动词（合法，不报）', code: `export function apply(ctx) { ctx.on('ready', () => {}) }`, language: 'js', runtime: 'sandbox', verdict: 'clean', rules: [] },
   // --- 混淆（R6，info 不升级） ---
   { name: '拼接逃逸', code: `const s = "return " + "process"; X.constructor(s)()`, language: 'js', runtime: 'host', verdict: 'critical', rules: ['R1', 'R6'] },
   { name: 'fromCharCode 混淆', code: `const s = String.fromCharCode(114,101,116,117,114,110)`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R6'] },
