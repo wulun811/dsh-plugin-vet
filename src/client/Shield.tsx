@@ -1,14 +1,15 @@
-
 /**
  * vet 盾牌状态灯（D22）：会话头部动作区的守护指示器。
  * 数据：轮询宿主 webServer /vet/status.json（5s）。alarm-only：面板只展示与建议，
  * 唯一动作是「开启运行时守卫」按钮——用户主动点击，vet 按其指令写自己的配置（重启生效）。
  * 设计：莫兰迪色系双套（浅色暖灰 / 深色暖炭，跟随 DSH 主题自动切换），纯静态 inline 样式，无动画无库。
  * 主题检测：优先读 --dsw-alias-bg-base 的计算值亮度判断明暗；变量缺失时回退 prefers-color-scheme。
+ * i18n：文案全部走 t(key)（槽渲染器注入，随页面语言 zh/en 自动切换）；t 缺失回退 zh。
  * 版本号由构建脚本注入（__VET_VERSION__，esbuild define）。
  */
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
+import { zh } from './i18n.ts'
 
 /** 构建时注入：package.json version（scripts/build-client.mjs define）。 */
 declare const __VET_VERSION__: string
@@ -45,6 +46,12 @@ export interface ShieldSnapshotWire {
 }
 
 const POLL_MS = 5000
+
+/** 槽渲染器注入的翻译函数（DSH locale 服务）。 */
+type T = (key: string) => string
+
+/** t 缺失时的回退：zh 词典直查。 */
+const zhT: T = key => (zh as Record<string, string>)[key] ?? key
 
 /** 莫兰迪色板（每套：背景/卡片/边框 + 尘色调状态色 + 墨色文字）。 */
 export interface MorandiPalette {
@@ -104,115 +111,12 @@ const COLOR: Record<'green' | 'yellow' | 'red', keyof MorandiPalette> = {
   red: 'rose',
 }
 
-const LABEL: Record<'green' | 'yellow' | 'red', string> = {
-  green: '守护中',
-  yellow: '有情况',
-  red: '有风险',
-}
-
-const LEVEL_TEXT: Record<'green' | 'yellow' | 'red', string> = {
-  green: '当前无报警，静态扫描与运行时守护正常。',
-  yellow: '有警告或可疑扫描结果。',
-  red: '检测到高风险报警，请查看下方报警列表；可在 DSH 对话中把这段预警发给 LLM，让它协助排查处置。',
-}
-
-const SUGGEST: Record<string, string> = {
-  mem: '检查是否有插件无界分配内存（R9-1），或调高 runtimeMemLimitMb',
-  growth: '检查是否有插件内存泄漏（对象/缓存持续累积）；可重启 DSH 或调高 runtimeGrowthMb 降噪',
-  fork: '检查是否有插件循环 spawn 子进程（R9-1 fork 炸弹）',
-  fd: '检查是否有插件泄漏文件句柄',
-  spawn: '检查该插件为何启动子进程（非官方归因）',
-  'fs-destroy': '检查该插件删除敏感路径的意图',
-  'fs-write': '检查该插件写入敏感路径的意图',
-  'fs-read': '检查该插件读取密钥文件的意图',
-}
-
-/** 「?」右侧介绍栏内容：卖点 1-2-3 + 硬数据（规则数/报警类数/官方包过检数），大白话。 */
+/** 介绍栏卖点骨架：标题/正文走 t()，序号是通用符号。 */
 const INTRO_POINTS = [
-  {
-    n: '①',
-    title: '装之前——先过检',
-    body: '10 类静态检查 + AI 复核，专盯五类恶意套路：逃逸沙箱（constructor 链 / eval / 动态 import）、偷 API 密钥、删敏感文件、资源炸弹（无界数组 / fork 风暴）、安装钩子后门（preinstall / postinstall）；已知漏洞自动核对谷歌 OSV。附 0-100 分评分卡，低分直接亮红牌；AI 还会点名质量差、藏着 bug 的插件（非恶意也会提醒）。',
-  },
-  {
-    n: '②',
-    title: '装之后——全天值班',
-    body: '8 类实时报警：内存飙升、持续膨胀（疑似泄漏）、疯狂开子进程、文件句柄泄漏、偷读密钥文件、乱写乱删敏感文件、插件偷偷 spawn 进程。一有动静，盾牌当场变色。',
-  },
-  {
-    n: '③',
-    title: '出情况——给方案',
-    body: '每条报警都归因到具体插件（@包名）+ 给处置建议；把预警丢给 DSH 里的 LLM 帮手即可继续深挖。动手与否，你说了算。',
-  },
+  { n: '①', titleKey: 'intro.p1title', bodyKey: 'intro.p1body' },
+  { n: '②', titleKey: 'intro.p2title', bodyKey: 'intro.p2body' },
+  { n: '③', titleKey: 'intro.p3title', bodyKey: 'intro.p3body' },
 ]
-
-/** 右侧介绍栏：绝对定位贴住主框右缘（主框不动），等高；width 按右侧可用空间传入。 */
-function VetIntroPanel({ pal, width }: { pal: MorandiPalette; width: number }): ReactNode {
-  return (
-    <aside
-      role="dialog"
-      aria-label="vet 插件介绍"
-      style={{
-        position: 'absolute',
-        top: 0,
-        bottom: 0,
-        left: 'calc(100% + 8px)',
-        width,
-        background: pal.bg,
-        border: '1px solid ' + pal.border,
-        borderRadius: 12,
-        boxShadow: 'var(--dsw-shadow-lv2, 0 10px 28px rgba(20,18,14,0.35))',
-        padding: '14px 14px 12px',
-        fontSize: 12,
-        color: pal.ink,
-        lineHeight: 1.6,
-        overflowY: 'auto',
-        maxHeight: 'min(92vh, 800px)',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-        <ShieldIcon level="green" color={pal.sage} size={16} />
-        <span style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.02em' }}>vet 是什么</span>
-      </div>
-      <div style={{ fontSize: 10.5, color: pal.faint, marginBottom: 8 }}>
-        @jieai/dsh-plugin-vet v{typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'}
-      </div>
-
-      <div style={{ fontWeight: 800, fontSize: 11.5, color: pal.ink, marginBottom: 6 }}>
-        三道防线：静态规则 → AI 审计 → 运行时守卫
-      </div>
-
-      <div style={{ background: pal.card, borderRadius: 8, padding: '7px 10px', marginBottom: 10, fontSize: 11, color: pal.muted }}>
-        <div>
-          <b style={{ color: pal.ink }}>10 类静态检查</b> · 8 类实时报警
-        </div>
-        <div style={{ marginTop: 1 }}>
-          <b style={{ color: pal.ink }}>195 个官方包</b>已全量过检
-        </div>
-        <div style={{ marginTop: 1 }}>
-          <b style={{ color: pal.ink }}>谷歌 OSV</b>漏洞库自动核对（npm 生态）
-        </div>
-      </div>
-
-      {INTRO_POINTS.map(p => (
-        <div key={p.n} style={{ marginBottom: 10 }}>
-          <div style={{ fontWeight: 700 }}>
-            <span style={{ color: pal.sage }}>{p.n}</span> {p.title}
-          </div>
-          <div style={{ color: pal.muted, marginTop: 2 }}>{p.body}</div>
-        </div>
-      ))}
-
-      <div style={{ background: pal.cardSoft, borderRadius: 8, padding: '6px 10px', fontWeight: 700, color: pal.ink, margin: '8px 0 10px' }}>
-        装上它，DSH 装插件从「盲盒」变「心里有数」。
-      </div>
-
-      <div style={{ fontSize: 10.5, color: pal.faint, borderTop: '1px solid ' + pal.borderSoft, paddingTop: 8 }}>
-        开启运行时守卫：增加一个小哨兵进程（约 10-30 MB）与约 5% 调用开销，写入配置重启后生效。
-      </div>
-    </aside>
-  )
-}
 
 /* ------------------------- 主题检测 ------------------------- */
 
@@ -311,6 +215,14 @@ function SectionLabel({ pal, children }: { pal: MorandiPalette; children: ReactN
   )
 }
 
+function GroupLabel({ pal, children }: { pal: MorandiPalette; children: ReactNode }): ReactNode {
+  return (
+    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', color: pal.faint, margin: '2px 0 4px' }}>
+      {children}
+    </div>
+  )
+}
+
 function Metric({ pal, label, value, hint }: { pal: MorandiPalette; label: string; value: string; hint?: string }): ReactNode {
   return (
     <div
@@ -335,10 +247,82 @@ function fmtRam(mb: number): string {
   return Math.round(mb) + ' MB'
 }
 
+/** 右侧介绍栏：绝对定位贴住主框右缘（主框不动），等高；width 按右侧可用空间传入。 */
+function VetIntroPanel({ pal, width, t }: { pal: MorandiPalette; width: number; t: T }): ReactNode {
+  return (
+    <aside
+      role="dialog"
+      aria-label={t('intro.aria')}
+      style={{
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        left: 'calc(100% + 8px)',
+        width,
+        background: pal.bg,
+        border: '1px solid ' + pal.border,
+        borderRadius: 12,
+        boxShadow: 'var(--dsw-shadow-lv2, 0 10px 28px rgba(20,18,14,0.35))',
+        padding: '14px 14px 12px',
+        fontSize: 12,
+        color: pal.ink,
+        lineHeight: 1.6,
+        overflowY: 'auto',
+        maxHeight: 'min(92vh, 800px)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+        <ShieldIcon level="green" color={pal.sage} size={16} />
+        <span style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.02em' }}>{t('intro.title')}</span>
+      </div>
+      <div style={{ fontSize: 10.5, color: pal.faint, marginBottom: 8 }}>
+        @jieai/dsh-plugin-vet v{typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'}
+      </div>
+
+      <div style={{ fontWeight: 800, fontSize: 11.5, color: pal.ink, marginBottom: 6 }}>
+        {t('intro.lines')}
+      </div>
+
+      <div style={{ background: pal.card, borderRadius: 8, padding: '7px 10px', marginBottom: 10, fontSize: 11, color: pal.muted }}>
+        <div>
+          <b style={{ color: pal.ink }}>{t('intro.stat1')}</b>
+          {t('intro.stat1b')}
+        </div>
+        <div style={{ marginTop: 1 }}>
+          <b style={{ color: pal.ink }}>{t('intro.stat2')}</b>
+          {t('intro.stat2b')}
+        </div>
+        <div style={{ marginTop: 1 }}>
+          <b style={{ color: pal.ink }}>{t('intro.stat3')}</b>
+          {t('intro.stat3b')}
+        </div>
+      </div>
+
+      {INTRO_POINTS.map(p => (
+        <div key={p.n} style={{ marginBottom: 10 }}>
+          <div style={{ fontWeight: 700 }}>
+            <span style={{ color: pal.sage }}>{p.n}</span> {t(p.titleKey)}
+          </div>
+          <div style={{ color: pal.muted, marginTop: 2 }}>{t(p.bodyKey)}</div>
+        </div>
+      ))}
+
+      <div style={{ background: pal.cardSoft, borderRadius: 8, padding: '6px 10px', fontWeight: 700, color: pal.ink, margin: '8px 0 10px' }}>
+        {t('intro.tagline')}
+      </div>
+
+      <div style={{ fontSize: 10.5, color: pal.faint, borderTop: '1px solid ' + pal.borderSoft, paddingTop: 8 }}>
+        {t('intro.cost')}
+      </div>
+    </aside>
+  )
+}
+
 /**
- * 会话头部盾牌。props 由槽渲染器传入（空 owner share，本组件自给自足），忽略。
+ * 会话头部盾牌。props 由槽渲染器传入（含 t 翻译函数；owner share 为空，本组件自给自足）。
  */
-export function Shield(_props: Record<string, unknown>): ReactNode {
+export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
+  const t = typeof props.t === 'function' ? props.t : zhT
   const [snap, setSnap] = useState<ShieldSnapshotWire | null>(null)
   const [open, setOpen] = useState(false)
   const [loadedAt, setLoadedAt] = useState(0)
@@ -403,9 +387,14 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
         body: JSON.stringify({ enable }),
       })
       const body = await res.json() as { ok?: boolean; note?: string }
-      setToggleMsg(body.note ?? (res.ok ? '已写入' : '写入失败'))
+      if (body.ok === true) {
+        setToggleMsg(t('guard.written'))
+      } else {
+        const note = typeof body.note === 'string' && body.note !== '' ? ' — ' + body.note : ''
+        setToggleMsg(t('guard.writeFailed') + note)
+      }
     } catch {
-      setToggleMsg('请求失败（路由未注册？重启后重试）')
+      setToggleMsg(t('guard.requestFailed'))
     } finally {
       setToggling(false)
     }
@@ -414,6 +403,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   const pal = dark ? MD : M
   const level = snap?.level ?? 'green'
   const color = pal[COLOR[level]]
+  const statusLabel = t('status.' + level)
   const count = snap?.alarmCount ?? 0
   const alarms = snap?.alarms ?? []
   const lastScan = snap?.lastScan
@@ -451,7 +441,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   }, [open])
 
   // 介绍栏贴在主框右侧（左缘 = 主框右缘 + 8px，主框位置不动）；
-  // 宽度按盾牌右侧可用空间收窄（150-250），至少保证能放进视口。
+  // 宽度按盾牌右侧可用空间收窄（160-280），至少保证能放进视口。
   useEffect(() => {
     if (!open) return
     const measure = (): void => {
@@ -483,8 +473,8 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
         type="button"
         onClick={() => setOpen(v => !v)}
         aria-expanded={open}
-        aria-label={'vet ' + LABEL[level] + '（' + count + ' 条报警）'}
-        title={'vet ' + LABEL[level] + (level !== 'green' ? '（点击查看详情）' : '') + (count > 0 ? '：' + count + ' 条报警' : '')}
+        aria-label={'vet ' + statusLabel + '（' + count + ' ' + t('alerts.count') + '）'}
+        title={'vet ' + statusLabel + (level !== 'green' ? t('clickDetail') : '') + (count > 0 ? ' · ' + count + ' ' + t('alerts.count') : '')}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -502,7 +492,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
         {metrics !== undefined && metrics.rssMb > 0 && (
           <span
             style={{ fontSize: 10, color: pal.muted, fontWeight: 600, lineHeight: 1 }}
-            title="RAM = DSH 宿主 + 全部插件总内存（同一进程，仅总量）"
+            title={t('ram.hint')}
           >
             RAM {fmtRam(metrics.rssMb)}
           </span>
@@ -535,26 +525,26 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
             zIndex: 1000,
           }}
         >
-          <div style={panelStyle(pal)} role="dialog" aria-label="vet 报警面板">
+          <div style={panelStyle(pal)} role="dialog" aria-label={t('panel.label')}>
           {/* 头部 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: color, display: 'inline-block' }} />
-            <span style={{ fontWeight: 800, fontSize: 13.5, letterSpacing: '0.02em' }}>vet {LABEL[level]}</span>
+            <span style={{ fontWeight: 800, fontSize: 13.5, letterSpacing: '0.02em' }}>vet {statusLabel}</span>
             <span style={{ marginLeft: 'auto', fontSize: 11, color: pal.muted, background: pal.card, borderRadius: 9, padding: '1px 8px' }}>
-              {count} 条报警
+              {count} {t('alerts.count')}
             </span>
           </div>
           <div style={{ color: pal.muted, marginTop: 5 }}>
             {level === 'yellow'
-              ? (alarms.length > 0 ? '有警告报警，详见下方报警列表。' : '有可疑扫描结果，详见下方「预警详情」。')
-              : LEVEL_TEXT[level]}
+              ? (alarms.length > 0 ? t('level.yellowAlarm') : t('level.yellowScan'))
+              : t('level.' + level)}
           </div>
 
           {/* 黄灯且无报警：唯一来源是最近扫描 suspicious → 直接展示预警详情（这就是可点的「详情」） */}
           {level === 'yellow' && alarms.length === 0 && lastScan !== undefined && (
             <div style={{ marginTop: 8, background: pal.card, borderRadius: 8, borderLeft: '3px solid ' + pal.ochre, padding: '8px 10px' }}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: pal.ochre, letterSpacing: '0.02em' }}>
-                预警详情 · 最近扫描存在可疑结果
+                {t('warn.title')}
               </div>
               <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                 <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -563,42 +553,46 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
                 <span style={{ marginLeft: 'auto', fontWeight: 700, color: pal[COLOR[level]], flexShrink: 0 }}>
                   {lastScan.verdict}
                 </span>
-                <span style={{ fontSize: 11, color: pal.faint, flexShrink: 0 }}>{lastScan.staticScore} 分</span>
+                <span style={{ fontSize: 11, color: pal.faint, flexShrink: 0 }}>{lastScan.staticScore} {t('points')}</span>
               </div>
               <div style={{ marginTop: 3, fontSize: 10.5, color: pal.faint }}>
-                {lastScan.at !== undefined ? '扫描于 ' + fmtTime(lastScan.at) + ' · ' : ''}
-                静态判定存疑（非结论）：可对该插件执行深度审计复核，或把这段预警发给 DSH 对话让 LLM 协助排查。
+                {lastScan.at !== undefined ? t('warn.scannedAt') + fmtTime(lastScan.at) + ' · ' : ''}
+                {t('warn.body')}
               </div>
             </div>
           )}
 
-          {/* 实时指标 */}
+          {/* 实时指标：内存（含堆外）与运行/I-O 分组，IO 不混进内存 */}
           {metrics !== undefined && (
             <>
-              <SectionLabel pal={pal}>实时指标</SectionLabel>
+              <SectionLabel pal={pal}>{t('metrics.title')}</SectionLabel>
+              <GroupLabel pal={pal}>{t('metrics.memory')}</GroupLabel>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
-                <Metric pal={pal} label="总内存" value={metrics.rssMb + ' MB'} hint="DSH 宿主 + 全部插件 + vet（同一进程，OS 仅见总量）" />
-                <Metric pal={pal} label="V8 堆" value={metrics.heapUsedMb + ' / ' + metrics.heapTotalMb + ' MB'} />
-                <Metric pal={pal} label="原生 + 外部" value={metrics.externalMb + ' MB'} />
-                <Metric pal={pal} label="MCP 服务" value={metrics.mcpRssMb + ' MB · ' + metrics.mcpCount + ' 个'} hint="独立 MCP 服务进程（命令行含 mcp，如 dsh-malong-bridge），不在 DSH 进程内、单独统计" />
-                <Metric pal={pal} label="CPU" value={metrics.cpuPct + '%'} />
-                <Metric pal={pal} label="I/O 读" value={metrics.ioReadMb + ' MB'} />
-                <Metric pal={pal} label="I/O 写" value={metrics.ioWriteMb + ' MB'} />
-                <Metric pal={pal} label="子进程" value={metrics.childCount >= 0 ? String(metrics.childCount) : '—'} />
+                <Metric pal={pal} label={t('metric.total')} value={metrics.rssMb + ' MB'} hint={t('metric.totalHint')} />
+                <Metric pal={pal} label={t('metric.heap')} value={metrics.heapUsedMb + ' / ' + metrics.heapTotalMb + ' MB'} hint={t('metric.heapHint')} />
+                <Metric pal={pal} label={t('metric.native')} value={metrics.externalMb + ' MB'} hint={t('metric.nativeHint')} />
+                <Metric pal={pal} label={t('metric.mcp')} value={metrics.mcpRssMb + ' MB · ' + metrics.mcpCount + ' ' + t('metric.mcpUnit')} hint={t('metric.mcpHint')} />
+              </div>
+              <GroupLabel pal={pal}>{t('metrics.runtime')}</GroupLabel>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
+                <Metric pal={pal} label={t('metric.cpu')} value={metrics.cpuPct + '%'} />
+                <Metric pal={pal} label={t('metric.ioRead')} value={metrics.ioReadMb + ' MB'} />
+                <Metric pal={pal} label={t('metric.ioWrite')} value={metrics.ioWriteMb + ' MB'} />
+                <Metric pal={pal} label={t('metric.children')} value={metrics.childCount >= 0 ? String(metrics.childCount) : '—'} />
               </div>
               {metrics.fdCount >= 0 && (
                 <div style={{ marginTop: 5, fontSize: 10.5, color: pal.faint }}>
-                  fd：{metrics.fdCount}
+                  {t('fd.label')}{metrics.fdCount}
                 </div>
               )}
             </>
           )}
 
           {/* 运行时守卫：状态 + ? 提示 */}
-          <SectionLabel pal={pal}>运行时守卫</SectionLabel>
+          <SectionLabel pal={pal}>{t('guard.title')}</SectionLabel>
           <div style={{ display: 'flex', alignItems: 'center', background: pal.card, borderRadius: 8, padding: '8px 10px' }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: guard === 'watch' ? pal.sage : pal.faint, display: 'inline-block' }} />
-            <span style={{ fontWeight: 700, marginLeft: 8 }}>{guard === 'watch' ? '已开启（watch）' : '未开启'}</span>
+            <span style={{ fontWeight: 700, marginLeft: 8 }}>{guard === 'watch' ? t('guard.on') : t('guard.off')}</span>
             {guard === 'off' && (
               <button
                 type="button"
@@ -617,13 +611,13 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
                   opacity: toggling ? 0.6 : 1,
                 }}
               >
-                {toggling ? '写入中…' : '开启'}
+                {toggling ? t('guard.writing') : t('guard.enable')}
               </button>
             )}
             <span
               tabIndex={0}
               role="button"
-              aria-label="vet 插件介绍（悬停或点击查看）"
+              aria-label={t('guard.helpLabel')}
               onClick={onHelpToggle}
               onMouseEnter={onHelpEnter}
               onFocus={onHelpEnter}
@@ -654,21 +648,21 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           {/* 最近扫描 */}
           {lastScan !== undefined && (
             <>
-              <SectionLabel pal={pal}>最近扫描</SectionLabel>
+              <SectionLabel pal={pal}>{t('scan.recent')}</SectionLabel>
               <div style={{ background: pal.card, borderRadius: 8, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lastScan.pluginName}</span>
                 <span style={{ marginLeft: 'auto', fontWeight: 700, color: lastScan.verdict === 'clean' ? pal.sage : lastScan.verdict === 'suspicious' ? pal.ochre : pal.rose }}>
                   {lastScan.verdict}
                 </span>
-                <span style={{ fontSize: 11, color: pal.faint }}>{lastScan.staticScore} 分</span>
+                <span style={{ fontSize: 11, color: pal.faint }}>{lastScan.staticScore} {t('points')}</span>
               </div>
             </>
           )}
 
           {/* 报警列表 */}
-          <SectionLabel pal={pal}>报警</SectionLabel>
+          <SectionLabel pal={pal}>{t('alerts.title')}</SectionLabel>
           {alarms.length === 0 ? (
-            <div style={{ color: pal.faint, padding: '4px 2px' }}>暂无报警记录</div>
+            <div style={{ color: pal.faint, padding: '4px 2px' }}>{t('alerts.empty')}</div>
           ) : (
             <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
               {alarms.slice(0, 8).map((a, i) => (
@@ -691,8 +685,8 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
                     )}
                   </div>
                   <div style={{ marginTop: 3, wordBreak: 'break-word' }}>{a.message}</div>
-                  {SUGGEST[a.kind] !== undefined && (
-                    <div style={{ marginTop: 3, fontSize: 11, color: pal.ochre }}>建议：{SUGGEST[a.kind]}</div>
+                  {(zh as Record<string, string>)['suggest.' + a.kind] !== undefined && (
+                    <div style={{ marginTop: 3, fontSize: 11, color: pal.ochre }}>{t('alerts.suggest')}{t('suggest.' + a.kind)}</div>
                   )}
                 </li>
               ))}
@@ -702,7 +696,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           {/* 底部 */}
           <div style={{ display: 'flex', alignItems: 'center', marginTop: 12, paddingTop: 8, borderTop: '1px solid ' + pal.borderSoft }}>
             {loadedAt > 0 && (
-              <span style={{ fontSize: 10.5, color: pal.faint }}>更新于 {fmtTime(loadedAt)}</span>
+              <span style={{ fontSize: 10.5, color: pal.faint }}>{t('footer.updated')}{fmtTime(loadedAt)}</span>
             )}
             <button
               type="button"
@@ -719,12 +713,12 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
                 transition: 'background 120ms ease',
               }}
             >
-              刷新
+              {t('footer.refresh')}
             </button>
           </div>
         </div>
 
-        {helpOpen && <VetIntroPanel pal={pal} width={introW} />}
+        {helpOpen && <VetIntroPanel pal={pal} width={introW} t={t} />}
         </div>
       )}
     </div>
