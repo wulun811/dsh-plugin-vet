@@ -14,6 +14,8 @@ const DENY_RANK: Record<VetConfig['denyOn'], number> = { critical: 3, suspicious
 
 function isExempt(packageName: string, config: VetConfig): boolean {
   if (packageName.startsWith('@deepseek-ai/')) return true
+  // cordis builtin 命名空间（cordis:group 等框架内置分组入口，非可安装的第三方插件）——不扫描不审计
+  if (packageName.startsWith('cordis:')) return true
   return config.allowlist.includes(packageName)
 }
 

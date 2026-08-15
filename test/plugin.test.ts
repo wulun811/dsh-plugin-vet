@@ -253,6 +253,24 @@ describe('internal/plugin guard', () => {
     }
   })
 
+  it('requireAudit：cordis builtin（cordis:group）豁免——不报警不拦截（D30 误报修复）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-require4-'))
+    process.env.DSH_PLUGIN_VET_ARCHIVE_DIR = join(dir, 'audits')
+    try {
+      const ctx = new FakeCtx()
+      const status = new VetStatus()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'report', requireAudit: true }), status)
+      const h = ctx.handlers.get('internal/plugin')![0]
+      const f = fiber({ entry: { options: { name: 'cordis:group' } } })
+      expect(() => h(f)).not.toThrow()
+      expect(f.dispose).not.toHaveBeenCalled()
+      expect(ctx.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
+      expect(status.snapshot().alarmCount).toBe(0)
+    } finally {
+      delete process.env.DSH_PLUGIN_VET_ARCHIVE_DIR
+    }
+  })
+
   it('requireAudit report（watch）：无档案 → 只报警不拦截（alarm-only，D30）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-require3-'))
     process.env.DSH_PLUGIN_VET_ARCHIVE_DIR = join(dir, 'audits')
