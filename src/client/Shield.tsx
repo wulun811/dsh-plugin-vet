@@ -16,10 +16,13 @@ import { zh } from './i18n.ts'
 declare const __VET_VERSION__: string
 
 export interface VetAlarmWire {
+  /** 去重键（source+kind+target），忽略/恢复按它寻址。 */
+  id: string
   kind: string
   message: string
   severity?: 'yellow' | 'red'
   pluginHint?: string
+  at: number
 }
 
 export interface VetMetricsWire {
@@ -43,6 +46,8 @@ export interface ShieldSnapshotWire {
   level: 'green' | 'yellow' | 'red'
   alarmCount: number
   alarms: VetAlarmWire[]
+  /** 用户已忽略的报警（可恢复）。 */
+  dismissed?: VetAlarmWire[]
   lastScan?: { pluginName: string; verdict: string; staticScore: number; at?: number }
   runtimeGuard?: 'off' | 'watch'
   metrics?: VetMetricsWire
@@ -413,6 +418,22 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
     }
   }
 
+  // 忽略/恢复：只改 vet 的内存聚合（不删记录、不碰插件），下一轮轮询即生效。
+  const postAlarmAction = async (url: string, id: string): Promise<void> => {
+    try {
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id }),
+      })
+      loadRef.current()
+    } catch {
+      // 路由暂不可用：轮询会自动带回原状
+    }
+  }
+  const dismissAlarm = (id: string): void => { void postAlarmAction('/vet/dismiss', id) }
+  const restoreAlarm = (id: string): void => { void postAlarmAction('/vet/restore', id) }
+
   const pal = dark ? MD : M
   const level = snap?.level ?? 'green'
   const color = pal[COLOR[level]]
@@ -684,15 +705,15 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
             </>
           )}
 
-          {/* 报警列表 */}
+          {/* 报警列表：每行可单独忽略（用户自判噪音）；最多展示 8 条最新（存储上限 20，见 status.ts alarmMax） */}
           <SectionLabel pal={pal}>{t('alerts.title')}</SectionLabel>
           {alarms.length === 0 ? (
             <div style={{ color: pal.faint, padding: '4px 2px' }}>{t('alerts.empty')}</div>
           ) : (
             <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
-              {alarms.slice(0, 8).map((a, i) => (
+              {alarms.slice(0, 8).map(a => (
                 <li
-                  key={i}
+                  key={a.id}
                   style={{
                     background: pal.card,
                     borderRadius: 8,
@@ -708,6 +729,25 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                     {a.pluginHint !== undefined && (
                       <span style={{ fontSize: 10.5, color: pal.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
                     )}
+                    <span style={{ fontSize: 10, color: pal.faint, flexShrink: 0 }}>{fmtTime(a.at)}</span>
+                    <button
+                      type="button"
+                      onClick={() => dismissAlarm(a.id)}
+                      title={t('alerts.dismissHint')}
+                      style={{
+                        marginLeft: 'auto',
+                        border: '1px solid ' + pal.borderSoft,
+                        background: 'transparent',
+                        color: pal.muted,
+                        borderRadius: 5,
+                        padding: '0 7px',
+                        cursor: 'pointer',
+                        fontSize: 10,
+                        flexShrink: 0,
+                      }}
+                    >
+                      {t('alerts.dismiss')}
+                    </button>
                   </div>
                   <div style={{ marginTop: 3, wordBreak: 'break-word' }}>{a.message}</div>
                   {(zh as Record<string, string>)['suggest.' + a.kind] !== undefined && (
@@ -716,6 +756,52 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 </li>
               ))}
             </ul>
+          )}
+
+          {/* 已忽略分区：用户可恢复；徽标/等级已不含这些 */}
+          {snap !== null && snap.dismissed !== undefined && snap.dismissed.length > 0 && (
+            <>
+              <SectionLabel pal={pal}>{t('alerts.dismissed')} · {snap.dismissed.length}</SectionLabel>
+              <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+                {snap.dismissed.slice(0, 5).map(a => (
+                  <li
+                    key={a.id}
+                    style={{
+                      background: pal.cardSoft,
+                      borderRadius: 8,
+                      padding: '6px 10px',
+                      marginBottom: 5,
+                      opacity: 0.75,
+                    }}
+                    title={t('alerts.dismissNote')}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: pal.faint }}>{a.kind}</span>
+                      <span style={{ fontSize: 10, color: pal.faint, flexShrink: 0 }}>{fmtTime(a.at)}</span>
+                      <button
+                        type="button"
+                        onClick={() => restoreAlarm(a.id)}
+                        title={t('alerts.restoreHint')}
+                        style={{
+                          marginLeft: 'auto',
+                          border: '1px solid ' + pal.border,
+                          background: 'transparent',
+                          color: pal.muted,
+                          borderRadius: 5,
+                          padding: '0 7px',
+                          cursor: 'pointer',
+                          fontSize: 10,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {t('alerts.restore')}
+                      </button>
+                    </div>
+                    <div style={{ marginTop: 2, fontSize: 11, color: pal.muted, wordBreak: 'break-word' }}>{a.message}</div>
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
 
           {/* 底部 */}

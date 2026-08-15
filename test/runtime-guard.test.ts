@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { VetStatus } from '../lib/guard/status.js'
 import { analyzeSample, detectGrowth, type ProcSample, type RssSample, type WatchConfig } from '../lib/guard/runtime-watch.js'
 import {
-  classifyOp, isSensitivePath, patchModule, pluginFromStack, DEFAULT_HOOK_CONFIG,
+  classifyOp, isSensitivePath, isTransientTempPath, patchModule, pluginFromStack, DEFAULT_HOOK_CONFIG,
 } from '../lib/guard/runtime-hooks.js'
 import { readHostMetrics } from '../lib/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
@@ -81,6 +81,47 @@ describe('VetStatus（盾牌聚合器）', () => {
     expect(s.snapshot().level).toBe('red')
     expect(s.snapshot().alarmCount).toBe(1)
   })
+
+  it('忽略：dismissed 不计入 level 与 count；可恢复；记录保留', () => {
+    const s = new VetStatus({ dedupeWindowMs: 0 })
+    s.record({ id: 't1:fd:512', severity: 'yellow', source: 't1', kind: 'fd', message: 'x', at: Date.now() })
+    s.record({ id: 't1:mem:2048', severity: 'red', source: 't1', kind: 'mem', message: 'y', at: Date.now() })
+    expect(s.snapshot().level).toBe('red')
+    // 忽略 red → 只剩 yellow
+    s.dismiss('t1:mem:2048')
+    let snap = s.snapshot()
+    expect(snap.level).toBe('yellow')
+    expect(snap.alarmCount).toBe(1)
+    expect(snap.alarms.map(a => a.id)).toEqual(['t1:fd:512'])
+    expect(snap.dismissed.map(a => a.id)).toEqual(['t1:mem:2048'])
+    expect(s.isDismissed('t1:mem:2048')).toBe(true)
+    // 全部忽略 → green（shield 不看被忽略的报警）
+    s.dismiss('t1:fd:512')
+    expect(s.snapshot().level).toBe('green')
+    // 恢复 red → 它回来（fd 仍忽略）→ red，count 1
+    s.restore('t1:mem:2048')
+    snap = s.snapshot()
+    expect(snap.level).toBe('red')
+    expect(snap.alarmCount).toBe(1)
+    expect(snap.alarms.map(a => a.id)).toEqual(['t1:mem:2048'])
+    // 全部恢复 → count 2，dismissed 清空
+    s.restore('t1:fd:512')
+    snap = s.snapshot()
+    expect(snap.alarmCount).toBe(2)
+    expect(snap.dismissed).toHaveLength(0)
+  })
+
+  it('忽略状态随报警过期自动清除（将来复发重新可见，可再忽略）', () => {
+    const s = new VetStatus({ alarmTtlMs: 100, dedupeWindowMs: 0 })
+    s.record({ id: 'a', severity: 'red', source: 't1', kind: 'mem', message: 'x', at: Date.now() - 500 })
+    s.dismiss('a')
+    expect(s.snapshot().alarms).toHaveLength(0) // 记录已 TTL 过期
+    expect(s.isDismissed('a')).toBe(false)       // 无存活记录 → 忽略自动清除
+    // 同 id 再触发 → 重新可见
+    s.record({ id: 'a', severity: 'red', source: 't1', kind: 'mem', message: 'x', at: Date.now() })
+    expect(s.snapshot().alarmCount).toBe(1)
+    expect(s.snapshot().level).toBe('red')
+  })
 })
 
 describe('decideRespawn / t2AlarmId（P0-2/P1-6 判定逻辑）', () => {
@@ -140,14 +181,14 @@ describe('detectGrowth（持续膨胀/疑似泄漏检测）', () => {
   const s = (rssMb: number, at: number): RssSample => ({ rssKb: rssMb * 1024, at })
 
   it('窗口内净增长 < 阈值 → 不报警', () => {
-    const samples = [s(200, 0), s(300, 60_000), s(400, 120_000)]
+    const samples = [s(200, 0), s(300, 300_000), s(400, 600_000)]
     const r = detectGrowth(samples, gcfg, 0)
     expect(r.alarms).toHaveLength(0)
     expect(r.multiples).toBe(0)
   })
 
   it('净增长越过 1 倍 → yellow growth，倍数更新', () => {
-    const samples = [s(200, 0), s(300, 60_000), s(500, 120_000)]
+    const samples = [s(200, 0), s(300, 300_000), s(500, 600_000)]
     const r = detectGrowth(samples, gcfg, 0)
     expect(r.alarms).toHaveLength(1)
     expect(r.alarms[0]).toMatchObject({ severity: 'yellow', kind: 'growth' })
@@ -156,20 +197,37 @@ describe('detectGrowth（持续膨胀/疑似泄漏检测）', () => {
   })
 
   it('同倍数不重复报警（去重）', () => {
-    const r = detectGrowth([s(200, 0), s(500, 120_000)], gcfg, 1)
+    const r = detectGrowth([s(200, 0), s(500, 600_000)], gcfg, 1)
     expect(r.alarms).toHaveLength(0)
     expect(r.multiples).toBe(1)
   })
 
   it('回落归零重置倍数', () => {
-    const r = detectGrowth([s(500, 0), s(200, 120_000)], gcfg, 2)
+    const r = detectGrowth([s(500, 0), s(200, 600_000)], gcfg, 2)
     expect(r.alarms).toHaveLength(0)
     expect(r.multiples).toBe(0)
   })
 
   it('窗口外的旧样本不参与（起点取窗口内）', () => {
-    const samples = [s(900, 0), s(300, 700_000), s(600, 720_000)]
+    const samples = [s(900, 0), s(300, 200_000), s(600, 800_000)]
     const r = detectGrowth(samples, gcfg, 0)
+    expect(r.multiples).toBe(1)
+  })
+
+  it('测量跨度未覆盖完整窗口 → 不报警（起窗初期的瞬时尖峰不是"持续膨胀"）', () => {
+    // 实测误报形态：窗口 10 分钟，但采样只覆盖 20 秒就涨了 274MB → 不构成窗口级持续膨胀
+    const samples = [s(500, 0), s(774, 20_000)]
+    const r = detectGrowth(samples, gcfg, 0)
+    expect(r.alarms).toHaveLength(0)
+    expect(r.multiples).toBe(0)
+  })
+
+  it('稳态抖动（最老样本晚于 cutoff 几 ms）仍能检出真实持续膨胀——跨度容差 90%', () => {
+    // 真实采样时间戳带抖动：跨度 599999ms（略小于 600000ms 窗口），净增长 300MB → 必须报警
+    // （此前严格 span >= window 的写法会让 growth 永远不触发）
+    const samples = [s(500, 101_001), s(530, 300_000), s(800, 701_000)]
+    const r = detectGrowth(samples, gcfg, 0)
+    expect(r.alarms).toHaveLength(1)
     expect(r.multiples).toBe(1)
   })
 })
@@ -250,6 +308,24 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(isSensitivePath('/home/u/.netrc', DEFAULT_HOOK_CONFIG)).toBe(true)
     expect(isSensitivePath('/home/u/.pgpass', DEFAULT_HOOK_CONFIG)).toBe(true)
     expect(isSensitivePath('/home/u/.gitconfig', DEFAULT_HOOK_CONFIG)).toBe(true)
+  })
+
+  it('工具链临时产物豁免：tsc <源名>.<pid>.<uuid>.tmpdir 里的 secrets 是源文件名不是密钥文件', () => {
+    const tmp = '/home/u/project/scanner-bin/rules/.secrets.ts.165387.14e663d0-bab4-4539-92de-22a80a17fd7d.tmpdir'
+    expect(isTransientTempPath(tmp)).toBe(true)
+    expect(isTransientTempPath('/home/u/x/report.tmp')).toBe(true)
+    expect(isTransientTempPath('/home/u/x/file.ts')).toBe(false)
+    expect(isSensitivePath(tmp, DEFAULT_HOOK_CONFIG)).toBe(false)
+    // classifyOp 层面：rmdir 该临时目录 → 不报警（此前误报为 fs-destroy red）
+    expect(classifyOp({ module: 'fs', op: 'rmdir', args: [tmp] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // 父段仍敏感：~/.ssh/config.bak 命中 .ssh（临时后缀只豁免末段）
+    expect(isSensitivePath('/home/u/.ssh/config.bak', DEFAULT_HOOK_CONFIG)).toBe(true)
+    // .env 系临时文件仍敏感（.env. 前缀判定先于临时豁免）
+    expect(isSensitivePath('/home/u/.env.tmp', DEFAULT_HOOK_CONFIG)).toBe(true)
+    // 系统根内的临时文件仍算 mutate 敏感（写删 /usr 下的临时文件照样报）
+    expect(isSensitivePath('/usr/lib/foo.tmp', DEFAULT_HOOK_CONFIG)).toBe(true)
+    // 真实密钥名（不带临时后缀）不受影响
+    expect(isSensitivePath('/home/u/.ssh/id_rsa', DEFAULT_HOOK_CONFIG)).toBe(true)
   })
 
   it('对象参数取 path', () => {
@@ -601,6 +677,73 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
     }
     handler({ method: 'GET', url: '/vet/other', headers: {} }, nres)
     expect(nfRes.code).toBe(404)
+
+    // POST /vet/dismiss {id}（同源）→ 200；GET 再查 → 报警进 dismissed、count/level 降下来
+    const mkRes = (): { code: number; body: unknown } & { writableEnded: boolean } => {
+      const r = { code: 0, body: null as unknown, writableEnded: false }
+      return Object.assign(r, {
+        writeHead: (c: number) => { r.code = c },
+        end: (b: string) => { r.body = JSON.parse(b) },
+      })
+    }
+    const disRes = mkRes()
+    handler(
+      {
+        method: 'POST',
+        url: '/vet/dismiss',
+        headers: { origin: 'http://x', host: 'x' },
+        on: (ev: string, cb: (c?: Buffer) => void) => {
+          if (ev === 'data') cb(Buffer.from(JSON.stringify({ id: 't1:fd:512' })))
+          if (ev === 'end') cb()
+        },
+      },
+      disRes,
+    )
+    expect(disRes.code).toBe(200)
+    const get2 = mkRes()
+    handler({ method: 'GET', url: '/vet/status.json', headers: {} }, get2)
+    expect((get2.body as { alarmCount: number }).alarmCount).toBe(0)
+    expect((get2.body as { level: string }).level).toBe('green')
+    expect((get2.body as { dismissed: unknown[] }).dismissed).toHaveLength(1)
+
+    // POST /vet/restore {id} → 报警回来
+    const resRes = mkRes()
+    handler(
+      {
+        method: 'POST',
+        url: '/vet/restore',
+        headers: { origin: 'http://x', host: 'x' },
+        on: (ev: string, cb: (c?: Buffer) => void) => {
+          if (ev === 'data') cb(Buffer.from(JSON.stringify({ id: 't1:fd:512' })))
+          if (ev === 'end') cb()
+        },
+      },
+      resRes,
+    )
+    expect(resRes.code).toBe(200)
+    const get3 = mkRes()
+    handler({ method: 'GET', url: '/vet/status.json', headers: {} }, get3)
+    expect((get3.body as { alarmCount: number }).alarmCount).toBe(1)
+    expect((get3.body as { level: string }).level).toBe('yellow')
+
+    // dismiss 无 Origin → 403；缺 id / 非字符串 → 400
+    const noOrigin = mkRes()
+    handler({ method: 'POST', url: '/vet/dismiss', headers: {}, on: () => {} }, noOrigin)
+    expect(noOrigin.code).toBe(403)
+    const badId = mkRes()
+    handler(
+      {
+        method: 'POST',
+        url: '/vet/dismiss',
+        headers: { origin: 'http://x', host: 'x' },
+        on: (ev: string, cb: (c?: Buffer) => void) => {
+          if (ev === 'data') cb(Buffer.from(JSON.stringify({})))
+          if (ev === 'end') cb()
+        },
+      },
+      badId,
+    )
+    expect(badId.code).toBe(400)
   })
 })
 

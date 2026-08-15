@@ -300,6 +300,14 @@ export function registerStatusRouteOnce(
       path: '/vet',
       handler: (req, res) => {
         const pathname = (req.url ?? '').split('?')[0]
+        if (req.method === 'POST' && pathname.endsWith('/vet/dismiss')) {
+          handleDismiss(req, res, status, false)
+          return
+        }
+        if (req.method === 'POST' && pathname.endsWith('/vet/restore')) {
+          handleDismiss(req, res, status, true)
+          return
+        }
         if (req.method === 'POST' && pathname.endsWith('/vet/runtime-guard')) {
           handleToggle(req, res, ctx)
           return
@@ -315,6 +323,55 @@ export function registerStatusRouteOnce(
     'vet: shield status route',
   )
   return true
+}
+
+/** 读取 POST JSON body 的 { id }（统一大小/解析错误处理；超大 body 413 断连）。 */
+function readIdBody(req: IncomingMessage, res: ServerResponse, onId: (id: string | undefined) => void): void {
+  const chunks: Buffer[] = []
+  let total = 0
+  req.on('data', (c: Buffer) => {
+    total += c.length
+    if (total > 8192) {
+      writeJson(res, 413, { ok: false, note: '请求体过大' })
+      req.destroy()
+      return
+    }
+    chunks.push(c)
+  })
+  req.on('end', () => {
+    let id: unknown
+    try {
+      id = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}').id
+    } catch {
+      writeJson(res, 400, { ok: false, note: '请求体不是合法 JSON' })
+      return
+    }
+    if (typeof id !== 'string' || id === '') {
+      writeJson(res, 400, { ok: false, note: '缺少报警 id' })
+      return
+    }
+    onId(id)
+  })
+  req.on('error', () => {
+    writeJson(res, 400, { ok: false, note: '请求体读取失败' })
+  })
+}
+
+/**
+ * 用户忽略/恢复一条报警：只改 vet 自己的内存聚合（不删记录、不碰插件），
+ * 面板下一轮轮询即生效。同源校验与 guard 开关一致（M4）。
+ */
+function handleDismiss(req: IncomingMessage, res: ServerResponse, status: VetStatus, restore: boolean): void {
+  if (!sameOrigin(req)) {
+    writeJson(res, 403, { ok: false, note: '跨源请求被拒绝' })
+    return
+  }
+  readIdBody(req, res, (id) => {
+    if (id === undefined) return
+    if (restore) status.restore(id)
+    else status.dismiss(id)
+    writeJson(res, 200, { ok: true })
+  })
 }
 
 /**

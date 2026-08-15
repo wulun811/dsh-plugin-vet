@@ -92,6 +92,12 @@ export function detectGrowth(
   const cutoff = samples[samples.length - 1].at - cfg.growthWindowMs
   const start = samples.find(s => s.at >= cutoff)
   if (start === undefined) return { alarms: [], multiples: prevMultiples }
+  // 测量跨度须覆盖窗口的绝大部分（≥90%）：真实采样时间戳带抖动，最老样本总比 cutoff
+  // 晚几 ms，严格 span >= window 会让 growth 永远不触发（实测回归）；而 20 秒级瞬时尖峰
+  // （跨度仅 ~3%）不构成"窗口内持续膨胀"。真实泄漏的首次检出推迟到窗口基本填满。
+  if (samples[samples.length - 1].at - start.at < cfg.growthWindowMs * 0.9) {
+    return { alarms: [], multiples: prevMultiples }
+  }
   const growthKb = samples[samples.length - 1].rssKb - start.rssKb
   if (growthKb <= 0) return { alarms: [], multiples: 0 }
   const multiples = Math.floor(growthKb / (cfg.growthMb * 1024))

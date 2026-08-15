@@ -6,6 +6,10 @@
 ## [Unreleased]
 
 - 开源发布准备：MIT 许可证、CONTRIBUTING/SECURITY/CODE_OF_CONDUCT、公开架构文档、npm 元数据。
+- 误报修复（实测两条）：
+  - T2 fs-destroy：工具链临时产物豁免——tsc 增量编译在源文件旁建的 `<源名>.<pid>.<uuid>.tmpdir`（`*.tmp`/`*.temp`/`*.swp` 等）随用随删，名字里的 secrets 只是被编译的源文件名；末段临时后缀不参与敏感词判定，父段照常判定（`~/.ssh/config.bak` 仍报警）。
+  - T1 growth：测量跨度必须覆盖完整窗口——起窗初期 20 秒内涨 274MB 的瞬时尖峰不再被标成"10 分钟持续膨胀疑似泄漏"。
+- 新功能：报警单条忽略/恢复——面板每条报警可「忽略」（不再计入盾牌等级与计数，记录保留、可「恢复」；报警停止后忽略自动失效，复发重新可见；与报警存储同生命周期，重启重置）。
 - 安装可用性对照 DSH 官方 bundle 契约验证并修正：
   - peerDependencies 对齐 DSH 0.1.0-rc.6 版本族（原 `^0.0.1-rc.1` 与真实安装版本不符，纯属侥幸可用）。
   - 新增 `prepublishOnly`：发布前强制构建，防止 lib/（含 client bundle）缺失或过期。

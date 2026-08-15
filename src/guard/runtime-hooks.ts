@@ -64,6 +64,20 @@ function segmentHasKeyword(part: string, keyword: string): boolean {
   return new RegExp('(?:^|[._-])' + esc + '(?:[._-]|$)', 'i').test(part)
 }
 
+/** 工具链临时产物后缀（tsc/vitest/esbuild 等）：*.tmpdir / *.tmp / *.temp / *.swp / *.bak / vim ~。 */
+const TRANSIENT_TEMP_SUFFIX = /\.(?:tmp(?:dir)?|temp|swp|bak|orig)$/i
+
+/**
+ * 末段是否为工具链临时产物（纯名字判定，不碰文件系统）。
+ * tsc 增量编译在源文件旁建 `<源名>.<pid>.<uuid>.tmpdir` 并随用随删（实测宿主 PID 即嵌入名中）——
+ * 名字里的 'secrets' 只是被编译的源文件名（secrets.ts），不是密钥文件；删除它是清理不是破坏。
+ */
+export function isTransientTempPath(p: string): boolean {
+  const norm = p.replace(/\\/g, '/')
+  const last = norm.slice(norm.lastIndexOf('/') + 1)
+  return last !== '' && TRANSIENT_TEMP_SUFFIX.test(last)
+}
+
 /**
  * 归一化路径并判断是否敏感。
  * mode='mutate'（写/删）额外计入系统根前缀（/etc /usr /var …：写删系统文件=篡改/破坏）；
@@ -72,9 +86,13 @@ function segmentHasKeyword(part: string, keyword: string): boolean {
  */
 export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'mutate' = 'mutate'): boolean {
   const norm = p.replace(/\\/g, '/')
-  for (const part of norm.split('/')) {
-    const low = part.toLowerCase()
+  const parts = norm.split('/')
+  for (let i = 0; i < parts.length; i++) {
+    const low = parts[i].toLowerCase()
     if (low === '.env' || low.startsWith('.env.')) return true
+    // 末段是工具链临时产物（.secrets.ts.165387.<uuid>.tmpdir）→ 跳过敏感词判定；父段照常
+    // 全量判定（~/.ssh/config.bak 仍命中 .ssh；.env.tmp 已在上方命中）。
+    if (i === parts.length - 1 && isTransientTempPath(norm)) continue
     if (cfg.sensitiveSegments.some(s => low === s.toLowerCase())) return true
     if (cfg.sensitiveExts.some(ext => low.endsWith(ext))) return true
     if (cfg.sensitiveKeywords.some(k => segmentHasKeyword(low, k))) return true

@@ -31,6 +31,8 @@ export interface VetStatusSnapshot {
   level: ShieldLevel
   alarmCount: number
   alarms: VetAlarm[]
+  /** 用户已忽略的报警（id → 记录，供面板「已忽略」分区展示/恢复）。 */
+  dismissed: VetAlarm[]
   lastScan?: ScanEcho
 }
 
@@ -49,6 +51,8 @@ export class VetStatus {
   private readonly dedupeWindowMs: number
   private readonly alarmTtlMs: number
   private readonly alarms: VetAlarm[] = []
+  /** 用户主动忽略的报警 id（alarm-only 的延伸：报警可以「看不见」，但从不被 vet 删除）。 */
+  private readonly dismissedIds = new Set<string>()
   private lastScanValue: ScanEcho | undefined
 
   constructor(options: VetStatusOptions = {}) {
@@ -63,6 +67,26 @@ export class VetStatus {
     for (let i = this.alarms.length - 1; i >= 0; i--) {
       if (this.alarms[i].at < cutoff) this.alarms.splice(i, 1)
     }
+    // 忽略状态随报警记录存活：对应报警全部过期/消失后自动清除忽略，将来再次触发会重新
+    // 可见（用户可再忽略）；持续复发的报警记录不断续期，忽略保持有效。
+    for (const id of [...this.dismissedIds]) {
+      if (!this.alarms.some(a => a.id === id)) this.dismissedIds.delete(id)
+    }
+  }
+
+  /** 用户忽略一条报警：从盾牌 level 与活动列表隐藏，记录保留（可恢复）。 */
+  dismiss(id: string): void {
+    this.dismissedIds.add(id)
+  }
+
+  /** 恢复一条被忽略的报警。 */
+  restore(id: string): void {
+    this.dismissedIds.delete(id)
+  }
+
+  /** 某条报警当前是否被忽略。 */
+  isDismissed(id: string): boolean {
+    return this.dismissedIds.has(id)
   }
 
   /** 记录一条报警；同 id 在去重窗口内返回 'deduped'。 */
@@ -83,10 +107,12 @@ export class VetStatus {
 
   snapshot(): VetStatusSnapshot {
     this.expire(Date.now())
+    const active = this.alarms.filter(a => !this.dismissedIds.has(a.id))
+    const dismissed = this.alarms.filter(a => this.dismissedIds.has(a.id))
     const level: ShieldLevel =
-      this.alarms.some(a => a.severity === 'red') ? 'red'
-      : (this.alarms.some(a => a.severity === 'yellow') || (this.lastScanValue !== undefined && this.lastScanValue.verdict !== 'clean')) ? 'yellow'
+      active.some(a => a.severity === 'red') ? 'red'
+      : (active.some(a => a.severity === 'yellow') || (this.lastScanValue !== undefined && this.lastScanValue.verdict !== 'clean')) ? 'yellow'
       : 'green'
-    return { level, alarmCount: this.alarms.length, alarms: [...this.alarms], lastScan: this.lastScanValue }
+    return { level, alarmCount: active.length, alarms: active, dismissed, lastScan: this.lastScanValue }
   }
 }
