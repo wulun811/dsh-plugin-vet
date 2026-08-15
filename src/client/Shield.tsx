@@ -146,15 +146,18 @@ const INTRO_POINTS = [
   },
 ]
 
-/** 右侧介绍栏：与主面板等高、更窄；width 由宿主按可用空间传入。 */
+/** 右侧介绍栏：绝对定位贴住主框右缘（主框不动），等高；width 按右侧可用空间传入。 */
 function VetIntroPanel({ pal, width }: { pal: MorandiPalette; width: number }): ReactNode {
   return (
     <aside
       role="dialog"
       aria-label="vet 插件介绍"
       style={{
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        left: 'calc(100% + 8px)',
         width,
-        flexShrink: 0,
         background: pal.bg,
         border: '1px solid ' + pal.border,
         borderRadius: 12,
@@ -246,10 +249,9 @@ function isDark(): boolean {
 
 /* ------------------------- 视图片段 ------------------------- */
 
-function panelStyle(pal: MorandiPalette, width: number): CSSProperties {
+function panelStyle(pal: MorandiPalette): CSSProperties {
   return {
-    width,
-    flexShrink: 0,
+    width: 340,
     // 面板整体向下延伸（最高到视口 92%），日常内容无需滚动；极矮视口才出现滚动条。
     maxHeight: 'min(92vh, 800px)',
     overflowY: 'auto',
@@ -337,7 +339,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   const [toggling, setToggling] = useState(false)
   const [dark, setDark] = useState<boolean>(() => isDark())
   const [helpOpen, setHelpOpen] = useState(false)
-  const [fit, setFit] = useState<{ mainW: number; introW: number }>({ mainW: 340, introW: 250 })
+  const [introW, setIntroW] = useState(250)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
   const openTimer = useRef<number | null>(null)
@@ -441,26 +443,16 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
     if (!open) setHelpOpen(false)
   }, [open])
 
-  // 布局自适应：介绍栏永远贴在主框右侧（右缘 = 盾牌右缘）。总宽超过盾牌左侧可用空间时，
-  // 先收窄介绍栏（150-250），还不够再收窄主框（260-340），保证整个弹层不出视口。
+  // 介绍栏贴在主框右侧（左缘 = 主框右缘 + 8px，主框位置不动）；
+  // 宽度按盾牌右侧可用空间收窄（150-250），至少保证能放进视口。
   useEffect(() => {
     if (!open) return
     const measure = (): void => {
       const el = rootRef.current
       if (el === null) return
       const r = el.getBoundingClientRect()
-      const gap = 8
-      // 弹层右缘 = 盾牌右缘；左缘至少离视口左边 8px
-      const maxTotal = Math.max(0, r.right - gap - 8)
-      let mainW = 340
-      let introW = 250
-      if (mainW + gap + introW > maxTotal) {
-        introW = Math.max(150, maxTotal - mainW - gap)
-        if (introW === 150 && mainW + gap + 150 > maxTotal) {
-          mainW = Math.max(260, maxTotal - gap - 150)
-        }
-      }
-      setFit({ mainW, introW })
+      const availRight = Math.max(0, window.innerWidth - r.right - 8 - 8)
+      setIntroW(Math.max(150, Math.min(250, availRight)))
     }
     measure()
     window.addEventListener('resize', measure)
@@ -534,12 +526,9 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
             top: 'calc(100% + 6px)',
             right: 0,
             zIndex: 1000,
-            display: 'flex',
-            alignItems: 'stretch',
-            gap: 8,
           }}
         >
-          <div style={panelStyle(pal, fit.mainW)} role="dialog" aria-label="vet 报警面板">
+          <div style={panelStyle(pal)} role="dialog" aria-label="vet 报警面板">
           {/* 头部 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: color, display: 'inline-block' }} />
@@ -728,7 +717,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           </div>
         </div>
 
-        {helpOpen && <VetIntroPanel pal={pal} width={fit.introW} />}
+        {helpOpen && <VetIntroPanel pal={pal} width={introW} />}
         </div>
       )}
     </div>
