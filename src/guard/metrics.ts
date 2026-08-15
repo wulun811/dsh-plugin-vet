@@ -7,7 +7,14 @@
 import { readFileSync, readdirSync } from 'node:fs'
 
 export interface HostMetrics {
+  /** 进程总 RSS（MB）= DSH 宿主 + 全部插件 + vet 自身（同一进程，OS 仅见总量）。 */
   rssMb: number
+  /** V8 堆已用（MB）。 */
+  heapUsedMb: number
+  /** V8 堆总量（MB）。 */
+  heapTotalMb: number
+  /** 原生/外部内存（MB）：external + arrayBuffers（Buffer/ArrayBuffer 等）。 */
+  externalMb: number
   cpuPct: number
   ioReadMb: number
   ioWriteMb: number
@@ -21,18 +28,15 @@ let prevCpu: { total: number; at: number } | undefined
 /** 读取宿主进程实时指标（失败字段回退，绝不抛错）。 */
 export function readHostMetrics(): HostMetrics {
   const pid = process.pid
-  let rssMb = 0
+  const mem = process.memoryUsage()
+  const rssMb = mem.rss / 1048576
+  const heapUsedMb = mem.heapUsed / 1048576
+  const heapTotalMb = mem.heapTotal / 1048576
+  const externalMb = (mem.external + (mem.arrayBuffers ?? 0)) / 1048576
   let childCount = -1
   let fdCount = -1
   let ioRead = 0
   let ioWrite = 0
-  try {
-    const status = readFileSync(`/proc/${pid}/status`, 'utf8')
-    const rss = /VmRSS:\s*(\d+)\s*kB/.exec(status)
-    if (rss !== null) rssMb = Number(rss[1]) / 1024
-  } catch {
-    // /proc 不可用
-  }
   try {
     const children = readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim()
     childCount = children === '' ? 0 : children.split(/\s+/).length
@@ -75,6 +79,9 @@ export function readHostMetrics(): HostMetrics {
   }
   return {
     rssMb: Math.round(rssMb * 10) / 10,
+    heapUsedMb: Math.round(heapUsedMb * 10) / 10,
+    heapTotalMb: Math.round(heapTotalMb * 10) / 10,
+    externalMb: Math.round(externalMb * 10) / 10,
     cpuPct,
     ioReadMb: Math.round(ioRead / 1048576),
     ioWriteMb: Math.round(ioWrite / 1048576),

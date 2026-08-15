@@ -16,7 +16,11 @@ export interface VetAlarmWire {
 }
 
 export interface VetMetricsWire {
+  /** 进程总 RSS（MB）= DSH + 全部插件 + vet。 */
   rssMb: number
+  heapUsedMb: number
+  heapTotalMb: number
+  externalMb: number
   cpuPct: number
   ioReadMb: number
   ioWriteMb: number
@@ -209,6 +213,14 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
         }}
       >
         <ShieldIcon color={color} />
+        {metrics !== undefined && metrics.rssMb > 0 && (
+          <span
+            style={{ fontSize: 10, color: 'var(--dsw-alias-label-secondary, #6b7280)', fontWeight: 600, lineHeight: 1 }}
+            title="DSH + 全部插件总内存（同一进程，仅总量）"
+          >
+            ≈{Math.round(metrics.rssMb)}M
+          </span>
+        )}
         {count > 0 && (
           <span
             style={{
@@ -239,15 +251,22 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           </div>
           <div style={{ color: 'var(--dsw-alias-label-secondary, #6b7280)', marginBottom: 8 }}>{LEVEL_TEXT[level]}</div>
 
-          {/* 实时指标 */}
+          {/* 实时指标：进程总量 = DSH + 全部插件 */}
           {metrics !== undefined && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-              <Metric label="内存" value={`${metrics.rssMb} MB`} />
-              <Metric label="CPU" value={`${metrics.cpuPct}%`} />
-              <Metric label="I/O 读" value={`${metrics.ioReadMb} MB`} />
-              <Metric label="I/O 写" value={`${metrics.ioWriteMb} MB`} />
-              <Metric label="子进程" value={`${metrics.childCount >= 0 ? metrics.childCount : '—'}`} />
-              <Metric label="fd" value={`${metrics.fdCount >= 0 ? metrics.fdCount : '—'}`} />
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
+                <Metric label="总内存" value={`${metrics.rssMb} MB`} />
+                <Metric label="V8 堆" value={`${metrics.heapUsedMb}/${metrics.heapTotalMb} MB`} />
+                <Metric label="原生+外部" value={`${metrics.externalMb} MB`} />
+                <Metric label="CPU" value={`${metrics.cpuPct}%`} />
+                <Metric label="I/O 读" value={`${metrics.ioReadMb} MB`} />
+                <Metric label="I/O 写" value={`${metrics.ioWriteMb} MB`} />
+                <Metric label="子进程" value={`${metrics.childCount >= 0 ? metrics.childCount : '—'}`} />
+                <Metric label="fd" value={`${metrics.fdCount >= 0 ? metrics.fdCount : '—'}`} />
+              </div>
+              <div style={{ color: 'var(--dsw-alias-label-tertiary, #9ca3af)' }}>
+                总内存 = DSH 宿主 + 全部插件 + vet（同一进程）。Node 共享堆无法按插件拆分（无分配归因 API）；按需堆快照分析列为远期实验。
+              </div>
             </div>
           )}
 
