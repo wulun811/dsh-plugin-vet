@@ -246,9 +246,9 @@ function isDark(): boolean {
 
 /* ------------------------- 视图片段 ------------------------- */
 
-function panelStyle(pal: MorandiPalette): CSSProperties {
+function panelStyle(pal: MorandiPalette, width: number): CSSProperties {
   return {
-    width: 340,
+    width,
     flexShrink: 0,
     // 面板整体向下延伸（最高到视口 92%），日常内容无需滚动；极矮视口才出现滚动条。
     maxHeight: 'min(92vh, 800px)',
@@ -337,7 +337,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   const [toggling, setToggling] = useState(false)
   const [dark, setDark] = useState<boolean>(() => isDark())
   const [helpOpen, setHelpOpen] = useState(false)
-  const [fit, setFit] = useState<{ flip: boolean; introW: number }>({ flip: false, introW: 250 })
+  const [fit, setFit] = useState<{ mainW: number; introW: number }>({ mainW: 340, introW: 250 })
   const rootRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
   const openTimer = useRef<number | null>(null)
@@ -441,21 +441,26 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
     if (!open) setHelpOpen(false)
   }, [open])
 
-  // 介绍栏布局自适应：盾牌左侧空间够 → 并排（介绍栏在右）；不够 → 翻转（介绍栏在左），
-  // 且按剩余空间收窄。无论哪种，主框都钉在盾牌右缘，绝不被挤出去。
+  // 布局自适应：介绍栏永远贴在主框右侧（右缘 = 盾牌右缘）。总宽超过盾牌左侧可用空间时，
+  // 先收窄介绍栏（150-250），还不够再收窄主框（260-340），保证整个弹层不出视口。
   useEffect(() => {
     if (!open) return
     const measure = (): void => {
       const el = rootRef.current
       if (el === null) return
       const r = el.getBoundingClientRect()
-      const spaceLeft = r.left - 8
-      if (spaceLeft >= 340 + 8 + 250) {
-        setFit({ flip: false, introW: 250 })
-        return
+      const gap = 8
+      // 弹层右缘 = 盾牌右缘；左缘至少离视口左边 8px
+      const maxTotal = Math.max(0, r.right - gap - 8)
+      let mainW = 340
+      let introW = 250
+      if (mainW + gap + introW > maxTotal) {
+        introW = Math.max(150, maxTotal - mainW - gap)
+        if (introW === 150 && mainW + gap + 150 > maxTotal) {
+          mainW = Math.max(260, maxTotal - gap - 150)
+        }
       }
-      const w = Math.max(176, Math.min(250, spaceLeft - 340 - 8))
-      setFit({ flip: true, introW: w })
+      setFit({ mainW, introW })
     }
     measure()
     window.addEventListener('resize', measure)
@@ -530,12 +535,11 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
             right: 0,
             zIndex: 1000,
             display: 'flex',
-            flexDirection: fit.flip ? 'row-reverse' : 'row',
             alignItems: 'stretch',
             gap: 8,
           }}
         >
-          <div style={panelStyle(pal)} role="dialog" aria-label="vet 报警面板">
+          <div style={panelStyle(pal, fit.mainW)} role="dialog" aria-label="vet 报警面板">
           {/* 头部 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: color, display: 'inline-block' }} />
