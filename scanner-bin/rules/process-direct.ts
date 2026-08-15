@@ -38,6 +38,13 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
 
     if (severity === 'critical' && ctx.runtime === 'sandbox') severity = 'high'
 
+    // targetKind='generic'（scan_plugin 扫非 DSH 插件包/信任锚工具包）：process 访问是
+    // 能力触达面而非逃逸判定 → 降级 info，不进 verdict（PLAN §14.3 边界落地）
+    if (ctx.request.targetKind === 'generic' && severity !== 'info') {
+      severity = 'info'
+      message = '能力触达面（非 DSH 插件包）：' + message
+    }
+
     found.push({
       rule: 'R3',
       severity,

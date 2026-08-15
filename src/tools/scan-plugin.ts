@@ -1,4 +1,5 @@
-import { basename } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import { scan } from '../scanner/client.js'
@@ -6,12 +7,35 @@ import { listSourceFiles } from '../scanner/package-sources.js'
 import type { ScanRequest } from '../scanner/protocol.js'
 import type { PluginScorecard } from '../report/types.js'
 import { renderScorecard } from '../report/render.js'
+import { PACKAGE_NAME } from '../invariant.js'
 
 export interface ScanPluginArgs {
   target: 'dynamic-code' | 'package' | 'file'
   source?: string
   packagePath?: string
   reason?: string
+}
+
+/**
+ * 目标身份判定（PLAN §14.3 边界落地）：DSH 插件包（依赖 @deepseek-ai/* 或声明
+ * dsh/cordis bundle）→ 'plugin' 严格逃逸判定；否则 'generic'——process 访问降级为
+ * 能力触达面（info），避免把普通 npm 工具包/信任锚的合法宿主进程使用误报为逃逸。
+ */
+export function detectTargetKind(packagePath: string): 'plugin' | 'generic' {
+  let pkg: Record<string, unknown>
+  try {
+    pkg = JSON.parse(readFileSync(join(packagePath, 'package.json'), 'utf8')) as Record<string, unknown>
+  } catch {
+    return 'generic' // 无 package.json：无插件形态证据，保守走通用审计
+  }
+  if (pkg.name === PACKAGE_NAME) return 'generic' // vet 自身：信任锚工具包，process 为子进程实现
+  const deps: Record<string, unknown> = {
+    ...(pkg.dependencies as Record<string, unknown> | undefined),
+    ...(pkg.peerDependencies as Record<string, unknown> | undefined),
+  }
+  const hasDshDep = Object.keys(deps).some(k => k.startsWith('@deepseek-ai/'))
+  const hasBundleDecl = pkg.dsh !== undefined || pkg.cordis !== undefined
+  return hasDshDep || hasBundleDecl ? 'plugin' : 'generic'
 }
 
 export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; pluginName: string } {
@@ -30,7 +54,10 @@ export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; plug
     if (typeof args.packagePath !== 'string') throw new Error('vet: package 需要 packagePath')
     const files = listSourceFiles(args.packagePath)
     if (files.length === 0) throw new Error(`vet: ${args.packagePath} 下没有可扫描的源码`)
-    return { pluginName: basename(args.packagePath), request: { kind: 'files', files } }
+    return {
+      pluginName: basename(args.packagePath),
+      request: { kind: 'files', files, targetKind: detectTargetKind(args.packagePath) },
+    }
   }
   throw new Error(`vet: 未知 target ${String(args.target)}`)
 }

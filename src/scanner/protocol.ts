@@ -15,6 +15,8 @@ export interface ScanRequest {
   code?: string
   files?: string[]
   rules?: Record<string, boolean>
+  /** 扫描目标身份：'plugin'（DSH 插件包，严格逃逸判定，默认）| 'generic'（通用代码审计，R3 降级为能力触达面 info）。 */
+  targetKind?: 'plugin' | 'generic'
 }
 
 export interface Finding {

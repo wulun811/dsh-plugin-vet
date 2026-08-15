@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import * as vetPlugin from '../lib/index.js'
 import { apply } from '../lib/index.js'
-import { createScanPluginTool } from '../lib/tools/scan-plugin.js'
+import { scan } from '../lib/scanner-bin/engine.js'
+import { buildRequest, createScanPluginTool } from '../lib/tools/scan-plugin.js'
 import { installToolExecuteGuard } from '../lib/guards/tool-execute.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
@@ -251,5 +253,61 @@ describe('真实 cordis harness 挂载（防启动崩溃回归，B3）', () => {
       get invariants(): never { throw new Error('service not injected') },
     }
     expect(() => installInvariant(ctx as never)).not.toThrow()
+  })
+})
+
+describe('目标身份分级（targetKind，§14.3 边界落地）', () => {
+  const tmpPkg = (files: Record<string, string>): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-kind-'))
+    for (const [name, content] of Object.entries(files)) {
+      const p = join(dir, name)
+      mkdirSync(dirname(p), { recursive: true })
+      writeFileSync(p, content)
+    }
+    return dir
+  }
+
+  it('普通 npm 包（无 DSH 依赖）：process 降级 info，verdict clean', () => {
+    const dir = tmpPkg({ 'index.js': 'process.env.HOME' })
+    try {
+      const { request } = buildRequest({ target: 'package', packagePath: dir })
+      expect(request.targetKind).toBe('generic')
+      const res = scan(request)
+      expect(res.ok).toBe(true)
+      expect(res.report!.verdict).toBe('clean')
+      const r3 = res.report!.findings.find(f => f.rule === 'R3')
+      expect(r3).toBeDefined()
+      expect(r3!.severity).toBe('info')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('DSH 插件包（依赖 @deepseek-ai/cordis）：严格，process high → suspicious', () => {
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: 'evil-plugin', dependencies: { '@deepseek-ai/cordis': '^4.0.1' } }),
+      'index.js': 'process.env.HOME',
+    })
+    try {
+      const { request } = buildRequest({ target: 'package', packagePath: dir })
+      expect(request.targetKind).toBe('plugin')
+      const res = scan(request)
+      expect(res.report!.verdict).toBe('suspicious')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('vet 自身（PACKAGE_NAME）→ generic（信任锚豁免）', () => {
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: PACKAGE_NAME, dependencies: { '@deepseek-ai/cordis': '^4' } }),
+      'index.js': 'process.execPath',
+    })
+    try {
+      const { request } = buildRequest({ target: 'package', packagePath: dir })
+      expect(request.targetKind).toBe('generic')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
