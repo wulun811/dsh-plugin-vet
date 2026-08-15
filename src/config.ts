@@ -14,6 +14,12 @@ export interface VetConfig {
   rules: Record<string, boolean>
   denyOn: 'critical' | 'suspicious'
   allowlist: string[]
+  /** D22：运行时守卫（默认 off——性能/稳定代价 opt-in）。'watch' = T1 哨兵 + T2 钩子，只报警不动作。 */
+  runtimeGuard: 'off' | 'watch'
+  runtimeIntervalMs: number
+  runtimeMemLimitMb: number
+  runtimeForkBurstN: number
+  runtimeFdLimit: number
 }
 
 export const VetConfigSchema: z<VetConfig> = z.object({
@@ -29,6 +35,11 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   rules: z.dict(z.boolean()).default({}),
   denyOn: z.union([z.const('critical'), z.const('suspicious')]).default('critical'),
   allowlist: z.array(z.string()).default([]),
+  runtimeGuard: z.union([z.const('off'), z.const('watch')]).default('off'),
+  runtimeIntervalMs: z.natural().default(2000),
+  runtimeMemLimitMb: z.natural().default(2048),
+  runtimeForkBurstN: z.natural().default(5),
+  runtimeFdLimit: z.natural().default(512),
 })
 
 /** load 时 fail-loud：provider/model 必须成对。 */

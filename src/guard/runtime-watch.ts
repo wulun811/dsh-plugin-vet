@@ -1,0 +1,143 @@
+/**
+ * T1 哨兵（D22）：旁路子进程监视宿主进程 /proc——VmRSS（内存）、task children（子进程数）、
+ * fd 数。只报警不动作；归因粒度 = 宿主进程全局（插件共用进程，无法到插件级，见 PLAN §14.5）。
+ * analyzeSample 是纯函数（可单测）；sidecarMain 是子进程入口（--vet-sidecar argv 触发）。
+ */
+import { readFileSync, readdirSync } from 'node:fs'
+
+export interface ProcSample {
+  rssKb: number
+  /** -1 = 不可读（非 Linux / 权限不足）。 */
+  childCount: number
+  /** -1 = 不可读。 */
+  fdCount: number
+  at: number
+}
+
+export interface WatchConfig {
+  intervalMs: number
+  /** VmRSS 超限 → red（绝对阈值）。 */
+  memLimitMb: number
+  /** 单轮子进程增量超限 → red（fork 炸弹）。 */
+  forkBurstN: number
+  /** fd 数超限 → yellow。 */
+  fdLimit: number
+}
+
+export interface WatchAlarm {
+  id: string
+  severity: 'yellow' | 'red'
+  source: 't1'
+  kind: 'mem' | 'fork' | 'fd'
+  message: string
+  target?: string
+  at: number
+}
+
+export const DEFAULT_WATCH_CONFIG: WatchConfig = {
+  intervalMs: 2000,
+  memLimitMb: 2048,
+  forkBurstN: 5,
+  fdLimit: 512,
+}
+
+/** 读 /proc/<pid> 快照；不可用（非 Linux / 权限不足）返回 null。 */
+export function readProcSample(pid: number): ProcSample | null {
+  try {
+    const status = readFileSync(`/proc/${pid}/status`, 'utf8')
+    const rss = /VmRSS:\s*(\d+)\s*kB/.exec(status)
+    if (rss === null) return null
+    let childCount = -1
+    try {
+      const children = readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim()
+      childCount = children === '' ? 0 : children.split(/\s+/).length
+    } catch {
+      childCount = -1
+    }
+    let fdCount = -1
+    try {
+      fdCount = readdirSync(`/proc/${pid}/fd`).length
+    } catch {
+      fdCount = -1
+    }
+    return { rssKb: Number(rss[1]), childCount, fdCount, at: Date.now() }
+  } catch {
+    return null
+  }
+}
+
+/** 相邻两样本差分判定（纯函数）：返回本轮报警（跨轮去重由 VetStatus.record 负责）。 */
+export function analyzeSample(prev: ProcSample | null, curr: ProcSample, cfg: WatchConfig): WatchAlarm[] {
+  const out: WatchAlarm[] = []
+  const memMb = curr.rssKb / 1024
+  if (memMb > cfg.memLimitMb) {
+    out.push({
+      id: `t1:mem:${cfg.memLimitMb}`,
+      severity: 'red',
+      source: 't1',
+      kind: 'mem',
+      message: `宿主进程内存超限：${memMb.toFixed(0)} MB（阈值 ${cfg.memLimitMb} MB）`,
+      target: `VmRSS=${curr.rssKb}kB`,
+      at: curr.at,
+    })
+  }
+  if (prev !== null && prev.childCount >= 0 && curr.childCount >= 0
+    && curr.childCount - prev.childCount > cfg.forkBurstN) {
+    out.push({
+      id: `t1:fork:${cfg.forkBurstN}`,
+      severity: 'red',
+      source: 't1',
+      kind: 'fork',
+      message: `子进程数突增：${prev.childCount} → ${curr.childCount}（疑似 fork 炸弹）`,
+      target: `delta=${curr.childCount - prev.childCount}`,
+      at: curr.at,
+    })
+  }
+  if (curr.fdCount > cfg.fdLimit) {
+    out.push({
+      id: `t1:fd:${cfg.fdLimit}`,
+      severity: 'yellow',
+      source: 't1',
+      kind: 'fd',
+      message: `文件描述符数超限：${curr.fdCount}（阈值 ${cfg.fdLimit}）`,
+      target: `fds=${curr.fdCount}`,
+      at: curr.at,
+    })
+  }
+  return out
+}
+
+/**
+ * 哨兵子进程入口：监视 PPID（宿主）。宿主退出（/proc/<ppid>/stat 不可读）即自杀。
+ * 每轮把报警以 JSON 行写到 stdout，宿主侧按行解析。
+ */
+export function sidecarMain(cfg: WatchConfig): void {
+  const hostPid = process.ppid
+  let prev: ProcSample | null = null
+  const tick = (): void => {
+    try {
+      readFileSync(`/proc/${hostPid}/stat`, 'utf8')
+    } catch {
+      process.exit(0)
+    }
+    const curr = readProcSample(hostPid)
+    if (curr === null) return
+    for (const alarm of analyzeSample(prev, curr, cfg)) {
+      process.stdout.write(JSON.stringify(alarm) + '\n')
+    }
+    prev = curr
+  }
+  tick()
+  const timer = setInterval(tick, cfg.intervalMs)
+  if (typeof timer.unref === 'function') timer.unref()
+}
+
+// 子进程入口分发：仅当以 --vet-sidecar 启动时进入哨兵模式（vitest/宿主正常 import 不受影响）。
+const sidecarIdx = process.argv.indexOf('--vet-sidecar')
+if (sidecarIdx !== -1) {
+  const intervalMs = Number(process.argv[sidecarIdx + 1] ?? DEFAULT_WATCH_CONFIG.intervalMs)
+  const memLimitMb = Number(process.argv[sidecarIdx + 2] ?? DEFAULT_WATCH_CONFIG.memLimitMb)
+  const forkBurstN = Number(process.argv[sidecarIdx + 3] ?? DEFAULT_WATCH_CONFIG.forkBurstN)
+  const fdLimit = Number(process.argv[sidecarIdx + 4] ?? DEFAULT_WATCH_CONFIG.fdLimit)
+  sidecarMain({ intervalMs, memLimitMb, forkBurstN, fdLimit })
+}

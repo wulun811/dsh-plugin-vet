@@ -29,6 +29,8 @@
 ### 2.1 一句话
 
 > 安装任何插件前，先让 dsh-plugin-vet 走一遍：静态规则给出 verdict（谁也无法伪造），LLM 按编排查敏感点与质量问题（谁也无法替代），最终一张两分制评分卡交给人/模型决定。
+>
+> **产品定位（D21）：监控报警器，不是打手。** vet 只做「检查 → 报警 → 给建议」：写时查（静态扫描）、跑时盯（运行时守卫）、报警面（评分卡 + GUI 盾牌状态灯）。**vet 永不替用户动手**——不自动卸载、不自动杀进程、不自动改配置；deny 模式是部署者显式开启的 opt-in 且不构成产品身份。最终怎么处置，由用户在自己的 DSH 上操作决定。
 
 ### 2.2 信任边界（本产品最重要的设计约束）
 
@@ -38,6 +40,7 @@
 4. **两分制不合并**：`staticScore`（确定性规则）与 `qualityScore`（LLM 主观维度）分开呈现，禁止合成单一总分——合成会让 LLM 污染 verdict 边界。
 5. **不把本产品自身称为安全边界**。README Known Limitations 明说：静态扫描是恶意代码的"减速带+取证层"，不是安全边界（与 DSH 官方立场对齐）；产品价值是把"未知"变成"已知"，把"信任"变成"可决策的证据"。
 6. **fail-open 起步**：默认 `mode: 'report'`（只报告不拦截），`mode: 'deny'` 由部署者显式开启。用户已拍板。
+7. **alarm-only（D21，用户指令）**：产品身份 = 监控报警器。运行时守卫只 watch 不 kill；vet 的自动行为（deny 拦截、fiber.dispose）仅存在于部署者显式开启的 opt-in 模式，且文档明示「脱离产品定位，风险自担」。报警只附建议（怎么修），处置动作永远留给用户在 DSH 上操作。
 
 ### 2.3 产品叙事
 
@@ -712,7 +715,8 @@ defineTool({
 | D18 | **现场验证（web profile 实装）**：R5 在真实 apply(ctx) 参数形态下 isShadowed 误判 → 永远漏报（矩阵用顶层代码掩盖），LLM 审计现场发现，修复 + 矩阵改真实形态（109 tests，5f09827）；vet 自扫验证——scanner-bin 的合法 process 使用（env/stdin/stdout/execPath）被 R3 报 high，记录为"宿主工具包合法 process 靠信任豁免"边界（README 能力清单）；web 插件列表搜不到 = **vet 未发布 npm（404 实锤）**，阶段 6 publish 后才会出现在可安装列表 | 现场 scan_plugin/audit_plugin 实测；npm view |
 | D19 | **评分模型修正（用户反馈驱动）**：staticScore 原含 info 级扣分（权重 2）——vet 自扫 68 分（R3/R6/R9 全 info）引发"低分=插件不好"质疑。修正：**info 级权重 2→0**（字符串特征/能力触达面/超时跳过是提示与取证，不构成威胁密度；score 只反映 decisive critical/high/medium），info 明细仍列 findings 并在评分卡 explainScore 展示；R9-3 循环内 += 增加 isArithmeticRhs 降噪（右侧算术表达式=数值累加，非字符串拼接，跳过）；vet 自扫验证 verdict=clean score=100（R3×9/R6×11/R9×1/R10×1 全 info） | 用户反馈：低分不可解释；vet 自扫实测 |
 | D20 | **全量扫描验证 + generic 降级扩展**：批量扫描 dsh CLI 依赖树的 195 个真实安装 @deepseek-ai 官方包（6.5s）——首轮 44 suspicious 全为官方包正常功能误报（loader/worker/bundle 的 require+new Function、native postinstall、minified for(;;) 解析循环）→ generic 模式扩展降级：R2 动态执行 high/critical→medium、R10 install 钩子 high→info、R9 无出口循环 high→medium（R3 已降）；修复后 **195/195 全 clean**（117 个 100 分），0 critical 0 suspicious；第三方恶意插件（plugin 模式）判定不变 | 批量扫描实测：195 包 / 44 误报归零 |
-
+| D21 | **产品定位变更为「监控报警器」（用户指令）**：vet = 检查→报警→给建议，**永不替用户动手**（不自动卸载/杀进程/改配置）；deny 保留为部署者显式 opt-in（脱离产品身份，风险自担）；运行时守卫只 watch 不 kill；PLAN §2 / README 同步改写 | 用户指令：只报警不搞事，用户自行操作 DSH |
+| D22 | **GUI 盾牌可行性确认 + 运行时守卫两层（T1/T2）**：web 客户端是插件体系——dsh.client 声明包被 client-modules 扫描进 window.__DSH_BOOT__（**不限 @deepseek-ai/***，第三方可进浏览器花名册）；顶栏孔位 conversation.session.header.actions（ui-conversation 声明）；数据通道 = 宿主 webServer /vet/status.json（ctx.get('webServer') 可选服务，非 web profile no-op）+ 浏览器轮询。运行时守卫：T1 哨兵（子进程读 /proc 宿主 VmRSS/子进程数/fd，报警 JSON 行）；T2 进程内钩子（包装 fs/child_process，栈归因→插件包名，敏感路径/破坏性删除/spawn 报警，官方归因降噪；旁路：ESM 具名导入快照、worker 独立 realm、原生插件）；默认 runtimeGuard: 'off'（性能/稳定代价 opt-in），watch 只报警不动作 | 源码核实：client-modules 扫描逻辑、ui-conversation contract/slots.ts:52-68、ui-subagent client 模式、host/webserver register API |
 
 ## 14. 未来路线（v1.1 后，未排期）
 
@@ -746,4 +750,22 @@ defineTool({
 ### 14.4 运行时配合（上游建议，vet 不实现）
 
 动态插件跑主进程 `node:vm` 无堆上限（vm 无 resourceLimits），分配炸弹可拖垮整个 harness。vet 侧：R9-1 静态标记 + deny 模式拦截明确模式；真隔离（插件跑进有堆上限的 worker/子进程）是 DSH 上游 cordis-host-runner 改造，记录为建议项。
+
+### 14.5 运行时监控（D22：T1 哨兵 + T2 进程内钩子 + 盾牌状态灯）
+
+**定位**：alarm-only。任何一层只报警给建议，不自动拦截/杀进程/卸载（§2.1 D21）。
+
+| 层 | 机制 | 能抓 | 代价/局限 |
+|---|---|---|---|
+| T1 哨兵 | 子进程每 intervalMs 读 /proc/<宿主pid>：VmRSS、task children 数、fd 数 | 内存炸弹、fork 炸弹、fd 激增 | 10-30MB + 轮询 CPU；粒度=宿主全局（插件共用进程，无法归因） |
+| T2 钩子 | 进程内包装 fs/child_process 导出；危险操作取栈→根目录→插件包名（best-effort 归因） | 敏感路径写入/删除（/etc、~/.ssh、.env…）、第三方 spawn、读密钥文件 | 每次调用包装开销（I/O 密集 <5%，热点 10-20% 级）；旁路：ESM 具名导入快照、worker_threads 独立 realm、原生插件、process.binding |
+| 盾牌 | webServer /vet/status.json + 浏览器 5s 轮询；注册进 conversation.session.header.actions | 用户可见绿/黄/红灯 + 报警计数 | 需要 dsh web 重启激活；client 半区不能编译期依赖私有 @deepseek-ai/dsh-client-*（本地最小类型 + esbuild 打包 react） |
+
+**已知边界（README 同步）**：T1/T2 是"防盗摄像头"不是"保险柜"——抓明显搞事，抓不了 worker/原生模块/低流量慢外联；T2 对官方包 spawn 降噪（官方能力授权）；网络行为监控（http/net 包装）v1 不做（宿主自身流量噪声大），列远期。
+
+### 14.6 待办数据源与反混淆（可行性已评估，未排期）
+
+1. **R10 CVE 匹配（现在就能做，提示级）**：用现成公开库 **OSV.dev**（免费、无 key、覆盖 npm），不自己建库（无漏洞数据资产）。实现 = 依赖清单 → OSV 查询 → 命中 → 本地缓存（TTL）→ 报告 info（**绝不进 verdict**——CVE 库噪音多，命中≠被攻击）。代价：扫描变慢（网络）、要联网（离线降级）、隐私（依赖清单出网，可关开关）。NVD（要 key）/GitHub Advisory 备选。
+2. **轻量反混淆（现在能做，确定性）**：扩展 stringyValue 为纯 AST 常量求值器（字面量拼接 + String.fromCharCode 链 + base64 字面量解码 + 简单 XOR），修 D14 记录的 base64 混淆漏检；**绝不 eval**（保住扫描器物理隔离）。重量级反混淆（控制流平坦化等）不做（军备竞赛）。
+3. **scanner daemon 常驻**（D17 远期）：省 spawn 固定开销，保持子进程隔离。
 

@@ -3,6 +3,7 @@ import type { ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { VetConfig } from '../config.js'
 import { scan } from '../scanner/client.js'
 import type { ScanRequest, Verdict } from '../scanner/protocol.js'
+import type { VetStatus } from '../guard/status.js'
 
 /** 拦截目标：三大模型代码执行入口 + workflow（PLAN.md §6.6 A4）。 */
 const TARGET_TOOLS = new Set(['cordis_define', 'cordis_run', 'run_code', 'workflow'])
@@ -47,7 +48,7 @@ function codePayloads(exec: ToolExecution): Payload[] {
  * tools/execute 守卫（timeout-policy 模式）。report：结果文本加 VET 前缀，不拦截；
  * deny + verdict ≥ denyOn：不调 next() 直接返回 isError（短路链路）。
  */
-export function installToolExecuteGuard(ctx: Context, config: VetConfig): void {
+export function installToolExecuteGuard(ctx: Context, config: VetConfig, status?: VetStatus): void {
   ctx.on('tools/execute', async (exec: ToolExecution, next) => {
     if (!TARGET_TOOLS.has(exec.name)) return next()
     const payloads = codePayloads(exec)
@@ -60,6 +61,7 @@ export function installToolExecuteGuard(ctx: Context, config: VetConfig): void {
       const res = await scan(request, { timeoutMs: config.scannerTimeoutMs })
       if (res.ok && res.report !== undefined) {
         notes.push(`VET ${exec.name}: ${res.report.verdict} (${res.report.staticScore})`)
+        status?.noteScan({ pluginName: exec.name, verdict: res.report.verdict, staticScore: res.report.staticScore, at: Date.now() })
         if (RANK[res.report.verdict] > RANK[worst]) worst = res.report.verdict
       } else {
         notes.push(`VET ${exec.name}: scan-error (${res.error ?? 'unknown'})`)

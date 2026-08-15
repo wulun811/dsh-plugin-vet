@@ -2,9 +2,14 @@
 
 > 安装任何插件前，先让 dsh-plugin-vet 走一遍：静态规则给出 verdict（确定性、不可伪造），
 > LLM 按编排查敏感点与质量问题（谁也无法替代），最终一张两分制评分卡交给人/模型决定。
+>
+> **定位（D21）：监控报警器，不是打手。** vet 只做「检查 → 报警 → 给建议」：写时查（静态扫描）、
+> 跑时盯（运行时守卫）、报警面（评分卡 + GUI 盾牌状态灯）。**vet 永不替用户动手**——不自动卸载、
+> 不自动杀进程、不自动改配置；deny 模式是部署者显式开启的 opt-in，不构成产品身份。最终怎么处置，
+> 由用户在自己的 DSH 上操作决定。
 
 @jieai/dsh-plugin-vet 是 deepseek-harness 生态的第一个"信任层"插件：占据
-**下载 → 扫描 → 审计 → 评分 → 决定** 这一整套信任流水线。**不做**插件市场本体（目录/分发）。
+**下载 → 扫描 → 审计 → 评分 → 决定 → 运行时盯梢** 这一整套信任流水线。**不做**插件市场本体（目录/分发）。
 
 ---
 
@@ -32,6 +37,11 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | `rules` | `{}`（全开） | 规则开关（R1-R7、R9-R11） |
 | `denyOn` | `critical` | `mode: deny` 时的拦截阈值 |
 | `allowlist` | `[]` | 包名/插件 id 白名单（跳过扫描） |
+| `runtimeGuard` | `off` | D22 运行时守卫（性能/稳定代价 opt-in）：`off` 关；`watch` 启用 T1 哨兵 + T2 钩子，**只报警不动作** |
+| `runtimeIntervalMs` | `2000` | T1 哨兵 /proc 采样间隔 |
+| `runtimeMemLimitMb` | `2048` | T1 内存报警阈值（宿主 VmRSS，超限 → red） |
+| `runtimeForkBurstN` | `5` | T1 子进程突增报警阈值（单轮增量，→ red） |
+| `runtimeFdLimit` | `512` | T1 文件描述符报警阈值（→ yellow） |
 
 `@deepseek-ai/*` 官方包默认豁免（内置信任）。
 
@@ -44,6 +54,10 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 
 - **`internal/plugin` 自动扫描**（`autoScan: true`）：新装第三方 npm 包加载时自动静态扫描；`deny` 模式 + verdict ≥ `denyOn` → 回滚加载。
 - **`tools/execute` 拦截**：`cordis_define` / `cordis_run` / `run_code` / `workflow` 执行前扫描代码字符串；`report` 模式在结果文本加 `VET:` 前缀，`deny` 模式直接拦截（isError）。
+- **运行时守卫（D22，`runtimeGuard: watch`）**——alarm-only：
+  - **T1 哨兵**：旁路子进程每 `runtimeIntervalMs` 读宿主 /proc（VmRSS / 子进程数 / fd 数），报警 JSON 行回传宿主 → 盾牌变黄/红。
+  - **T2 钩子**：进程内包装 fs / child_process，危险操作（敏感路径写入/删除、读密钥文件、第三方 spawn）取栈归因到插件包名后报警；官方包归因的 spawn 降噪（能力授权）。**从不阻断调用**。
+- **GUI 盾牌（D22）**：浏览器半区注册进 `conversation.session.header.actions`，轮询 /vet/status.json 显示绿/黄/红灯 + 报警计数。激活需 `dsh web` 重启（重启后 client-modules 才扫描到 `dsh.client` 声明）。
 
 ## 静态规则表（R1-R11）
 
@@ -92,6 +106,14 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | R6 | 字符串粗扫：拼接逃逸特征、`getBuiltinModule`/\`child_process\`/危险 require 模块引用、混淆特征（`String.fromCharCode`/\`Buffer.from(base64)\`/\`atob(\`/\`charCodeAt\`） | info/heuristic |
 | R8 | 扫描超时/文件过大跳过 | info 元规则 |
 
+### 运行时监控（D22，`runtimeGuard: watch` 时启用）——只报警
+
+| 层 | 机制 | 能抓 | 局限 |
+|---|---|---|---|
+| T1 哨兵 | 子进程轮询宿主 /proc | 内存炸弹（>memLimit）、fork 炸弹（子进程突增）、fd 激增 | 粒度=宿主全局（插件共用进程，无法归因到插件） |
+| T2 钩子 | 进程内包装 fs/child_process | 敏感路径写入/删除（/etc、~/.ssh、.env…）、读密钥文件、第三方 spawn | 栈归因 best-effort；每次调用包装开销（I/O 密集 <5%，热点 10-20% 级） |
+| 盾牌 | 浏览器 `conversation.session.header.actions` + /vet/status.json | 绿/黄/红灯 + 报警计数 | 需 `dsh web` 重启激活 |
+
 ### 明确不检测（实测验证）
 
 | 形态 | 实测结果 |
@@ -112,6 +134,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 4. **两分制不合并**——禁止合成单一总分，防止 LLM 污染 verdict 边界。
 5. **本产品不是安全边界**——是恶意代码的"减速带+取证层"（与 DSH 官方立场对齐）。
 6. **fail-open 起步**——默认 `mode: report`，`deny` 由部署者显式开启。
+7. **alarm-only（D21）**——运行时守卫只 watch 不 kill；vet 的自动行为（deny 拦截）仅存在于部署者显式开启的 opt-in 模式。报警只附建议，处置永远留给用户在 DSH 上操作。
 
 ## Known Limitations
 
@@ -124,13 +147,17 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 7. **`@deepseek-ai/*` 默认信任**：未来若官方生态被攻破需收紧（v1 留开关）。
 8. **R10 已知漏洞匹配未做**：install 钩子与依赖清单已扫；CVE 匹配需数据源选型（OSV/NVD），待定。
 9. **R11 只认 `fs.*` 形态**：解构/别名调用（`const { unlinkSync } = require('fs')`）与运行时路径漏检（已实测记录，属静态边界）。
+10. **T1/T2 是"防盗摄像头"不是"保险柜"**：抓明显搞事（内存/fork 炸弹、敏感路径操作、第三方 spawn），抓不了 worker 线程/原生插件/低流量慢外联；T2 对 ESM 具名导入快照、`process.binding` 等旁路不覆盖。
+11. **T2 归因与降噪**：栈归因是 best-effort（共享服务/定时器跨插件会误归因）；官方包 spawn 默认不报警（能力授权）。
+12. **盾牌激活需要 `dsh web` 重启**：client-modules 在启动时扫描 `dsh.client` 声明；重启前浏览器不会加载盾牌，但 /vet/status.json 端点与运行时守卫（宿主侧）重启即生效。
+13. **运行时守卫默认关闭**（`runtimeGuard: 'off'`）：包装 fs/child_process 有性能与稳定代价，opt-in 开启。
 
 ## 开发
 
 ```sh
 npm run build       # scanner-bin + src 编译到 lib/
 npm run typecheck   # tsc --noEmit
-npm test            # 构建 + vitest（105 用例）
+npm test            # 构建 + vitest（138 用例）
 ```
 
 目录：`scanner-bin/` 静态引擎（独立进程）；`src/` 插件本体（tools/guards/audit/report）；`test/` fixtures + 单测。权威计划见 `PLAN.md`（v1.1）。

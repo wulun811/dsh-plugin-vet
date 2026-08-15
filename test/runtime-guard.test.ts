@@ -1,0 +1,176 @@
+import { describe, expect, it } from 'vitest'
+import { VetStatus } from '../src/guard/status.js'
+import { analyzeSample, type ProcSample, type WatchConfig } from '../src/guard/runtime-watch.js'
+import {
+  classifyOp, isSensitivePath, patchModule, pluginFromStack, DEFAULT_HOOK_CONFIG,
+} from '../src/guard/runtime-hooks.js'
+
+const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512 }
+
+function sample(partial: Partial<ProcSample>): ProcSample {
+  return { rssKb: 512 * 1024, childCount: 0, fdCount: 10, at: Date.now(), ...partial }
+}
+
+describe('VetStatus（盾牌聚合器）', () => {
+  it('green 初始态', () => {
+    const s = new VetStatus()
+    const snap = s.snapshot()
+    expect(snap.level).toBe('green')
+    expect(snap.alarmCount).toBe(0)
+  })
+
+  it('yellow 报警 → yellow；同 id 窗口内去重', () => {
+    const s = new VetStatus({ dedupeWindowMs: 60_000 })
+    const alarm = { id: 't1:fd:512', severity: 'yellow' as const, source: 't1' as const, kind: 'fd', message: 'x', at: Date.now() }
+    expect(s.record(alarm)).toBe('new')
+    expect(s.record({ ...alarm, at: Date.now() + 1000 })).toBe('deduped')
+    expect(s.snapshot().level).toBe('yellow')
+    expect(s.snapshot().alarmCount).toBe(1)
+  })
+
+  it('red 报警压过 yellow → red', () => {
+    const s = new VetStatus()
+    s.record({ id: 'a', severity: 'yellow', source: 't2', kind: 'fs-write', message: 'y', at: Date.now() })
+    s.record({ id: 'b', severity: 'red', source: 't1', kind: 'mem', message: 'r', at: Date.now() })
+    expect(s.snapshot().level).toBe('red')
+  })
+
+  it('窗口外的同 id 重新报警', () => {
+    const s = new VetStatus({ dedupeWindowMs: 10 })
+    const alarm = { id: 't1:fd:512', severity: 'yellow' as const, source: 't1' as const, kind: 'fd', message: 'x', at: Date.now() - 1000 }
+    expect(s.record(alarm)).toBe('new')
+    expect(s.record({ ...alarm, at: Date.now() })).toBe('new')
+    expect(s.snapshot().alarmCount).toBe(2)
+  })
+
+  it('alarmMax 环形截断', () => {
+    const s = new VetStatus({ alarmMax: 3, dedupeWindowMs: 0 })
+    for (let i = 0; i < 5; i++) {
+      s.record({ id: `a${i}`, severity: 'yellow', source: 't2', kind: 'fs-write', message: `m${i}`, at: Date.now() + i })
+    }
+    expect(s.snapshot().alarmCount).toBe(3)
+    expect(s.snapshot().alarms[0].id).toBe('a4')
+  })
+
+  it('noteScan suspicious → yellow 抬升', () => {
+    const s = new VetStatus()
+    expect(s.snapshot().level).toBe('green')
+    s.noteScan({ pluginName: 'evil', verdict: 'suspicious', staticScore: 40, at: Date.now() })
+    expect(s.snapshot().level).toBe('yellow')
+    s.noteScan({ pluginName: 'good', verdict: 'clean', staticScore: 100, at: Date.now() })
+    expect(s.snapshot().level).toBe('green')
+  })
+})
+
+describe('analyzeSample（T1 差分判定）', () => {
+  it('内存超限 → red', () => {
+    const alarms = analyzeSample(null, sample({ rssKb: 2048 * 1024 }), CFG)
+    expect(alarms).toHaveLength(1)
+    expect(alarms[0]).toMatchObject({ severity: 'red', kind: 'mem' })
+  })
+
+  it('fork 突增 → red（prev 为 null 不误报）', () => {
+    expect(analyzeSample(null, sample({ childCount: 20 }), CFG)).toHaveLength(0)
+    const alarms = analyzeSample(sample({ childCount: 1 }), sample({ childCount: 20 }), CFG)
+    expect(alarms).toHaveLength(1)
+    expect(alarms[0]).toMatchObject({ severity: 'red', kind: 'fork' })
+  })
+
+  it('fd 超限 → yellow', () => {
+    const alarms = analyzeSample(null, sample({ fdCount: 600 }), CFG)
+    expect(alarms).toHaveLength(1)
+    expect(alarms[0]).toMatchObject({ severity: 'yellow', kind: 'fd' })
+  })
+
+  it('稳态无报警', () => {
+    expect(analyzeSample(sample({}), sample({}), CFG)).toHaveLength(0)
+  })
+})
+
+describe('isSensitivePath / classifyOp（T2 分类）', () => {
+  it('敏感路径判定', () => {
+    expect(isSensitivePath('/etc/passwd', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/etc', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/etcetera/foo', DEFAULT_HOOK_CONFIG)).toBe(false)
+    expect(isSensitivePath('/home/user/.ssh/id_rsa', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/home/user/.env.local', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/home/user/project/src/index.ts', DEFAULT_HOOK_CONFIG)).toBe(false)
+  })
+
+  it('敏感路径删除 → red fs-destroy', () => {
+    const alarm = classifyOp({ module: 'fs', op: 'rmSync', args: ['/etc/hosts'] }, DEFAULT_HOOK_CONFIG)
+    expect(alarm).toMatchObject({ severity: 'red', kind: 'fs-destroy' })
+  })
+
+  it('敏感路径写入 → yellow fs-write', () => {
+    const alarm = classifyOp({ module: 'fs', op: 'writeFile', args: ['/home/user/.npmrc', 'x'] }, DEFAULT_HOOK_CONFIG)
+    expect(alarm).toMatchObject({ severity: 'yellow', kind: 'fs-write' })
+  })
+
+  it('敏感路径读取 → yellow fs-read', () => {
+    const alarm = classifyOp({ module: 'fs', op: 'readFileSync', args: ['/home/user/.ssh/id_ed25519'] }, DEFAULT_HOOK_CONFIG)
+    expect(alarm).toMatchObject({ severity: 'yellow', kind: 'fs-read' })
+  })
+
+  it('普通路径写入不报警', () => {
+    expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/home/user/a.txt', 'x'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+  })
+
+  it('child_process spawn 一律 yellow', () => {
+    const alarm = classifyOp({ module: 'child_process', op: 'exec', args: ['curl http://x'] }, DEFAULT_HOOK_CONFIG)
+    expect(alarm).toMatchObject({ severity: 'yellow', kind: 'spawn' })
+  })
+
+  it('对象参数取 path', () => {
+    const alarm = classifyOp({ module: 'fs', op: 'rm', args: [{ path: '/etc/passwd', recursive: true }] }, DEFAULT_HOOK_CONFIG)
+    expect(alarm).toMatchObject({ severity: 'red' })
+  })
+})
+
+describe('pluginFromStack（栈归因）', () => {
+  it('file:// 帧命中插件根 → 包名', () => {
+    const roots = new Map([['/app/node_modules/evil-plugin/lib', 'evil-plugin']])
+    const stack = 'Error\n    at wrapper (/app/node_modules/evil-plugin/lib/index.js:10:5)\n    at Object.<anonymous> (/app/main.js:1:1)'
+    expect(pluginFromStack(stack, roots)).toBe('evil-plugin')
+  })
+
+  it('裸路径帧命中 → 包名；未命中 → undefined', () => {
+    const roots = new Map([['/x/lib', '@scope/pkg']])
+    expect(pluginFromStack('Error\n    at foo (/x/lib/a.js:1:1)', roots)).toBe('@scope/pkg')
+    expect(pluginFromStack('Error\n    at foo (/other/b.js:1:1)', roots)).toBeUndefined()
+  })
+
+  it('空映射 / 空栈 → undefined', () => {
+    expect(pluginFromStack(undefined, new Map())).toBeUndefined()
+    expect(pluginFromStack('Error', new Map([['/x', 'x']]))).toBeUndefined()
+  })
+})
+
+describe('patchModule（包装 + 恢复）', () => {
+  it('危险操作报警、普通操作直通、disposer 恢复', () => {
+    const calls: string[] = []
+    const fake = {
+      writeFile: (p: string) => { calls.push(`write:${p}`) },
+      readFile: (p: string) => { calls.push(`read:${p}`) },
+    }
+    const alarms: string[] = []
+    const dispose = patchModule(
+      fake as unknown as Record<string, unknown>,
+      'fs',
+      DEFAULT_HOOK_CONFIG,
+      a => { alarms.push(a.kind) },
+      () => new Map(),
+    )
+    ;(fake as unknown as { writeFile: (p: string) => void }).writeFile('/home/user/.env')
+    ;(fake as unknown as { readFile: (p: string) => void }).readFile('/home/user/a.txt')
+    expect(alarms).toEqual(['fs-write'])
+    expect(calls).toEqual(['write:/home/user/.env', 'read:/home/user/a.txt'])
+
+    dispose()
+    const restored = fake as unknown as Record<string, unknown>
+    expect(restored.writeFile).toBeTypeOf('function')
+    // 恢复后调用不再报警
+    ;(fake as unknown as { writeFile: (p: string) => void }).writeFile('/etc/x')
+    expect(alarms).toEqual(['fs-write'])
+  })
+})
