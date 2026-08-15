@@ -593,14 +593,14 @@ defineTool({
 
 ### 9.3 验收标准（Definition of Done）
 
-- [ ] 7 条规则全部实现且有 fixture 正/负例覆盖
-- [ ] scanner 单测全绿；评分公式边界用例覆盖 verdict 门禁
-- [ ] audit 4 轮编排在真实 `ctx.llm`（DeepSeek）下跑通，评分卡 schema 校验通过
-- [ ] 三守卫（internal/plugin、tools/execute、两工具）注册无异常；invariant 断言通过
-- [ ] 本地 e2e 脚本可跑：report 不拦 / deny 拦截 / scan_plugin / auto-scan 四场景验证
-- [ ] `dsh plugin --profile vet-test add <path>` 安装链路打通（bundle patch 生效）
-- [ ] README 完成：安装、Config、规则表、信任边界、Known Limitations
-- [ ] `pnpm pack --dry-run` 产物含 lib/scanner-bin/cordis.patch.yml/README
+- [x] 7 条规则全部实现且有 fixture 正/负例覆盖
+- [x] scanner 单测全绿；评分公式边界用例覆盖 verdict 门禁
+- [ ] audit 4 轮编排在真实 `ctx.llm`（DeepSeek）下跑通，评分卡 schema 校验通过（fake llm 已全绿；真实模型待 DEEPSEEK_API_KEY）
+- [x] 三守卫（internal/plugin、tools/execute、两工具）注册无异常；invariant 断言通过
+- [x] 本地 e2e 脚本可跑：report 不拦 / deny 拦截 / scan_plugin / auto-scan（keyless 部分已跑通 PASS；会话级断言按惯例无 key 自动跳过）
+- [x] `dsh plugin --profile vet-test add <path>` 安装链路打通（bundle patch 生效，已实测 vet-test profile bundles 含插件）
+- [x] README 完成：安装、Config、规则表、信任边界、Known Limitations
+- [x] `pnpm pack --dry-run` 产物含 lib/scanner-bin/cordis.patch.yml/README
 
 ---
 

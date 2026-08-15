@@ -19,6 +19,11 @@
     "cordis.patch.yml",
     "README.md"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "npm run build:scanner && npm run build:src",
     "build:scanner": "tsc -p tsconfig.scanner.json",
