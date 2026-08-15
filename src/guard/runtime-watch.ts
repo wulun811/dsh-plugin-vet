@@ -161,6 +161,7 @@ export function sidecarMain(cfg: WatchConfig): void {
   let prev: ProcSample | null = null
   let samples: RssSample[] = []
   let growthMultiples = 0
+  const startAt = Date.now()
   const tick = (): void => {
     try {
       readFileSync(`/proc/${hostPid}/stat`, 'utf8')
@@ -173,6 +174,10 @@ export function sidecarMain(cfg: WatchConfig): void {
       process.stdout.write(JSON.stringify(alarm) + '\n')
     }
     prev = curr
+    // 持续膨胀检测：冷启动阶段（dsh web 加载 bundle / 进程内构建 client bundle）RSS 会在
+    // 几秒内一次性爬升数百 MB，若从启动瞬间起算会把它误报成“疑似泄漏”。等进程进入稳态
+    // （启动满 growthWindowMs 之后）再开窗测漂移，基线取稳态后的首个采样。
+    if (curr.at - startAt < cfg.growthWindowMs) return
     // 持续膨胀检测：窗口内净增长按倍数报警
     samples.push({ rssKb: curr.rssKb, at: curr.at })
     const cutoff = curr.at - cfg.growthWindowMs
