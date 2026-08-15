@@ -1,14 +1,15 @@
-import { describe, expect, it } from 'vitest'
-import { VetStatus } from '../src/guard/status.js'
-import { analyzeSample, detectGrowth, type ProcSample, type RssSample, type WatchConfig } from '../src/guard/runtime-watch.js'
+import { describe, expect, it, vi } from 'vitest'
+import { VetStatus } from '../lib/guard/status.js'
+import { analyzeSample, detectGrowth, type ProcSample, type RssSample, type WatchConfig } from '../lib/guard/runtime-watch.js'
 import {
   classifyOp, isSensitivePath, patchModule, pluginFromStack, DEFAULT_HOOK_CONFIG,
-} from '../src/guard/runtime-hooks.js'
-import { readHostMetrics } from '../src/guard/metrics.js'
-import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../src/guard/honeypot.js'
-import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../src/guard/status-route.js'
-import { decideRespawn, t2AlarmId } from '../src/guard/runtime-guard.js'
+} from '../lib/guard/runtime-hooks.js'
+import { readHostMetrics } from '../lib/guard/metrics.js'
+import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
+import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../lib/guard/status-route.js'
+import { decideRespawn, t2AlarmId, installRuntimeGuard } from '../lib/guard/runtime-guard.js'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import fsDefault from 'node:fs'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -552,6 +553,55 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
     expect(routes).toHaveLength(1)
     expect((routes[0] as { path: string }).path).toBe('/vet')
   })
+
+  it('HTTP handler：GET status.json 返回快照；POST 无 Origin 拒绝；未知路径 404', () => {
+    let handler: (req: unknown, res: unknown) => void
+    const routes: unknown[] = []
+    const ws = { register: (r: unknown) => { routes.push(r); return () => {} } }
+    const status = new VetStatus()
+    status.record({ id: 't1:fd:512', severity: 'yellow', source: 't1', kind: 'fd', message: 'x', at: Date.now() })
+    const ctx = {
+      baseUrl: '/tmp',
+      get: (name: string) => (name === 'webServer' ? ws : undefined),
+      effect: (fn: () => unknown) => { fn() },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    } as never
+    registerStatusRouteOnce(ctx as never, { runtimeGuard: 'watch' } as never, status)
+    handler = (routes[0] as { handler: typeof handler }).handler
+
+    // GET /vet/status.json → 200 快照
+    const getRes: { code: number; body: unknown } = { code: 0, body: null }
+    const gres = {
+      writableEnded: false,
+      writeHead: (code: number) => { getRes.code = code },
+      end: (body: string) => { getRes.body = JSON.parse(body) },
+    }
+    handler({ method: 'GET', url: '/vet/status.json', headers: {} }, gres)
+    expect(getRes.code).toBe(200)
+    expect((getRes.body as { level: string }).level).toBe('yellow')
+    expect((getRes.body as { runtimeGuard: string }).runtimeGuard).toBe('off')
+
+    // POST /vet/runtime-guard 无 Origin → 403（跨站防护，M4）
+    const postRes: { code: number; body: unknown } = { code: 0, body: null }
+    const pres = {
+      writableEnded: false,
+      writeHead: (code: number) => { postRes.code = code },
+      end: (body: string) => { postRes.body = JSON.parse(body) },
+      on: () => {},
+    }
+    handler({ method: 'POST', url: '/vet/runtime-guard', headers: {} }, pres)
+    expect(postRes.code).toBe(403)
+
+    // 未知路径 → 404
+    const nfRes: { code: number; body: unknown } = { code: 0, body: null }
+    const nres = {
+      writableEnded: false,
+      writeHead: (code: number) => { nfRes.code = code },
+      end: (body: string) => { nfRes.body = JSON.parse(body) },
+    }
+    handler({ method: 'GET', url: '/vet/other', headers: {} }, nres)
+    expect(nfRes.code).toBe(404)
+  })
 })
 
 describe('ensureHoneypot（蜜罐播种）', () => {
@@ -594,6 +644,68 @@ describe('ensureHoneypot（蜜罐播种）', () => {
     expect(DEFAULT_HONEYPOT_DIR).toContain('.dsh')
     expect(DEFAULT_HONEYPOT_DIR).toContain('.local')
     expect(DEFAULT_HONEYPOT_DIR).not.toMatch(/honeypot|vet|decoy|fake/i)
+  })
+})
+
+describe('installRuntimeGuard（T1 哨兵 + T2 钩子集成，覆盖率补盲）', () => {
+  const mkCtx = (): { logger: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> }; baseUrl?: string; loader?: unknown } => ({
+    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  })
+
+  it('watch 模式：装 guard → 真实 fs 写敏感路径 → T2 报警进 status；dispose 恢复', () => {
+    const ctx = mkCtx()
+    const status = new VetStatus()
+    const config = {
+      runtimeGuard: 'watch' as const,
+      runtimeIntervalMs: 2000, runtimeMemLimitMb: 1024, runtimeForkBurstN: 5,
+      runtimeFdLimit: 512, runtimeGrowthMb: 256, runtimeGrowthWindowMs: 600_000,
+      honeypot: { enabled: false, dir: '' },
+    }
+    const dispose = installRuntimeGuard(ctx as never, config as never, status)
+    try {
+      // 真实 fs 模块已被包装：写敏感路径应产生 fs-write 报警（T2 生效）
+      const before = status.snapshot().alarmCount
+      // 用真实 fs 触发（写一个临时敏感命名路径）
+      const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-integ-'))
+      try {
+        // 用属性访问（fsDefault.writeFileSync）触发——ESM 具名导入是 patch 前固化的原始引用，
+        // patchModule 包装的是模块对象属性（README 已知旁路），属性访问才能命中 T2 钩子
+        fsDefault.writeFileSync(join(dir, 'id_rsa.pem'), 'x') // id_rsa 段名敏感
+        const snap = status.snapshot()
+        expect(snap.alarmCount).toBeGreaterThan(before)
+        expect(snap.alarms[0].kind).toBe('fs-write')
+        expect(snap.alarms[0].id).toContain('t2:fs-write:')
+        // P1-6：id 含 pluginHint 段（无归因时为空段，格式完整）
+        expect(snap.alarms[0].id).toMatch(/^t2:fs-write:.+:.*$/)
+      } finally {
+        fsDefault.rmSync(dir, { recursive: true, force: true })
+      }
+    } finally {
+      dispose()
+    }
+    // dispose 后：环境变量清空、再写不再报警（钩子已恢复）
+    expect(process.env.DSH_VET_SIDECAR_PID).toBeUndefined()
+    const after = status.snapshot().alarmCount
+    const dir2 = mkdtempSync(join(process.cwd(), '.tmp-guard-integ2-'))
+    try {
+      fsDefault.writeFileSync(join(dir2, 'id_rsa.pem'), 'y')
+      expect(status.snapshot().alarmCount).toBe(after)
+    } finally {
+      fsDefault.rmSync(dir2, { recursive: true, force: true })
+    }
+  })
+
+  it('off 模式：不 spawn 哨兵、不装钩子，蜜罐提示（覆盖率补盲）', () => {
+    const ctx = mkCtx()
+    const status = new VetStatus()
+    const config = {
+      runtimeGuard: 'off' as const,
+      honeypot: { enabled: true, dir: '' },
+    }
+    const dispose = installRuntimeGuard(ctx as never, config as never, status)
+    dispose()
+    expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining('蜜罐未生效'))
+    expect(process.env.DSH_VET_SIDECAR_PID).toBeUndefined()
   })
 })
 
