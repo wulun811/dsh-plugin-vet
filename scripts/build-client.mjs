@@ -29,6 +29,7 @@ await build({
   legalComments: 'none',
   charset: 'utf8',
   external: ['react', 'react/jsx-runtime'],
+  define: { __VET_VERSION__: JSON.stringify(PKG.version) },
   banner: { js: loadBanner },
   footer: { js: '\n\t\treturn module.exports;\n\t}\n});\n' },
 })

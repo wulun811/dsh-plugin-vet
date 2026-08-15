@@ -2,10 +2,14 @@
  * vet 盾牌状态灯（D22）：会话头部动作区的守护指示器。
  * 数据：轮询宿主 webServer /vet/status.json（5s）。alarm-only：面板只展示与建议，
  * 唯一动作是「开启运行时守卫」按钮——用户主动点击，vet 按其指令写自己的配置（重启生效）。
- * 设计：纯静态 inline 样式 + --dsw-* 主题令牌（带兜底），无动画/无库，资源开销≈0。
+ * 设计：莫兰迪色系（暖灰底 + 鼠尾草绿/燕麦赭石/灰玫瑰/雾蓝），纯静态 inline 样式，无动画无库。
+ * 版本号由构建脚本注入（__VET_VERSION__，esbuild define）。
  */
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
+
+/** 构建时注入：package.json version（scripts/build-client.mjs define）。 */
+declare const __VET_VERSION__: string
 
 export interface VetAlarmWire {
   kind: string
@@ -19,6 +23,8 @@ export interface VetMetricsWire {
   heapUsedMb: number
   heapTotalMb: number
   externalMb: number
+  mcpRssMb: number
+  mcpCount: number
   cpuPct: number
   ioReadMb: number
   ioWriteMb: number
@@ -38,28 +44,26 @@ export interface ShieldSnapshotWire {
 
 const POLL_MS = 5000
 
-/** 主题语义令牌（全部带兜底，明暗自适应）。 */
-const T = {
-  success: 'var(--dsw-alias-state-success-primary, #30a46c)',
-  warn: 'var(--dsw-alias-state-warn-primary, #f5a623)',
-  error: 'var(--dsw-alias-state-error-primary, #e5484d)',
-  bgOverlay: 'var(--dsw-alias-bg-overlay, #ffffff)',
-  bgLayer1: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.03))',
-  bgLayer2: 'var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.06))',
-  hover: 'var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,0.05))',
-  border: 'var(--dsw-alias-border-l2, rgba(0,0,0,0.12))',
-  borderLight: 'var(--dsw-alias-border-l3, rgba(0,0,0,0.08))',
-  textPrimary: 'var(--dsw-alias-label-primary, #111827)',
-  textSecondary: 'var(--dsw-alias-label-secondary, #6b7280)',
-  textTertiary: 'var(--dsw-alias-label-tertiary, #9ca3af)',
-  shadow: 'var(--dsw-shadow-lv2, 0 8px 24px rgba(0,0,0,0.16))',
-  buttonPrimary: 'var(--dsw-alias-button-primary-fill, #3b82f6)',
+/** 莫兰迪色系（暖灰底 + 低饱和尘色调）。 */
+const M = {
+  sage: '#7E9A7C',     // 鼠尾草绿：守护
+  ochre: '#B39263',    // 燕麦赭石：警告
+  rose: '#A87171',     // 灰玫瑰：风险
+  slate: '#6E7E99',    // 雾蓝：主按钮
+  ink: '#4B4A45',      // 墨色：主文本
+  muted: '#837D73',    // 灰褐：次文本
+  faint: '#A39D90',    // 浅褐：弱文本
+  bg: '#F1EEE7',       // 暖米：面板底
+  card: '#E8E4DA',     // 暖灰：卡片
+  cardSoft: '#EDEAE2', // 更浅卡片
+  border: '#D8D2C4',   // 暖灰边框
+  borderSoft: '#E0DBCD',
 }
 
 const COLOR: Record<'green' | 'yellow' | 'red', string> = {
-  green: T.success,
-  yellow: T.warn,
-  red: T.error,
+  green: M.sage,
+  yellow: M.ochre,
+  red: M.rose,
 }
 
 const LABEL: Record<'green' | 'yellow' | 'red', string> = {
@@ -85,21 +89,32 @@ const SUGGEST: Record<string, string> = {
   'fs-read': '检查该插件读取密钥文件的意图',
 }
 
+/** 「?」悬停提示：插件简介 + 版本 + 守卫代价。 */
+const GUARD_HELP = [
+  '@jieai/dsh-plugin-vet v' + (typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'),
+  'DSH 插件信任流水线：静态规则判定 + LLM 审计 + 运行时守卫（T1 哨兵 / T2 钩子），只报警不代劳。',
+  '',
+  '开启运行时守卫的代价：',
+  '· 哨兵子进程约占 10-30 MB 内存 + 轻量轮询；',
+  '· T2 钩子使文件/子进程调用开销增加约 5%（热点场景更高）。',
+  '写入配置后需重启 dsh web 生效。',
+].join('\n')
+
 const panelStyle: CSSProperties = {
   position: 'absolute',
   top: 'calc(100% + 6px)',
   right: 0,
   zIndex: 1000,
   width: 340,
-  maxHeight: 480,
+  maxHeight: 500,
   overflow: 'auto',
-  background: T.bgOverlay,
-  border: `1px solid ${T.border}`,
-  borderRadius: 10,
-  boxShadow: T.shadow,
+  background: M.bg,
+  border: `1px solid ${M.border}`,
+  borderRadius: 12,
+  boxShadow: 'var(--dsw-shadow-lv2, 0 10px 28px rgba(74,70,60,0.22))',
   fontSize: 12,
-  color: T.textPrimary,
-  padding: '12px 12px 8px',
+  color: M.ink,
+  padding: '14px 14px 10px',
   textAlign: 'left',
   lineHeight: 1.5,
 }
@@ -114,21 +129,20 @@ function ShieldIcon({ color, size = 20 }: { color: string; size?: number }): Rea
 
 function SectionLabel({ children }: { children: ReactNode }): ReactNode {
   return (
-    <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.textTertiary, margin: '10px 0 6px', fontWeight: 600 }}>
+    <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: M.faint, margin: '12px 0 6px', fontWeight: 700 }}>
       {children}
     </div>
   )
 }
 
-/** 指标卡：标签在上、数值在下（2 列网格，对齐美观）。 */
 function Metric({ label, value, hint }: { label: string; value: string; hint?: string }): ReactNode {
   return (
     <div
       title={hint}
-      style={{ background: T.bgLayer1, borderRadius: 7, padding: '6px 9px', display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}
+      style={{ background: M.card, borderRadius: 8, padding: '6px 10px', display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}
     >
-      <span style={{ fontSize: 10, color: T.textTertiary }}>{label}</span>
-      <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textPrimary, wordBreak: 'break-word' }}>{value}</span>
+      <span style={{ fontSize: 10, color: M.faint }}>{label}</span>
+      <span style={{ fontSize: 12.5, fontWeight: 700, color: M.ink, wordBreak: 'break-word' }}>{value}</span>
     </div>
   )
 }
@@ -223,16 +237,16 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           padding: '2px 8px',
           height: 28,
           border: 'none',
-          background: open ? T.hover : 'transparent',
+          background: open ? M.cardSoft : 'transparent',
           cursor: 'pointer',
-          borderRadius: 6,
+          borderRadius: 8,
           transition: 'background 120ms ease',
         }}
       >
         <ShieldIcon color={color} />
         {metrics !== undefined && metrics.rssMb > 0 && (
           <span
-            style={{ fontSize: 10, color: T.textSecondary, fontWeight: 600, lineHeight: 1 }}
+            style={{ fontSize: 10, color: M.muted, fontWeight: 600, lineHeight: 1 }}
             title="DSH + 全部插件总内存（同一进程，仅总量）"
           >
             ≈{Math.round(metrics.rssMb)}M
@@ -244,7 +258,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
               fontSize: 11,
               fontWeight: 700,
               color,
-              background: T.bgLayer2,
+              background: M.card,
               borderRadius: 9,
               padding: '1px 5px',
               lineHeight: 1.4,
@@ -259,17 +273,17 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
 
       {open && (
         <div style={panelStyle} role="dialog" aria-label="vet 报警面板">
-          {/* 头部：状态点 + 标题 + 计数 */}
+          {/* 头部 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: color, display: 'inline-block' }} />
-            <span style={{ fontWeight: 800, fontSize: 13 }}>vet {LABEL[level]}</span>
-            <span style={{ marginLeft: 'auto', fontSize: 11, color: T.textSecondary, background: T.bgLayer1, borderRadius: 9, padding: '1px 8px' }}>
+            <span style={{ fontWeight: 800, fontSize: 13.5, letterSpacing: '0.02em' }}>vet {LABEL[level]}</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11, color: M.muted, background: M.card, borderRadius: 9, padding: '1px 8px' }}>
               {count} 条报警
             </span>
           </div>
-          <div style={{ color: T.textSecondary, marginTop: 4 }}>{LEVEL_TEXT[level]}</div>
+          <div style={{ color: M.muted, marginTop: 5 }}>{LEVEL_TEXT[level]}</div>
 
-          {/* 实时指标：2 列卡片网格 */}
+          {/* 实时指标 */}
           {metrics !== undefined && (
             <>
               <SectionLabel>实时指标</SectionLabel>
@@ -277,63 +291,81 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
                 <Metric label="总内存" value={`${metrics.rssMb} MB`} hint="DSH 宿主 + 全部插件 + vet（同一进程，OS 仅见总量）" />
                 <Metric label="V8 堆" value={`${metrics.heapUsedMb} / ${metrics.heapTotalMb} MB`} />
                 <Metric label="原生 + 外部" value={`${metrics.externalMb} MB`} />
+                <Metric label="MCP 服务" value={`${metrics.mcpRssMb} MB · ${metrics.mcpCount} 个`} hint="独立 MCP 服务进程（命令行含 mcp，如 dsh-malong-bridge），不在 DSH 进程内、单独统计" />
                 <Metric label="CPU" value={`${metrics.cpuPct}%`} />
                 <Metric label="I/O 读" value={`${metrics.ioReadMb} MB`} />
                 <Metric label="I/O 写" value={`${metrics.ioWriteMb} MB`} />
                 <Metric label="子进程" value={`${metrics.childCount >= 0 ? metrics.childCount : '—'}`} />
-                <Metric label="fd" value={`${metrics.fdCount >= 0 ? metrics.fdCount : '—'}`} />
               </div>
+              {metrics.fdCount >= 0 && (
+                <div style={{ marginTop: 5, fontSize: 10.5, color: M.faint }}>
+                  fd：{metrics.fdCount}
+                </div>
+              )}
             </>
           )}
 
-          {/* 运行时守卫：状态 + 代价说明 + 开启按钮 */}
+          {/* 运行时守卫：状态 + ? 提示 */}
           <SectionLabel>运行时守卫</SectionLabel>
-          <div style={{ background: T.bgLayer1, borderRadius: 8, padding: '8px 10px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ width: 8, height: 8, borderRadius: 4, background: guard === 'watch' ? T.success : T.textTertiary, display: 'inline-block' }} />
-              <span style={{ fontWeight: 700 }}>{guard === 'watch' ? '已开启（watch）' : '未开启'}</span>
-              {guard === 'off' && (
-                <button
-                  type="button"
-                  disabled={toggling}
-                  onClick={() => { void toggleGuard(true) }}
-                  style={{
-                    marginLeft: 'auto',
-                    border: 'none',
-                    background: T.buttonPrimary,
-                    color: '#fff',
-                    borderRadius: 6,
-                    padding: '3px 14px',
-                    fontSize: 11.5,
-                    fontWeight: 700,
-                    cursor: toggling ? 'default' : 'pointer',
-                    opacity: toggling ? 0.6 : 1,
-                  }}
-                >
-                  {toggling ? '写入中…' : '开启'}
-                </button>
-              )}
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', background: M.card, borderRadius: 8, padding: '8px 10px' }}>
+            <span style={{ width: 8, height: 8, borderRadius: 4, background: guard === 'watch' ? M.sage : M.faint, display: 'inline-block' }} />
+            <span style={{ fontWeight: 700, marginLeft: 8 }}>{guard === 'watch' ? '已开启（watch）' : '未开启'}</span>
             {guard === 'off' && (
-              <div style={{ marginTop: 6, fontSize: 10.5, color: T.textSecondary, lineHeight: 1.45 }}>
-                开启代价：哨兵子进程约占 10–30 MB 内存 + 轻量轮询；T2 钩子使文件/子进程调用开销增加约 5%（热点场景更高）。写入配置后需重启生效。
-              </div>
+              <button
+                type="button"
+                disabled={toggling}
+                onClick={() => { void toggleGuard(true) }}
+                style={{
+                  marginLeft: 'auto',
+                  border: 'none',
+                  background: M.slate,
+                  color: '#F6F4EE',
+                  borderRadius: 7,
+                  padding: '3px 14px',
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  cursor: toggling ? 'default' : 'pointer',
+                  opacity: toggling ? 0.6 : 1,
+                }}
+              >
+                {toggling ? '写入中…' : '开启'}
+              </button>
             )}
+            <span
+              title={GUARD_HELP}
+              style={{
+                marginLeft: 8,
+                width: 16,
+                height: 16,
+                borderRadius: 8,
+                background: M.cardSoft,
+                color: M.faint,
+                fontSize: 10.5,
+                fontWeight: 700,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'help',
+                flexShrink: 0,
+              }}
+            >
+              ?
+            </span>
           </div>
           {toggleMsg !== null && (
-            <div style={{ marginTop: 6, fontSize: 11, color: T.warn }}>{toggleMsg}</div>
+            <div style={{ marginTop: 6, fontSize: 11, color: M.ochre }}>{toggleMsg}</div>
           )}
 
           {/* 最近扫描 */}
           {lastScan !== undefined && (
             <>
               <SectionLabel>最近扫描</SectionLabel>
-              <div style={{ background: T.bgLayer1, borderRadius: 8, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ background: M.card, borderRadius: 8, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lastScan.pluginName}</span>
-                <span style={{ marginLeft: 'auto', fontWeight: 700, color: lastScan.verdict === 'clean' ? T.success : lastScan.verdict === 'suspicious' ? T.warn : T.error }}>
+                <span style={{ marginLeft: 'auto', fontWeight: 700, color: lastScan.verdict === 'clean' ? M.sage : lastScan.verdict === 'suspicious' ? M.ochre : M.rose }}>
                   {lastScan.verdict}
                 </span>
-                <span style={{ fontSize: 11, color: T.textTertiary }}>{lastScan.staticScore} 分</span>
+                <span style={{ fontSize: 11, color: M.faint }}>{lastScan.staticScore} 分</span>
               </div>
             </>
           )}
@@ -341,51 +373,51 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           {/* 报警列表 */}
           <SectionLabel>报警</SectionLabel>
           {alarms.length === 0 ? (
-            <div style={{ color: T.textTertiary, padding: '4px 2px' }}>暂无报警记录</div>
+            <div style={{ color: M.faint, padding: '4px 2px' }}>暂无报警记录</div>
           ) : (
             <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
               {alarms.slice(0, 8).map((a, i) => (
                 <li
                   key={i}
                   style={{
-                    background: T.bgLayer1,
+                    background: M.card,
                     borderRadius: 8,
-                    borderLeft: `3px solid ${a.severity === 'red' ? T.error : a.severity === 'yellow' ? T.warn : 'transparent'}`,
+                    borderLeft: `3px solid ${a.severity === 'red' ? M.rose : a.severity === 'yellow' ? M.ochre : 'transparent'}`,
                     padding: '7px 10px',
                     marginBottom: 5,
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ fontSize: 10, fontWeight: 700, background: T.bgLayer2, borderRadius: 4, padding: '1px 6px', color: T.textSecondary }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, background: M.cardSoft, borderRadius: 4, padding: '1px 6px', color: M.muted }}>
                       {a.kind}
                     </span>
                     {a.pluginHint !== undefined && (
-                      <span style={{ fontSize: 10.5, color: T.textTertiary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
+                      <span style={{ fontSize: 10.5, color: M.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
                     )}
                   </div>
                   <div style={{ marginTop: 3, wordBreak: 'break-word' }}>{a.message}</div>
                   {SUGGEST[a.kind] !== undefined && (
-                    <div style={{ marginTop: 3, fontSize: 11, color: T.warn }}>建议：{SUGGEST[a.kind]}</div>
+                    <div style={{ marginTop: 3, fontSize: 11, color: M.ochre }}>建议：{SUGGEST[a.kind]}</div>
                   )}
                 </li>
               ))}
             </ul>
           )}
 
-          {/* 底部：更新时间 + 刷新 */}
-          <div style={{ display: 'flex', alignItems: 'center', marginTop: 10, paddingTop: 8, borderTop: `1px solid ${T.borderLight}` }}>
+          {/* 底部 */}
+          <div style={{ display: 'flex', alignItems: 'center', marginTop: 12, paddingTop: 8, borderTop: `1px solid ${M.borderSoft}` }}>
             {loadedAt > 0 && (
-              <span style={{ fontSize: 10.5, color: T.textTertiary }}>更新于 {fmtTime(loadedAt)}</span>
+              <span style={{ fontSize: 10.5, color: M.faint }}>更新于 {fmtTime(loadedAt)}</span>
             )}
             <button
               type="button"
               onClick={() => { loadRef.current() }}
               style={{
                 marginLeft: 'auto',
-                border: `1px solid ${T.border}`,
+                border: `1px solid ${M.border}`,
                 background: 'transparent',
-                color: T.textSecondary,
-                borderRadius: 6,
+                color: M.muted,
+                borderRadius: 7,
                 padding: '2px 12px',
                 cursor: 'pointer',
                 fontSize: 11,

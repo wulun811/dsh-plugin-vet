@@ -15,6 +15,10 @@ export interface HostMetrics {
   heapTotalMb: number
   /** 原生/外部内存（MB）：external + arrayBuffers（Buffer/ArrayBuffer 等）。 */
   externalMb: number
+  /** 独立 MCP 服务进程（命令行含 mcp 的子进程，如 dsh-malong-bridge）合计内存（MB）。 */
+  mcpRssMb: number
+  /** MCP 服务进程数量。 */
+  mcpCount: number
   cpuPct: number
   ioReadMb: number
   ioWriteMb: number
@@ -25,6 +29,35 @@ export interface HostMetrics {
 
 let prevCpu: { total: number; at: number } | undefined
 
+interface ChildInfo {
+  pid: number
+  rssKb: number
+  cmdline: string
+}
+
+/** 读取宿主直接子进程（pid + VmRSS + 命令行）；不可读返回空数组。 */
+function readChildren(): ChildInfo[] {
+  const out: ChildInfo[] = []
+  let pids: string[] = []
+  try {
+    const children = readFileSync(`/proc/${process.pid}/task/${process.pid}/children`, 'utf8').trim()
+    pids = children === '' ? [] : children.split(/\s+/)
+  } catch {
+    return out
+  }
+  for (const pid of pids) {
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ')
+      const status = readFileSync(`/proc/${pid}/status`, 'utf8')
+      const rss = /VmRSS:\s*(\d+)\s*kB/.exec(status)
+      out.push({ pid: Number(pid), rssKb: rss !== null ? Number(rss[1]) : 0, cmdline: cmdline.slice(0, 200) })
+    } catch {
+      // 子进程已退出/权限不足 → 跳过
+    }
+  }
+  return out
+}
+
 /** 读取宿主进程实时指标（失败字段回退，绝不抛错）。 */
 export function readHostMetrics(): HostMetrics {
   const pid = process.pid
@@ -33,16 +66,14 @@ export function readHostMetrics(): HostMetrics {
   const heapUsedMb = mem.heapUsed / 1048576
   const heapTotalMb = mem.heapTotal / 1048576
   const externalMb = (mem.external + (mem.arrayBuffers ?? 0)) / 1048576
-  let childCount = -1
+  const children = readChildren()
+  const childCount = children.length
+  const mcpChildren = children.filter(c => /mcp/i.test(c.cmdline))
+  const mcpRssMb = mcpChildren.reduce((sum, c) => sum + c.rssKb, 0) / 1024
+  const mcpCount = mcpChildren.length
   let fdCount = -1
   let ioRead = 0
   let ioWrite = 0
-  try {
-    const children = readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim()
-    childCount = children === '' ? 0 : children.split(/\s+/).length
-  } catch {
-    childCount = -1
-  }
   try {
     fdCount = readdirSync(`/proc/${pid}/fd`).length
   } catch {
@@ -82,6 +113,8 @@ export function readHostMetrics(): HostMetrics {
     heapUsedMb: Math.round(heapUsedMb * 10) / 10,
     heapTotalMb: Math.round(heapTotalMb * 10) / 10,
     externalMb: Math.round(externalMb * 10) / 10,
+    mcpRssMb: Math.round(mcpRssMb * 10) / 10,
+    mcpCount,
     cpuPct,
     ioReadMb: Math.round(ioRead / 1048576),
     ioWriteMb: Math.round(ioWrite / 1048576),
