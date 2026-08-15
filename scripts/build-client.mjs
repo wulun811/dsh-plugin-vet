@@ -28,7 +28,7 @@ await build({
   outfile: 'lib/client.js',
   legalComments: 'none',
   charset: 'utf8',
-  external: ['react', 'react/jsx-runtime'],
+  external: ['react', 'react/jsx-runtime', 'react-dom'],
   define: { __VET_VERSION__: JSON.stringify(PKG.version) },
   banner: { js: loadBanner },
   footer: { js: '\n\t\treturn module.exports;\n\t}\n});\n' },

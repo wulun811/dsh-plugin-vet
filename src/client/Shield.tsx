@@ -8,6 +8,7 @@
  * 版本号由构建脚本注入（__VET_VERSION__，esbuild define）。
  */
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { CSSProperties, ReactNode } from 'react'
 import { zh } from './i18n.ts'
 
@@ -258,17 +259,19 @@ function fmtRam(mb: number): string {
   return Math.round(mb) + ' MB'
 }
 
-/** 右侧介绍栏：绝对定位贴住主框右缘（主框不动），等高；width 按右侧可用空间传入。 */
+/** 介绍栏（D30 修复）：portal 到 body + fixed 定位，从视口左缘固定偏移弹出，
+ * 不随盾牌按钮位置移动——按钮在会话标题旁，标题短时按钮靠左，旧定位会卡进左侧栏。 */
+const INTRO_LEFT = 320 // 距视口左缘固定像素（避开侧栏；可按需调整）
 function VetIntroPanel({ pal, width, t }: { pal: MorandiPalette; width: number; t: T }): ReactNode {
-  return (
+  return createPortal(
     <aside
       role="dialog"
       aria-label={t('intro.aria')}
       style={{
-        position: 'absolute',
-        top: 0,
-        bottom: 0,
-        left: 'calc(100% + 8px)',
+        position: 'fixed',
+        top: 16,
+        maxHeight: 'min(92vh, 800px)',
+        left: INTRO_LEFT,
         width,
         background: pal.bg,
         border: '1px solid ' + pal.border,
@@ -279,7 +282,6 @@ function VetIntroPanel({ pal, width, t }: { pal: MorandiPalette; width: number; 
         color: pal.ink,
         lineHeight: 1.6,
         overflowY: 'auto',
-        maxHeight: 'min(92vh, 800px)',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
@@ -326,6 +328,8 @@ function VetIntroPanel({ pal, width, t }: { pal: MorandiPalette; width: number; 
         {t('intro.cost')}
       </div>
     </aside>
+    ,
+    document.body,
   )
 }
 
@@ -341,7 +345,6 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   const [toggling, setToggling] = useState(false)
   const [dark, setDark] = useState<boolean>(() => isDark())
   const [helpOpen, setHelpOpen] = useState(false)
-  const [introW, setIntroW] = useState(250)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
   const openTimer = useRef<number | null>(null)
@@ -450,22 +453,6 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   useEffect(() => {
     if (!open) setHelpOpen(false)
   }, [open])
-
-  // 介绍栏贴在主框右侧（左缘 = 主框右缘 + 8px，主框位置不动）；
-  // 宽度按盾牌右侧可用空间收窄（160-280），至少保证能放进视口。
-  useEffect(() => {
-    if (!open) return
-    const measure = (): void => {
-      const el = rootRef.current
-      if (el === null) return
-      const r = el.getBoundingClientRect()
-      const availRight = Math.max(0, window.innerWidth - r.right - 8 - 8)
-      setIntroW(Math.max(160, Math.min(280, availRight)))
-    }
-    measure()
-    window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
-  }, [open, helpOpen])
 
   // 卸载时清理定时器。
   useEffect(() => () => {
@@ -731,7 +718,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
           </div>
         </div>
 
-        {helpOpen && <VetIntroPanel pal={pal} width={introW} t={t} />}
+        {helpOpen && <VetIntroPanel pal={pal} width={280} t={t} />}
         </div>
       )}
     </div>
