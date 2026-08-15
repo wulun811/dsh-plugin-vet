@@ -237,6 +237,37 @@ describe('internal/plugin guard', () => {
     const f = fiber({ entry: { options: { name: '@vet-test/evil' } } })
     expect(() => h(f)).not.toThrow()
   })
+  it('requireAudit deny：无档案 → 拦截并 dispose（D30 强制层）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-require-'))
+    process.env.DSH_PLUGIN_VET_ARCHIVE_DIR = join(dir, 'audits')
+    try {
+      const ctx = new FakeCtx()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'deny', requireAudit: true }))
+      const h = ctx.handlers.get('internal/plugin')![0]
+      const f = fiber({ entry: { options: { name: '@vet-test/needs-audit' } } })
+      expect(() => h(f)).toThrow(/尚未完成审计/)
+      expect(f.dispose).toHaveBeenCalled()
+    } finally {
+      delete process.env.DSH_PLUGIN_VET_ARCHIVE_DIR
+    }
+  })
+
+  it('requireAudit 有档案 → 正常加载（不拦截）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-require2-'))
+    process.env.DSH_PLUGIN_VET_ARCHIVE_DIR = join(dir, 'audits')
+    try {
+      mkdirSync(join(dir, 'audits'), { recursive: true })
+      writeFileSync(join(dir, 'audits', 'vet-test-needs-audit-1.0.0-20260815-120000.md'), '# VET 健康档案')
+      const ctx = new FakeCtx()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'deny', requireAudit: true }))
+      const h = ctx.handlers.get('internal/plugin')![0]
+      const f = fiber({ entry: { options: { name: '@vet-test/needs-audit' } } })
+      expect(() => h(f)).not.toThrow()
+      expect(f.dispose).not.toHaveBeenCalled()
+    } finally {
+      delete process.env.DSH_PLUGIN_VET_ARCHIVE_DIR
+    }
+  })
 })
 
 describe('invariant', () => {

@@ -85,6 +85,16 @@
 | clean | — | approve |
 | clean | 深挖发现隐藏问题 | review 或 reject（附证据） |
 
+## 强制机制（requireAudit）
+
+vet 提供两层强制（config 开启 requireAudit: true 后）：
+
+1. **加载前自动扫描**（默认开启 autoScan）：插件挂载时 vet 同步静态扫描，deny 模式拦截 critical/suspicious。
+2. **审计门槛**（requireAudit，默认关）：插件加载时检查 ~/.dsh/vet/audits/ 是否有该插件档案——没有则 report 模式报警、deny 模式直接拦截（消息引用 vet-audit-protocol 要求先审查）。
+
+> 门槛独立于包解析与扫描：档案存在与否只取决于 agent 是否按本协议审查过。
+> 即使 agent 跳过协议，未审计的插件也无法加载（deny 时）——这就是"强制"的落点：不是控制 agent 的思考，而是让"未经审计"变成"不可用"。
+
 ## 边界（vet 的职责）
 
 - vet **不做**：安装/卸载插件、阻止执行（deny 模式除外）、替 agent 下结论

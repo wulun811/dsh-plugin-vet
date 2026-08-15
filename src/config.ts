@@ -8,6 +8,8 @@ export interface VetConfig {
   rules: Record<string, boolean>
   denyOn: 'critical' | 'suspicious'
   allowlist: string[]
+  /** D30：审计门槛强制（opt-in）——开启后新插件必须先按 vet-audit-protocol 审查并落盘健康档案，否则 deny 拦截 / report 报警。 */
+  requireAudit: boolean
   /** D22：运行时守卫（默认 off——性能/稳定代价 opt-in）。'watch' = T1 哨兵 + T2 钩子，只报警不动作。 */
   runtimeGuard: 'off' | 'watch'
   runtimeIntervalMs: number
@@ -34,6 +36,7 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   rules: z.dict(z.boolean()).default({}),
   denyOn: z.union([z.const('critical'), z.const('suspicious')]).default('critical'),
   allowlist: z.array(z.string()).default([]),
+  requireAudit: z.boolean().default(false),
   runtimeGuard: z.union([z.const('off'), z.const('watch')]).default('off'),
   runtimeIntervalMs: z.natural().default(2000),
   runtimeMemLimitMb: z.natural().default(2048),
