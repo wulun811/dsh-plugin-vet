@@ -113,7 +113,7 @@ const LABEL: Record<'green' | 'yellow' | 'red', string> = {
 const LEVEL_TEXT: Record<'green' | 'yellow' | 'red', string> = {
   green: '当前无报警，静态扫描与运行时守护正常。',
   yellow: '有警告或可疑扫描结果。',
-  red: '检测到高风险报警，请查看下方报警列表并在 DSH 中处置（vet 只报警不代劳）。',
+  red: '检测到高风险报警，请查看下方报警列表；可在 DSH 对话中把这段预警发给 LLM，让它协助排查处置。',
 }
 
 const SUGGEST: Record<string, string> = {
@@ -130,7 +130,7 @@ const SUGGEST: Record<string, string> = {
 /** 「?」悬停提示：插件简介 + 版本 + 守卫代价。 */
 const GUARD_HELP = [
   '@jieai/dsh-plugin-vet v' + (typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'),
-  'DSH 插件信任流水线：静态规则判定 + LLM 审计 + 运行时守卫（T1 哨兵 / T2 钩子），只报警不代劳。',
+  'DSH 插件信任流水线：静态规则判定 + LLM 审计 + 运行时守卫（T1 哨兵 / T2 钩子）；报警与建议可发给 DSH 对话中的 LLM 协助排查。',
   '',
   '开启运行时守卫的代价：',
   '· 哨兵子进程约占 10-30 MB 内存 + 轻量轮询；',
@@ -187,8 +187,9 @@ function panelStyle(pal: MorandiPalette): CSSProperties {
     right: 0,
     zIndex: 1000,
     width: 340,
-    maxHeight: 500,
-    overflow: 'auto',
+    // 面板整体向下延伸（最高到视口 92%），日常内容无需滚动；极矮视口才出现滚动条。
+    maxHeight: 'min(92vh, 800px)',
+    overflowY: 'auto',
     background: pal.bg,
     border: '1px solid ' + pal.border,
     borderRadius: 12,
@@ -404,7 +405,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
               </div>
               <div style={{ marginTop: 3, fontSize: 10.5, color: pal.faint }}>
                 {lastScan.at !== undefined ? '扫描于 ' + fmtTime(lastScan.at) + ' · ' : ''}
-                静态判定存疑（非结论）：可对该插件执行深度审计复核；vet 只报警不代劳。
+                静态判定存疑（非结论）：可对该插件执行深度审计复核，或把这段预警发给 DSH 对话让 LLM 协助排查。
               </div>
             </div>
           )}
