@@ -127,16 +127,72 @@ const SUGGEST: Record<string, string> = {
   'fs-read': '检查该插件读取密钥文件的意图',
 }
 
-/** 「?」悬停提示：插件简介 + 版本 + 守卫代价。 */
-const GUARD_HELP = [
-  '@jieai/dsh-plugin-vet v' + (typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'),
-  'DSH 插件信任流水线：静态规则判定 + LLM 审计 + 运行时守卫（T1 哨兵 / T2 钩子）；报警与建议可发给 DSH 对话中的 LLM 协助排查。',
-  '',
-  '开启运行时守卫的代价：',
-  '· 哨兵子进程约占 10-30 MB 内存 + 轻量轮询；',
-  '· T2 钩子使文件/子进程调用开销增加约 5%（热点场景更高）。',
-  '写入配置后需重启 dsh web 生效。',
-].join('\n')
+/** 「?」右侧介绍栏内容：卖点 1-2-3（大白话，避免纯技术语言）。 */
+const INTRO_POINTS = [
+  {
+    n: '①',
+    title: '装之前——先过检',
+    body: '规则引擎 + AI 双重复核：逃逸、偷密钥、藏后门的代码当场现形，附 0-100 分评分卡。',
+  },
+  {
+    n: '②',
+    title: '装之后——全天值班',
+    body: '内存膨胀、疯狂开子进程、乱写乱删文件……任何异常动作，第一时间报警给你。',
+  },
+  {
+    n: '③',
+    title: '出情况——给方案',
+    body: '每条报警都带处置建议，可直接发给 DSH 里的 LLM 帮手协助排查；动手与否你说了算。',
+  },
+]
+
+/** 右侧介绍栏：与主面板等高、更窄，展示 vet 的三大卖点。 */
+function VetIntroPanel({ pal }: { pal: MorandiPalette }): ReactNode {
+  return (
+    <aside
+      role="dialog"
+      aria-label="vet 插件介绍"
+      style={{
+        width: 250,
+        background: pal.bg,
+        border: '1px solid ' + pal.border,
+        borderRadius: 12,
+        boxShadow: 'var(--dsw-shadow-lv2, 0 10px 28px rgba(20,18,14,0.35))',
+        padding: '14px 14px 12px',
+        fontSize: 12,
+        color: pal.ink,
+        lineHeight: 1.6,
+        overflowY: 'auto',
+        maxHeight: 'min(92vh, 800px)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+        <ShieldIcon level="green" color={pal.sage} size={16} />
+        <span style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.02em' }}>vet 是什么</span>
+      </div>
+      <div style={{ fontSize: 10.5, color: pal.faint, marginBottom: 10 }}>
+        @jieai/dsh-plugin-vet v{typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'}
+      </div>
+
+      {INTRO_POINTS.map(p => (
+        <div key={p.n} style={{ marginBottom: 10 }}>
+          <div style={{ fontWeight: 700 }}>
+            <span style={{ color: pal.sage }}>{p.n}</span> {p.title}
+          </div>
+          <div style={{ color: pal.muted, marginTop: 2 }}>{p.body}</div>
+        </div>
+      ))}
+
+      <div style={{ background: pal.cardSoft, borderRadius: 8, padding: '6px 10px', fontWeight: 700, color: pal.ink, margin: '8px 0 10px' }}>
+        装上它，DSH 装插件从「盲盒」变「心里有数」。
+      </div>
+
+      <div style={{ fontSize: 10.5, color: pal.faint, borderTop: '1px solid ' + pal.borderSoft, paddingTop: 8 }}>
+        开启运行时守卫：增加一个小哨兵进程（约 10-30 MB）与约 5% 调用开销，写入配置重启后生效。
+      </div>
+    </aside>
+  )
+}
 
 /* ------------------------- 主题检测 ------------------------- */
 
@@ -182,10 +238,6 @@ function isDark(): boolean {
 
 function panelStyle(pal: MorandiPalette): CSSProperties {
   return {
-    position: 'absolute',
-    top: 'calc(100% + 6px)',
-    right: 0,
-    zIndex: 1000,
     width: 340,
     // 面板整体向下延伸（最高到视口 92%），日常内容无需滚动；极矮视口才出现滚动条。
     maxHeight: 'min(92vh, 800px)',
@@ -276,7 +328,6 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   const [helpOpen, setHelpOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
-  const helpElRef = useRef<HTMLSpanElement | null>(null)
   const openTimer = useRef<number | null>(null)
   const closeTimer = useRef<number | null>(null)
 
@@ -348,7 +399,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   const metrics = snap?.metrics
   const guard = snap?.runtimeGuard ?? 'off'
 
-  // 「?」帮助提示：自定义浮层（替代浏览器 title 的迟钝延迟），悬停 400ms 弹出。
+  // 「?」右侧介绍栏：悬停 400ms 或点击打开；弹层内部移动不误关（容器级 mouseleave 才关）。
   const cancelHelpClose = (): void => {
     if (closeTimer.current !== null) {
       window.clearTimeout(closeTimer.current)
@@ -357,62 +408,21 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   }
   const scheduleHelpClose = (): void => {
     cancelHelpClose()
-    closeTimer.current = window.setTimeout(() => setHelpOpen(false), 160)
+    closeTimer.current = window.setTimeout(() => setHelpOpen(false), 300)
   }
   const onHelpEnter = (): void => {
     cancelHelpClose()
     if (openTimer.current !== null) window.clearTimeout(openTimer.current)
     openTimer.current = window.setTimeout(() => setHelpOpen(true), 400)
   }
-  const onHelpLeave = (): void => {
+  const onHelpToggle = (): void => {
+    cancelHelpClose()
     if (openTimer.current !== null) {
       window.clearTimeout(openTimer.current)
       openTimer.current = null
     }
-    scheduleHelpClose()
+    setHelpOpen(v => !v)
   }
-
-  // 浮层挂到 document.body（面板 overflow 会裁剪内部绝对定位，不能放面板里）。
-  useEffect(() => {
-    if (!helpOpen) return
-    const anchor = helpElRef.current
-    if (anchor === null) return
-    const tip = document.createElement('div')
-    tip.style.position = 'fixed'
-    tip.style.zIndex = '2000'
-    tip.style.width = '280px'
-    tip.style.maxHeight = '50vh'
-    tip.style.overflowY = 'auto'
-    tip.style.padding = '10px 12px'
-    tip.style.borderRadius = '10px'
-    tip.style.fontSize = '11.5px'
-    tip.style.lineHeight = '1.6'
-    tip.style.whiteSpace = 'pre-line'
-    tip.style.background = pal.bg
-    tip.style.border = '1px solid ' + pal.border
-    tip.style.color = pal.ink
-    tip.style.boxShadow = '0 10px 28px rgba(20,18,14,0.35)'
-    tip.textContent = GUARD_HELP
-    document.body.appendChild(tip)
-    const r = anchor.getBoundingClientRect()
-    const gap = 8
-    let left = Math.max(8, Math.min(r.left, window.innerWidth - tip.offsetWidth - 8))
-    let top = r.bottom + gap
-    if (top + tip.offsetHeight > window.innerHeight - 8) {
-      top = Math.max(8, r.top - tip.offsetHeight - gap)
-    }
-    tip.style.left = left + 'px'
-    tip.style.top = top + 'px'
-    const onTipEnter = (): void => cancelHelpClose()
-    const onTipLeave = (): void => scheduleHelpClose()
-    tip.addEventListener('mouseenter', onTipEnter)
-    tip.addEventListener('mouseleave', onTipLeave)
-    return () => {
-      tip.removeEventListener('mouseenter', onTipEnter)
-      tip.removeEventListener('mouseleave', onTipLeave)
-      if (tip.parentNode !== null) tip.parentNode.removeChild(tip)
-    }
-  }, [helpOpen, pal])
 
   // 面板收起时同步关闭帮助浮层。
   useEffect(() => {
@@ -426,7 +436,12 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   }, [])
 
   return (
-    <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+    <div
+      ref={rootRef}
+      onMouseEnter={cancelHelpClose}
+      onMouseLeave={scheduleHelpClose}
+      style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}
+    >
       <button
         type="button"
         onClick={() => setOpen(v => !v)}
@@ -475,7 +490,18 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
       </button>
 
       {open && (
-        <div style={panelStyle(pal)} role="dialog" aria-label="vet 报警面板">
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 6px)',
+            right: 0,
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'stretch',
+            gap: 8,
+          }}
+        >
+          <div style={panelStyle(pal)} role="dialog" aria-label="vet 报警面板">
           {/* 头部 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: color, display: 'inline-block' }} />
@@ -561,14 +587,13 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
               </button>
             )}
             <span
-              ref={helpElRef}
               tabIndex={0}
               role="button"
-              aria-label="运行时守卫说明（悬停查看）"
+              aria-label="vet 插件介绍（悬停或点击查看）"
+              onClick={onHelpToggle}
               onMouseEnter={onHelpEnter}
-              onMouseLeave={onHelpLeave}
               onFocus={onHelpEnter}
-              onBlur={onHelpLeave}
+              onBlur={scheduleHelpClose}
               style={{
                 marginLeft: 8,
                 width: 16,
@@ -663,6 +688,9 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
               刷新
             </button>
           </div>
+        </div>
+
+        {helpOpen && <VetIntroPanel pal={pal} />}
         </div>
       )}
     </div>
