@@ -102,7 +102,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | 依赖链/供应链：import/require 图、依赖版本漏洞、`package.json` scripts/install 钩子、许可证、作者信誉 | 不解析 |
 | 运行时行为：网络外传、原型污染、死循环/资源耗尽、时序、权限滥用 | 无数据流/行为分析 |
 | 语义知识：插件实际注入的服务、bundler polyfill 中的 `process`、遮蔽判定边界 | R5 只认 4 个变量名；遮蔽检查是 v1 启发式（偏少报） |
-| 宿主工具包的合法 `process` 使用（`process.env` 读配置、`process.stdin/stdout` 协议、`process.execPath` spawn） | R3 对任何包一视同仁——vet 自扫自身 scanner-bin 即报 high/suspicious（实测验证）；靠部署信任（allowlist/官方豁免）而非规则区分 |
+| 宿主工具包的合法 `process` 使用（`process.env` 读配置、`process.stdin/stdout` 协议、`process.execPath` spawn） | 已解决：targetKind 分级——非 DSH 插件包/官方包（generic）下 R3/R2/R10/R9 死循环降级为能力触达面/提示（info/medium），不进 verdict；DSH 插件包保持严格。实测 195 官方包全 clean |
 
 ## 信任边界
 

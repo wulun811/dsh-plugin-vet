@@ -310,11 +310,16 @@ export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
       return
     }
     if (!sig.hasBreak && !sig.hasReturn && !sig.hasThrow) {
+      // generic（通用/官方代码，含 minified bundle）：死循环是风险提示 → medium；
+      // DSH 插件包（plugin）保持 high（插件死循环是 DoS 逃逸面）
+      const generic = _ctx.request.targetKind === 'generic'
       found.push({
         rule: 'R9',
-        severity: 'high',
+        severity: generic ? 'medium' : 'high',
         confidence: 'certain',
-        message: '无出口同步循环（死循环/忙等：无 break/return/throw/await，可卡死宿主事件循环）',
+        message: generic
+          ? '无出口同步循环（死循环/忙等：无 break/return/throw/await；minified bundle 可能误判）'
+          : '无出口同步循环（死循环/忙等：无 break/return/throw/await，可卡死宿主事件循环）',
         evidence: loop.getText(sf).slice(0, 200),
         line: lineOf(sf, loop),
       })

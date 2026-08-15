@@ -11,7 +11,7 @@ const HOOKS = ['preinstall', 'install', 'postinstall', 'uninstall', 'preuninstal
 const DEP_KEYS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
 
 /** Parse a package.json manifest; returns R10 findings (invalid JSON -> none). */
-export function runPackageJson(content: string, file: string): Finding[] {
+export function runPackageJson(content: string, file: string, targetKind?: 'plugin' | 'generic'): Finding[] {
   const found: Finding[] = []
   let pkg: Record<string, unknown>
   try {
@@ -24,11 +24,13 @@ export function runPackageJson(content: string, file: string): Finding[] {
     for (const hook of HOOKS) {
       const cmd = (scripts as Record<string, unknown>)[hook]
       if (typeof cmd === 'string' && cmd !== '') {
+        // generic（官方包/信任包）：postinstall 常为 native 编译等合法步骤 → 降级 info 提示
+        const generic = targetKind === 'generic'
         found.push({
           rule: 'R10',
-          severity: 'high',
+          severity: generic ? 'info' : 'high',
           confidence: 'likely',
-          message: 'install 钩子：package.json scripts.' + hook + '（安装期任意代码执行面）',
+          message: 'install 钩子：package.json scripts.' + hook + (generic ? '（能力触达面：官方包合法安装步骤）' : '（安装期任意代码执行面）'),
           evidence: cmd.slice(0, 200),
           file,
         })

@@ -15,6 +15,12 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const found: Finding[] = []
 
   const add = (n: ts.Node, severity: Severity, confidence: Confidence, message: string): void => {
+    // targetKind='generic'（非 DSH 插件包/官方运行时）：动态执行是功能（loader/bundle/worker 的
+    // require、new Function 模块包装），降级为能力触达面 medium，不进 verdict
+    if (ctx.request.targetKind === 'generic' && (severity === 'critical' || severity === 'high')) {
+      severity = 'medium'
+      message = '能力触达面（非 DSH 插件包）：' + message
+    }
     found.push({ rule: 'R2', severity, confidence, message, evidence: n.getText(sf).slice(0, 300), line: lineOf(sf, n) })
   }
 

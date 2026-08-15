@@ -92,7 +92,7 @@ function scanFiles(request: ScanRequest): ScanResponse {
     if (basename(file) === 'package.json') {
       if (request.rules?.['R10'] !== false) {
         const json = readOrDefault(file)
-        if (json !== '') findings.push(...runPackageJson(json, 'package.json'))
+        if (json !== '') findings.push(...runPackageJson(json, 'package.json', request.targetKind))
       }
       continue
     }

@@ -310,6 +310,57 @@ describe('目标身份分级（targetKind，§14.3 边界落地）', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('generic 包：R2 require 降级 medium（官方 loader 功能，不进 verdict）', () => {
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: 'loader-tool' }),
+      'index.js': "const m = require('x')",
+    })
+    try {
+      const { request } = buildRequest({ target: 'package', packagePath: dir })
+      expect(request.targetKind).toBe('generic')
+      const res = scan(request)
+      expect(res.report!.verdict).toBe('clean')
+      const r2 = res.report!.findings.find(f => f.rule === 'R2')
+      expect(r2).toBeDefined()
+      expect(r2!.severity).toBe('medium')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('generic 包：R10 postinstall 降级 info（官方包合法安装步骤）', () => {
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: 'tool-with-hook', scripts: { postinstall: 'node build.js' } }),
+      'index.js': 'module.exports = {}',
+    })
+    try {
+      const { request } = buildRequest({ target: 'package', packagePath: dir })
+      const res = scan(request)
+      expect(res.report!.verdict).toBe('clean')
+      const r10 = res.report!.findings.find(f => f.rule === 'R10')
+      expect(r10!.severity).toBe('info')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('DSH 插件包：R2 require 保持 high（插件内真实能力触达）', () => {
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: 'evil-plugin', dependencies: { '@deepseek-ai/cordis': '^4.0.1' } }),
+      'index.js': "const m = require('child_process')",
+    })
+    try {
+      const { request } = buildRequest({ target: 'package', packagePath: dir })
+      expect(request.targetKind).toBe('plugin')
+      const res = scan(request)
+      const r2 = res.report!.findings.find(f => f.rule === 'R2')
+      expect(r2!.severity).toBe('high')
+      expect(res.report!.verdict).toBe('suspicious')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('分数构成解释（explainScore，clean+低分可读性）', () => {

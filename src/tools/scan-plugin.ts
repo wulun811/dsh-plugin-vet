@@ -29,6 +29,8 @@ export function detectTargetKind(packagePath: string): 'plugin' | 'generic' {
     return 'generic' // 无 package.json：无插件形态证据，保守走通用审计
   }
   if (pkg.name === PACKAGE_NAME) return 'generic' // vet 自身：信任锚工具包，process 为子进程实现
+  // 官方包：宿主合法代码（与 internal/plugin 守卫 isExempt 的 @deepseek-ai/* 豁免一致），process 为能力触达面
+  if (typeof pkg.name === 'string' && pkg.name.startsWith('@deepseek-ai/')) return 'generic'
   const deps: Record<string, unknown> = {
     ...(pkg.dependencies as Record<string, unknown> | undefined),
     ...(pkg.peerDependencies as Record<string, unknown> | undefined),
