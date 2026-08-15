@@ -46,6 +46,12 @@ export const prompts = {
     ' "qualityNotes":["<anything notable>"]}',
     '',
     'Rules: qualityScore must be the average of the five dimension scores; output valid JSON only.',
+    'Also append CONCRETE quality/bug findings to qualityNotes, each labeled "bug" or "smell"',
+    '(cite line numbers when possible): unhandled promise rejections, swallowed errors,',
+    'null/undefined dereference, broken logic (wrong branch, off-by-one, inverted condition),',
+    'race conditions, unbounded loops/recursion, resource leaks (timers/listeners/fds never',
+    'cleaned), silent failure paths, misleading error messages. An empty qualityNotes is fine',
+    'when the code is genuinely solid — never invent issues.',
   ].join('\n'),
 
   round4: [

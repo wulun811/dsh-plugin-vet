@@ -3,7 +3,7 @@
  * scanner-bin entry: read one JSON ScanRequest from stdin, write one JSON
  * ScanResponse line to stdout. Runs as an isolated child process; never evals.
  */
-import { scan } from './engine.js'
+import { scanWithOsv } from './engine.js'
 import type { ScanResponse } from './protocol.js'
 
 function respond(response: ScanResponse): void {
@@ -20,9 +20,9 @@ process.stdin.on('end', () => {
       respond({ ok: false, error: 'invalid ScanRequest: missing kind' })
       return
     }
-    respond(scan(request))
+    void scanWithOsv(request).then(respond, error => respond({ ok: false, error: String(error) }))
   } catch (error) {
-    respond({ ok: false, error: `invalid JSON: ${String(error)}` })
+    respond({ ok: false, error: 'invalid JSON: ' + String(error) })
   }
 })
 process.stdin.on('error', () => respond({ ok: false, error: 'stdin error' }))

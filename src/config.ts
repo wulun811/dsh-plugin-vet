@@ -23,6 +23,8 @@ export interface VetConfig {
   /** D22 补漏：窗口内 RSS 净增长超限 → yellow（持续膨胀/疑似泄漏）。 */
   runtimeGrowthMb: number
   runtimeGrowthWindowMs: number
+  /** OSV 已知漏洞核对（谷歌漏洞库，npm 生态）：扫描 package.json 时自动查询已知漏洞（网络，失败静默降级）。 */
+  osvCheck: boolean
 }
 
 export const VetConfigSchema: z<VetConfig> = z.object({
@@ -45,6 +47,7 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   runtimeFdLimit: z.natural().default(512),
   runtimeGrowthMb: z.natural().default(256),
   runtimeGrowthWindowMs: z.natural().default(600_000),
+  osvCheck: z.boolean().default(true),
 })
 
 /** load 时 fail-loud：provider/model 必须成对。 */

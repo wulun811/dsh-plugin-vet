@@ -132,7 +132,7 @@ const INTRO_POINTS = [
   {
     n: '①',
     title: '装之前——先过检',
-    body: '10 类静态检查 + AI 复核，专盯五类恶意套路：逃逸沙箱（constructor 链 / eval / 动态 import）、偷 API 密钥、删敏感文件、资源炸弹（无界数组 / fork 风暴）、安装钩子后门（preinstall / postinstall）。附 0-100 分评分卡，低分直接亮红牌。',
+    body: '10 类静态检查 + AI 复核，专盯五类恶意套路：逃逸沙箱（constructor 链 / eval / 动态 import）、偷 API 密钥、删敏感文件、资源炸弹（无界数组 / fork 风暴）、安装钩子后门（preinstall / postinstall）；已知漏洞自动核对谷歌 OSV。附 0-100 分评分卡，低分直接亮红牌；AI 还会点名质量差、藏着 bug 的插件（非恶意也会提醒）。',
   },
   {
     n: '②',
@@ -178,12 +178,19 @@ function VetIntroPanel({ pal, width }: { pal: MorandiPalette; width: number }): 
         @jieai/dsh-plugin-vet v{typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'}
       </div>
 
+      <div style={{ fontWeight: 800, fontSize: 11.5, color: pal.ink, marginBottom: 6 }}>
+        三道防线：静态规则 → AI 审计 → 运行时守卫
+      </div>
+
       <div style={{ background: pal.card, borderRadius: 8, padding: '7px 10px', marginBottom: 10, fontSize: 11, color: pal.muted }}>
         <div>
           <b style={{ color: pal.ink }}>10 类静态检查</b> · 8 类实时报警
         </div>
         <div style={{ marginTop: 1 }}>
           <b style={{ color: pal.ink }}>195 个官方包</b>已全量过检
+        </div>
+        <div style={{ marginTop: 1 }}>
+          <b style={{ color: pal.ink }}>谷歌 OSV</b>漏洞库自动核对（npm 生态）
         </div>
       </div>
 
@@ -452,7 +459,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
       if (el === null) return
       const r = el.getBoundingClientRect()
       const availRight = Math.max(0, window.innerWidth - r.right - 8 - 8)
-      setIntroW(Math.max(150, Math.min(250, availRight)))
+      setIntroW(Math.max(160, Math.min(280, availRight)))
     }
     measure()
     window.addEventListener('resize', measure)

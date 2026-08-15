@@ -717,6 +717,8 @@ defineTool({
 | D20 | **全量扫描验证 + generic 降级扩展**：批量扫描 dsh CLI 依赖树的 195 个真实安装 @deepseek-ai 官方包（6.5s）——首轮 44 suspicious 全为官方包正常功能误报（loader/worker/bundle 的 require+new Function、native postinstall、minified for(;;) 解析循环）→ generic 模式扩展降级：R2 动态执行 high/critical→medium、R10 install 钩子 high→info、R9 无出口循环 high→medium（R3 已降）；修复后 **195/195 全 clean**（117 个 100 分），0 critical 0 suspicious；第三方恶意插件（plugin 模式）判定不变 | 批量扫描实测：195 包 / 44 误报归零 |
 | D21 | **产品定位变更为「监控报警器」（用户指令）**：vet = 检查→报警→给建议，**永不替用户动手**（不自动卸载/杀进程/改配置）；deny 保留为部署者显式 opt-in（脱离产品身份，风险自担）；运行时守卫只 watch 不 kill；PLAN §2 / README 同步改写 | 用户指令：只报警不搞事，用户自行操作 DSH |
 | D22 | **GUI 盾牌可行性确认 + 运行时守卫两层（T1/T2）**：web 客户端是插件体系——dsh.client 声明包被 client-modules 扫描进 window.__DSH_BOOT__（**不限 @deepseek-ai/***，第三方可进浏览器花名册）；顶栏孔位 conversation.session.header.actions（ui-conversation 声明）；数据通道 = 宿主 webServer /vet/status.json（ctx.get('webServer') 可选服务，非 web profile no-op）+ 浏览器轮询。运行时守卫：T1 哨兵（子进程读 /proc 宿主 VmRSS/子进程数/fd，报警 JSON 行）；T2 进程内钩子（包装 fs/child_process，栈归因→插件包名，敏感路径/破坏性删除/spawn 报警，官方归因降噪；旁路：ESM 具名导入快照、worker 独立 realm、原生插件）；默认 runtimeGuard: 'off'（性能/稳定代价 opt-in），watch 只报警不动作 | 源码核实：client-modules 扫描逻辑、ui-conversation contract/slots.ts:52-68、ui-subagent client 模式、host/webserver register API |
+| D23 | **OSV 已知漏洞核对落地 + LLM 质量审计提示词强化（用户指令）**：§14.6-1 从"评估未排期"转实现——scanner-bin 新增 osv.ts（queryOsv 注入式 fetch + 4s 超时），engine 新增 scanWithOsv（静态判定含缓存与 OSV 分离：缓存只存静态报告，OSV 每次实时查询保持新鲜）；**决策修正：OSV 命中 high/certain 进 verdict（suspicious）**（§14.6 原"绝不进 verdict"改为"命中=真实已知漏洞，进 verdict 抬升"——用户要"最新防护"；名称级查询有噪音已用 5 条封顶缓解）；request.osv 严格 opt-in（===true），插件侧 osvCheck 配置默认 true（schema default），internal/plugin 守卫 + scan_plugin 工具透传；网络失败/超时静默降级纯静态。实测 lodash 4.17.20 → 5 CVE（ReDoS/命令注入/原型污染）verdict suspicious score 0。LLM round3 提示词补"具体质量/bug 检出"指令（unhandled rejection/吞错/空指针/逻辑倒置/竞态/死循环/资源泄漏/静默失败，逐条标 bug 或 smell 并引行号）。介绍栏加宽 280 并补"三道防线 + OSV + 质量识别"卖点 | 实测：api.osv.dev 200/1.7s；scanner 子进程全链路 lodash 5 CVE；153 tests 全绿 |
+| D24 | **盾牌迭代（用户反馈驱动）**：三态图标（绿√/黄?/红!）、暗色莫兰迪分支、RAM 字母标签、黄灯预警详情卡、?→右侧介绍栏（主框不动，介绍栏绝对定位贴右缘等高，宽度按右侧空间 160-280 自适应）、去掉"只报警不代劳"文案改"发给 DSH 里的 LLM 协助排查" | 用户反馈逐轮验收 |
 
 ## 14. 未来路线（v1.1 后，未排期）
 
@@ -763,9 +765,9 @@ defineTool({
 
 **已知边界（README 同步）**：T1/T2 是"防盗摄像头"不是"保险柜"——抓明显搞事，抓不了 worker/原生模块/低流量慢外联；T2 对官方包 spawn 降噪（官方能力授权）；网络行为监控（http/net 包装）v1 不做（宿主自身流量噪声大），列远期。
 
-### 14.6 待办数据源与反混淆（可行性已评估，未排期）
+### 14.6 数据源与反混淆
 
-1. **R10 CVE 匹配（现在就能做，提示级）**：用现成公开库 **OSV.dev**（免费、无 key、覆盖 npm），不自己建库（无漏洞数据资产）。实现 = 依赖清单 → OSV 查询 → 命中 → 本地缓存（TTL）→ 报告 info（**绝不进 verdict**——CVE 库噪音多，命中≠被攻击）。代价：扫描变慢（网络）、要联网（离线降级）、隐私（依赖清单出网，可关开关）。NVD（要 key）/GitHub Advisory 备选。
+1. **R10 CVE 匹配（已实现，D23）**：**OSV.dev**（免费、无 key、覆盖 npm）。实现 = package.json name → OSV 查询（注入式 fetch、4s 超时）→ 命中追加 high/certain finding（封顶 5 条）→ **进 verdict 抬升 suspicious**（D23 决策修正：用户要"最新防护"，CVE 是真实事实非启发式；名称级查询噪音用 5 条封顶缓解）。缓存策略：静态报告（含缓存）与 OSV 分离，OSV 每次实时查询保持数据新鲜（"自动更新"）。配置 osvCheck 默认 true（可关；离线自动降级纯静态；依赖清单出网属隐私边界，README 已注明）。NVD（要 key）/GitHub Advisory 备选。
 2. **轻量反混淆（现在能做，确定性）**：扩展 stringyValue 为纯 AST 常量求值器（字面量拼接 + String.fromCharCode 链 + base64 字面量解码 + 简单 XOR），修 D14 记录的 base64 混淆漏检；**绝不 eval**（保住扫描器物理隔离）。重量级反混淆（控制流平坦化等）不做（军备竞赛）。
 3. **scanner daemon 常驻**（D17 远期）：省 spawn 固定开销，保持子进程隔离。
 

@@ -18,7 +18,7 @@ export const Config = VetConfigSchema
 export function apply(ctx: Context, config: VetConfig): void {
   validateConfig(config)
   const status = new VetStatus()
-  ctx.tools.register(createScanPluginTool())
+  ctx.tools.register(createScanPluginTool(config))
   ctx.tools.register(createAuditPluginTool({ ctx, config }))
   installRuntimeGuard(ctx, config, status)
   installStatusRoute(ctx, config, status)

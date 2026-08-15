@@ -36,7 +36,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       if (root === undefined) return
       const files = listSourceFiles(root)
       if (files.length === 0) return
-      const res = scanSync({ kind: 'files', files }, { timeoutMs: config.scannerTimeoutMs })
+      const res = scanSync({ kind: 'files', files, osv: config.osvCheck === true }, { timeoutMs: config.scannerTimeoutMs })
       if (!res.ok || res.report === undefined) return
       const { verdict, staticScore } = res.report
       ctx.logger.info(`vet: auto-scan ${entryName} → ${verdict} (${staticScore})`)

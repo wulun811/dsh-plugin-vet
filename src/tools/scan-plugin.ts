@@ -65,7 +65,7 @@ export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; plug
 }
 
 /** scan_plugin：确定性静态扫描工具（verdict 只来自静态层，LLM 不参与）。 */
-export function createScanPluginTool() {
+export function createScanPluginTool(config: { osvCheck?: boolean } = {}): ReturnType<typeof defineTool> {
   return defineTool({
     name: 'scan_plugin',
     description: 'Static-scan plugin code or an installed package for escape patterns (constructor-chain, direct process access), dynamic execution, hardcoded secrets. Deterministic rule engine in an isolated process; returns a scorecard with verdict (critical/suspicious/clean) and staticScore. 静态层为确定性判定，LLM 不参与。',
@@ -105,6 +105,7 @@ export function createScanPluginTool() {
     },
     async execute(args) {
       const { request, pluginName } = buildRequest(args as unknown as ScanPluginArgs)
+      request.osv = config.osvCheck === true
       const response = await scan(request, { timeoutMs: 60_000 })
       if (!response.ok || response.report === undefined) {
         throw new Error(`vet: 扫描失败 ${response.error ?? 'unknown'}`)

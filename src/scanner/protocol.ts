@@ -17,6 +17,8 @@ export interface ScanRequest {
   rules?: Record<string, boolean>
   /** 扫描目标身份：'plugin'（DSH 插件包，严格逃逸判定，默认）| 'generic'（通用代码审计，R3 降级为能力触达面 info）。 */
   targetKind?: 'plugin' | 'generic'
+  /** OSV 已知漏洞核对（npm 生态）：仅 files 模式且存在 package.json 时生效；严格 opt-in（=== true）。 */
+  osv?: boolean
 }
 
 export interface Finding {

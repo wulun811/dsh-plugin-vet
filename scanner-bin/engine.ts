@@ -11,6 +11,7 @@ import { runPackageJson } from './rules/supply-chain.js'
 import { computeScore, computeVerdict } from './score.js'
 import { cacheKey, readCached, writeCached } from './cache.js'
 import { ENGINE_VERSION } from './protocol.js'
+import { queryOsv, type OsvVuln } from './osv.js'
 import type { Finding, ScanReport, ScanRequest, ScanResponse } from './protocol.js'
 
 const SCANNABLE_EXT = new Set(['js', 'ts', 'mjs', 'cjs'])
@@ -126,4 +127,57 @@ export function scan(request: ScanRequest): ScanResponse {
   } catch (error) {
     return { ok: false, error: String(error) }
   }
+}
+
+export interface OsvCheckOptions {
+  osvTimeoutMs?: number
+  fetchImpl?: typeof fetch
+}
+
+/** OSV 已知漏洞核对（R10 补漏，PLAN.md §14.6）：仅 files 模式 + package.json 有 name 时执行。 */
+async function checkOsv(request: ScanRequest, opts: OsvCheckOptions): Promise<Finding[]> {
+  if (request.osv !== true) return []
+  const pkgFile = request.files?.find(f => basename(f) === 'package.json')
+  if (pkgFile === undefined) return []
+  let pkg: { name?: unknown }
+  try {
+    pkg = JSON.parse(readOrDefault(pkgFile)) as { name?: unknown }
+  } catch {
+    return []
+  }
+  if (typeof pkg.name !== 'string' || pkg.name === '') return []
+  let vulns: OsvVuln[]
+  try {
+    vulns = await queryOsv(pkg.name, { timeoutMs: opts.osvTimeoutMs, fetchImpl: opts.fetchImpl })
+  } catch {
+    return [] // 网络失败/超时：静默降级，不影响静态判定
+  }
+  return vulns.slice(0, 5).map(v => ({
+    rule: 'OSV',
+    severity: 'high',
+    confidence: 'certain', // 漏洞库命中是事实（非启发式），verdict 可据此抬升
+    message: '已知漏洞 ' + v.id + (v.aliases.length > 0 ? '（' + v.aliases[0] + '）' : '') + '：' + (v.summary ?? 'npm 生态已知漏洞').slice(0, 110),
+    evidence: '',
+    file: 'package.json',
+  }))
+}
+
+/**
+ * scan + OSV 核对（异步，含网络调用）：静态判定（含缓存）与 OSV 结果分离——
+ * 缓存只存静态报告，OSV 每次扫描实时查询（保持数据新鲜）。OSV 命中追加 high
+ * findings 并重算 score/verdict；网络失败静默降级为纯静态结果。
+ */
+export async function scanWithOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promise<ScanResponse> {
+  const base = scan(request)
+  if (!base.ok || base.report === undefined) return base
+  const osvFindings = await checkOsv(request, opts)
+  if (osvFindings.length === 0) return base
+  const findings = [...base.report.findings, ...osvFindings]
+  const report: ScanReport = {
+    ...base.report,
+    findings,
+    staticScore: computeScore(findings),
+    verdict: computeVerdict(findings),
+  }
+  return { ok: true, report }
 }

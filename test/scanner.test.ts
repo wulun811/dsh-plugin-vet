@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync, mkdtempSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { scan } from '../lib/scanner-bin/engine.js'
+import { scan, scanWithOsv } from '../lib/scanner-bin/engine.js'
+import { queryOsv } from '../lib/scanner-bin/osv.js'
 import { computeScore, computeVerdict } from '../lib/scanner-bin/score.js'
 import { cacheKey, readCached, writeCached } from '../lib/scanner-bin/cache.js'
 import type { Finding, ScanRequest } from '../lib/scanner-bin/protocol.js'
@@ -198,6 +199,74 @@ describe('cache', () => {
       expect(b.report!.verdict).toBe('suspicious')
     } finally {
       delete process.env.DSH_PLUGIN_VET_CACHE_DIR
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// OSV 已知漏洞核对（PLAN.md §14.6）
+// ---------------------------------------------------------------------------
+
+describe('OSV', () => {
+  const fakeFetch = (vulns: unknown): typeof fetch =>
+    (async () => ({ ok: true, status: 200, json: async () => ({ vulns }) })) as unknown as typeof fetch
+
+  it('queryOsv: 解析漏洞列表（id/aliases/summary）', async () => {
+    const v = await queryOsv('lodash', {
+      fetchImpl: fakeFetch([{ id: 'GHSA-29mw-wpgm-hmr9', aliases: ['CVE-2020-28500'], summary: 'prototype pollution' }]),
+    })
+    expect(v).toHaveLength(1)
+    expect(v[0]!.id).toBe('GHSA-29mw-wpgm-hmr9')
+    expect(v[0]!.aliases).toContain('CVE-2020-28500')
+  })
+
+  it('queryOsv: 网络失败 → reject（由 scanWithOsv 静默降级）', async () => {
+    const fail = (async () => { throw new Error('net down') }) as unknown as typeof fetch
+    await expect(queryOsv('x', { fetchImpl: fail, timeoutMs: 100 })).rejects.toThrow('net down')
+  })
+
+  it('scanWithOsv: 命中已知漏洞 → 追加 OSV high finding，verdict 抬升为 suspicious', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-osv-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'vuln-pkg', version: '1.0.0' }))
+      const res = await scanWithOsv(
+        { kind: 'files', files: [join(dir, 'package.json')], osv: true },
+        { fetchImpl: fakeFetch([{ id: 'GHSA-1', aliases: ['CVE-2024-1234'], summary: 'rce' }]) },
+      )
+      expect(res.ok).toBe(true)
+      const f = res.report!.findings.find(x => x.rule === 'OSV')
+      expect(f).toBeDefined()
+      expect(f!.severity).toBe('high')
+      expect(f!.confidence).toBe('certain')
+      expect(res.report!.verdict).toBe('suspicious')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('scanWithOsv: osv 未启用 → 纯静态结果，无 OSV finding', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-osv-off-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'vuln-pkg', version: '1.0.0' }))
+      const res = await scanWithOsv({ kind: 'files', files: [join(dir, 'package.json')] }, { fetchImpl: fakeFetch([{ id: 'GHSA-1' }]) })
+      expect(res.ok).toBe(true)
+      expect(res.report!.findings.some(x => x.rule === 'OSV')).toBe(false)
+      expect(res.report!.verdict).toBe('clean')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('scanWithOsv: 网络失败 → 静默降级为纯静态结果', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-osv-fail-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'vuln-pkg', version: '1.0.0' }))
+      const fail = (async () => { throw new Error('net down') }) as unknown as typeof fetch
+      const res = await scanWithOsv({ kind: 'files', files: [join(dir, 'package.json')], osv: true }, { fetchImpl: fail })
+      expect(res.ok).toBe(true)
+      expect(res.report!.findings.some(x => x.rule === 'OSV')).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
