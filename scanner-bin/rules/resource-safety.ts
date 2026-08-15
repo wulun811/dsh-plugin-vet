@@ -1,27 +1,27 @@
 import ts from 'typescript'
 import type { Finding, RuleContext } from '../protocol.js'
-import { walk, numberyValue, lineOf } from '../ast.js'
+import { walk, numberyValue, stringyValue, lineOf } from '../ast.js'
 
 /**
- * R9 resource safety (PLAN.md §14.2 R9-1). Three A-tier signals:
+ * R9 resource safety (PLAN.md 14.2 R9-1/2/3). Signals, capped at high (14.1:
+ * critical would short-circuit the LLM audit, which resource-class issues need):
  *
- * 1. unbounded allocation literal: `new Array(2**31)` / `Array(n)` /
- *    `Array.from({ length: n })` / `Buffer.alloc(huge)` — a statically known
- *    huge allocation (≥ ALLOC_LIMIT units).
- * 2. synchronous exit-less loop: `while(true)` / `for(;;)` whose body has no
- *    break/return/throw and no await — a busy-wait that wedges the event loop
- *    (module-top-level in npm packages stalls the whole harness process).
- *    A body with await is a likely resident service loop → advisory info only.
- * 3. unbounded child-process spawn inside an exit-less synchronous loop
- *    (`spawn`/`exec`/`execFile`/`fork`/`new Worker`) — fork-bomb pattern.
- *
- * Severity is capped at high by design (§14.1): critical would short-circuit
- * the LLM audit, and resource-class signals need LLM context review (a
- * `while(true){ await ... }` may be a legitimate service loop).
+ * R9-1 (high): unbounded allocation literal (new Array(2**31) / Array(n) /
+ *   Array.from({length}) / Buffer.alloc(huge)); synchronous exit-less loop
+ *   while(true)/for(;;) (busy-wait wedges the event loop; module-top-level in
+ *   npm packages stalls the whole harness); child-process spawn inside such a
+ *   loop (fork-bomb pattern). A loop body with await is a likely resident
+ *   service loop, advisory info only.
+ * R9-2 (medium): nested-quantifier regex (ReDoS, (a+)+ style exponential
+ *   backtracking); recursion without any conditional branch (rough check).
+ * R9-3 (info/medium): in-loop += accumulation (possible O(n2) string),
+ *   in-loop map.set growth signal, in-loop Promise.all concurrency signal.
  */
 const ALLOC_LIMIT = 100_000_000
 const SPAWN_CALLS = new Set(['spawn', 'exec', 'execFile', 'fork'])
 const SPAWN_NEWS = new Set(['Worker'])
+/** (a+)+ style: quantifier at the end of a group, then a group-level quantifier. */
+const REDOS_RE = /(\([^()\\]*[+*?][^()\\]*\))[+*?]/
 
 /** Per-node exit signals of a loop body, skipping nested functions. */
 interface ExitSignals {
@@ -62,7 +62,7 @@ function collectSpawns(body: ts.Node, out: ts.Node[]): void {
   visit(body)
 }
 
-/** `while(true)` or `for(;;)` — statically provable unbounded loops. */
+/** while(true) or for(;;) - statically provable unbounded loops. */
 function unboundedLoop(n: ts.Node): ts.WhileStatement | ts.ForStatement | undefined {
   if (ts.isWhileStatement(n) && n.expression.kind === ts.SyntaxKind.TrueKeyword) return n
   if (ts.isForStatement(n) && n.initializer === undefined && n.condition === undefined && n.incrementor === undefined) return n
@@ -76,7 +76,7 @@ function allocFinding(ruleText: string, n: ts.Node, sf: ts.SourceFile, amount: n
     rule: 'R9',
     severity: 'high',
     confidence: 'certain',
-    message: `无界分配：${ruleText}（静态值 ${amount} ≥ ${ALLOC_LIMIT}，可致 OOM）`,
+    message: '无界分配：' + ruleText + '（静态值 ' + amount + ' ≥ ' + ALLOC_LIMIT + '，可致 OOM）',
     evidence: n.getText(sf).slice(0, 200),
     line: lineOf(sf, n),
   }
@@ -107,7 +107,7 @@ function checkArrayAlloc(n: ts.CallExpression | ts.NewExpression, sf: ts.SourceF
     if (arg !== undefined) {
       const v = numberyValue(arg, sf)
       if (v !== undefined) {
-        const f = allocFinding(`Buffer.${method}(n) 巨大缓冲`, n, sf, v)
+        const f = allocFinding('Buffer.' + method + '(n) 巨大缓冲', n, sf, v)
         if (f !== undefined) found.push(f)
       }
     }
@@ -128,6 +128,143 @@ function checkArrayAlloc(n: ts.CallExpression | ts.NewExpression, sf: ts.SourceF
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// R9-2: ReDoS nested quantifiers + recursion without a conditional branch
+// ---------------------------------------------------------------------------
+
+function checkRedosPattern(pattern: string, n: ts.Node, sf: ts.SourceFile, found: Finding[]): void {
+  if (REDOS_RE.test(pattern)) {
+    found.push({
+      rule: 'R9',
+      severity: 'medium',
+      confidence: 'likely',
+      message: '正则嵌套量词（ReDoS 风险：(a+)+ 类指数回溯）',
+      evidence: n.getText(sf).slice(0, 200),
+      line: lineOf(sf, n),
+    })
+  }
+}
+
+/** Regex literal /pattern/flags and new RegExp('pattern'). */
+function checkReDoS(sf: ts.SourceFile, found: Finding[]): void {
+  walk(sf, n => {
+    if (ts.isRegularExpressionLiteral(n)) {
+      const text = n.text
+      const lastSlash = text.lastIndexOf('/')
+      if (text.startsWith('/') && lastSlash > 0) {
+        checkRedosPattern(text.slice(1, lastSlash), n, sf, found)
+      }
+      return
+    }
+    if ((ts.isCallExpression(n) || ts.isNewExpression(n)) && ts.isIdentifier(n.expression) && n.expression.text === 'RegExp') {
+      const arg = n.arguments?.[0]
+      if (arg !== undefined) {
+        const sv = stringyValue(arg, sf)
+        if (sv !== undefined) checkRedosPattern(sv.text, n, sf, found)
+      }
+    }
+  })
+}
+
+/** Function name: declared name, or the const binding of an arrow/expression. */
+function functionName(fn: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction, sf: ts.SourceFile): string | undefined {
+  if (fn.name !== undefined) return fn.name.text
+  const parent = fn.parent
+  if (parent !== undefined && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) return parent.name.text
+  return undefined
+}
+
+/** Rough recursion check: direct self-call with no if/switch/ternary/&&/|| in the body tree. */
+function checkRecursion(sf: ts.SourceFile, found: Finding[]): void {
+  walk(sf, n => {
+    if (!ts.isFunctionDeclaration(n) && !ts.isFunctionExpression(n) && !ts.isArrowFunction(n)) return
+    const name = functionName(n, sf)
+    if (name === undefined || name === '') return
+    const body = n.body
+    if (body === undefined) return
+    let selfCall = false
+    let hasCondition = false
+    const visit = (node: ts.Node): void => {
+      if (node !== n && ts.isFunctionLike(node)) return
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name) selfCall = true
+      if (ts.isIfStatement(node) || ts.isSwitchStatement(node) || ts.isConditionalExpression(node)
+        || (ts.isBinaryExpression(node)
+          && (node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken || node.operatorToken.kind === ts.SyntaxKind.BarBarToken))) {
+        hasCondition = true
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(body)
+    if (selfCall && !hasCondition) {
+      found.push({
+        rule: 'R9',
+        severity: 'medium',
+        confidence: 'likely',
+        message: '递归无终止条件粗检：' + name + ' 直接自调用且函数体内无条件分支',
+        evidence: n.getText(sf).slice(0, 200),
+        line: lineOf(sf, n),
+      })
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// R9-3: in-loop accumulation / growth / concurrency signals (advisory)
+// ---------------------------------------------------------------------------
+
+function isAnyLoop(n: ts.Node): boolean {
+  return ts.isForStatement(n) || ts.isWhileStatement(n) || ts.isDoStatement(n)
+    || ts.isForInStatement(n) || ts.isForOfStatement(n)
+}
+
+function checkLoopBodyPatterns(sf: ts.SourceFile, found: Finding[]): void {
+  walk(sf, n => {
+    if (!isAnyLoop(n)) return
+    const body = (n as ts.ForStatement | ts.WhileStatement | ts.DoStatement | ts.ForInStatement | ts.ForOfStatement).statement
+    const visit = (node: ts.Node): void => {
+      if (ts.isFunctionLike(node)) return
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) {
+        found.push({
+          rule: 'R9',
+          severity: 'info',
+          confidence: 'heuristic',
+          message: '循环内 += 累加（字符串拼接可能 O(n²)）',
+          evidence: node.getText(sf).slice(0, 200),
+          line: lineOf(sf, node),
+        })
+        return
+      }
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression
+        if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'set' && ts.isIdentifier(callee.expression)) {
+          found.push({
+            rule: 'R9',
+            severity: 'medium',
+            confidence: 'likely',
+            message: '循环内集合写入 map.set（无界增长信号）',
+            evidence: node.getText(sf).slice(0, 200),
+            line: lineOf(sf, node),
+          })
+          return
+        }
+        if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'all'
+          && ts.isIdentifier(callee.expression) && callee.expression.text === 'Promise') {
+          found.push({
+            rule: 'R9',
+            severity: 'info',
+            confidence: 'heuristic',
+            message: '循环内 Promise.all（无界并发信号）',
+            evidence: node.getText(sf).slice(0, 200),
+            line: lineOf(sf, node),
+          })
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(body)
+  })
 }
 
 export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
@@ -173,5 +310,8 @@ export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
       }
     }
   })
+  checkReDoS(sf, found)
+  checkRecursion(sf, found)
+  checkLoopBodyPatterns(sf, found)
   return found
 }

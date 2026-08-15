@@ -69,6 +69,26 @@ const SAMPLES: Sample[] = [
   { name: '正常有限循环', code: `for (let i = 0; i < 10; i++) { f(i) }`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
   { name: '小分配 Buffer.alloc(1024)', code: `Buffer.alloc(1024)`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
   { name: '非字面条件循环', code: `while (flag) { if (done) break }`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
+  // --- R9-2（medium/info，不升级 verdict） ---
+  { name: 'ReDoS 嵌套量词正则字面量', code: `const re = /(a+)+/`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  { name: 'ReDoS new RegExp 构造', code: `const re = new RegExp('(a+)+')`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  { name: '递归无终止（直接自调用无条件）', code: `function f() { return f() }`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  { name: '箭头递归无终止', code: `const f = () => f()`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  // --- R9-2 负例（有条件递归/合法正则，不得误报） ---
+  { name: '有条件递归（三元）', code: `function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) }`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
+  { name: '非嵌套量词正则', code: `const re = /ab+c/`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
+  // --- R9-3（info/medium 提示档） ---
+  { name: '循环内 Map.set（medium 不升级）', code: `for (const k of keys) { m.set(k, v) }`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  { name: '循环内 +=（info）', code: `for (let i = 0; i < n; i++) { s += item }`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  // --- 破坏性行为（R11，high/medium） ---
+  { name: '删除敏感路径 /etc/passwd', code: `fs.unlinkSync('/etc/passwd')`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R11'] },
+  { name: '删除敏感路径 /root/secret', code: `fs.rmSync('/root/secret')`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R11'] },
+  { name: '写入敏感路径 /etc/hosts', code: `fs.writeFileSync('/etc/hosts', 'x')`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R11'] },
+  // --- R11 负例（清理/临时文件，不得误报） ---
+  { name: '删除临时文件（medium 不升级）', code: `fs.unlinkSync('/tmp/cache/x')`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R11'] },
+  { name: '删除变量路径（非字面量）', code: `fs.unlinkSync(tempFile)`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R11'] },
+  { name: '读取敏感路径（不属破坏）', code: `fs.readFileSync('/etc/passwd')`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
+  { name: '写入临时路径', code: `fs.writeFileSync('/tmp/x', 'y')`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
   // --- 负例（不得误报） ---
   { name: '参数遮蔽 process', code: `function f(process) { return process.pid }`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
   { name: '干净工具插件', code: `export function apply(ctx) { ctx.tools.register(defineTool({ name: 't' })) }`, language: 'ts', runtime: 'host', verdict: 'clean', rules: [] },
@@ -121,6 +141,35 @@ describe('多文件插件包（files 模式 + 文件归因）', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('供应链扫描（R10，package.json）', () => {
+  const scanPkg = (pkg: Record<string, unknown>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-r10-'))
+    const file = join(dir, 'package.json')
+    writeFileSync(file, JSON.stringify(pkg))
+    const res = scan({ kind: 'files', files: [file] })
+    rmSync(dir, { recursive: true, force: true })
+    return res
+  }
+  it('install 钩子 → suspicious + R10', () => {
+    const res = scanPkg({ name: 'x', scripts: { postinstall: 'node install.js' } })
+    expect(res.ok).toBe(true)
+    expect(res.report!.verdict).toBe('suspicious')
+    expect(res.report!.findings.some(f => f.rule === 'R10')).toBe(true)
+  })
+  it('依赖清单 → info，verdict clean', () => {
+    const res = scanPkg({ name: 'x', dependencies: { lodash: '^4', axios: '^1' } })
+    expect(res.ok).toBe(true)
+    expect(res.report!.verdict).toBe('clean')
+    expect(res.report!.findings.filter(f => f.rule === 'R10').length).toBeGreaterThan(0)
+  })
+  it('无钩子无依赖 → clean 无 R10', () => {
+    const res = scanPkg({ name: 'x', version: '1.0.0' })
+    expect(res.ok).toBe(true)
+    expect(res.report!.verdict).toBe('clean')
+    expect(res.report!.findings.some(f => f.rule === 'R10')).toBe(false)
   })
 })
 

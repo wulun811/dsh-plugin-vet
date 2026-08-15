@@ -36,7 +36,7 @@ export function listSourceFiles(root: string): string[] {
       }
       if (stat.isDirectory()) {
         walk(full, depth + 1)
-      } else if (stat.isFile() && SOURCE_EXT.has(extOf(full))) {
+      } else if (stat.isFile() && (SOURCE_EXT.has(extOf(full)) || (name === 'package.json' && dir === root))) {
         out.push(full)
       }
     }

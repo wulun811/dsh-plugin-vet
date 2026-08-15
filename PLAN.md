@@ -708,6 +708,7 @@ defineTool({
 |---|---|---|
 | D15 | **AST 引擎评估（malong-parse）**：Rust tree-sitter 9 语言符号/引用/指标提取引擎（MIT）。本地 0bore/malong-parse v0.3.37 = 公开最新（GitHub v0.4.5-post6 的 Cargo.toml 同版本；Rust 引擎自 0.3.37 后未更新）。**「0.4.5.post7」不存在**：GitHub tags/releases 最新 v0.4.5-post6，npm @jieai/dsh-malong-bridge 最新 0.4.5-post6，PyPI 无此包。**结论：不引入替换型引擎**——malong-parse 是符号提取器非规则引擎，vet 的 R1-R9 依赖 TS 语义 AST（isShadowed 词法作用域 / stringyValue 静态求值 / node 类型判断），CST 移植需整体重写规则层。采纳**方案 A（两级扫描）**：TS compiler 保留为权威精扫（verdict 语义不变），复用 malong-parse 基础设施（parser pool / tree cache / npm 4 平台二进制发布机制）做 Rust tree-sitter **预筛层**，大包快速排除干净文件、可疑文件送精扫（解决 R8 超时）；方案 C（audit 层接入 extract_symbols/extract_references 作 LLM 代码地图）列为 audit 增强 | 调查：GitHub API / npm registry / PyPI / 本地 0bore/malong-parse 源码与二进制 |
 | D16 | **R9-1 资源安全规则族落地**（§14.2）：ast.ts 新增 numberyValue 数字静态求值（字面量/**/<</*/一元/括号/const 绑定）；新增 rules/resource-safety.ts 三检测——(1) new Array/Array(n)/Array.from({length})/Buffer.alloc*/allocUnsafe 无界分配 ≥1e8 → high certain；(2) while(true)/for(;;) 无出口同步循环（无 break/return/throw/await）→ high certain，含 await 常驻循环 → info heuristic（不升级）；(3) 无出口循环内 spawn/exec/execFile/fork/new Worker → high likely（fork 炸弹）。severity 上限 high 落实 §14.1（critical 会短路 LLM）；矩阵新增 9 样本（5 正例 + 4 负例），87/87 全绿，真实 DSH 插件 0 误报 | 矩阵测试；真实插件回归 |
+| D17 | **方案 A 实测后暂缓 + R9-2/3/R10/R11 落地**：实测 600 文件 engine.scan 直调 180ms（parse+全部规则）、20 文件 client.scan（spawn）443ms——**parse 不是瓶颈，spawn 固定开销是绝对大头**，vet 调用场景低频（工具/插件加载），R8 预算 files×2s 实际不触发 → **不引入 Rust tree-sitter 预筛**（收益≈0、复杂度高），D15 方案 A 取消，远期改为 scanner daemon 常驻（省 spawn 开销，保持子进程隔离）；malong-parse 保持远期选项（方案 C audit 代码地图）。规则落地：R9-2 ReDoS 嵌套量词（(a+)+ 类，正则字面量 + new RegExp 构造）+ 递归无终止粗检（直接自调用无条件，三元/if/&&/|| 视为有出口）；R9-3 循环内 +=/Map.set/Promise.all（info/medium 提示档）；R10 供应链（package.json install 钩子 high + 依赖清单 info，CVE 匹配待数据源选型）；R11 破坏性文件操作（fs 删除/敏感路径读写 high/medium，解构/别名 fs 漏检已记录 Known Limitations）。矩阵 87→105 全绿，真实插件 0 误报 | 实测 benchmark；矩阵测试 |
 
 
 ## 14. 未来路线（v1.1 后，未排期）
@@ -733,7 +734,7 @@ defineTool({
 - **能力**：Rust tree-sitter 9 语言（js/ts/python/go/rust/c/cpp/java/bash）符号/引用/指标提取；Unix socket JSON 帧服务（parser pool、tree cache、source cache、并发信号量、动态超时预算、认证 token、health）；MIT；已具备 npm 4 平台二进制发布机制（parse-bin.js）。
 - **vet 现状**：TS compiler API（语义 AST），78 测试绿；短板是大包扫描超时（R8 info）。
 - **方案**：
-  - **A（采纳）两级扫描**：Rust tree-sitter 预筛（快速排除干净文件）→ TS 精扫（verdict 权威不变）。规则层零改动，解决 R8 规模化问题。
+  - **A（实测后暂缓，D17）两级扫描**：Rust tree-sitter 预筛。实测 600 文件 parse+全部规则仅 180ms、R8 预算 files×2s 实际不触发 → 预筛收益≈0，取消引入；远期优化方向改为 scanner daemon 常驻（省 spawn 固定开销，保持子进程物理隔离）。
   - B（远期）规则引擎整体 Rust 化：需重写 R1-R9 + 自实现词法作用域/静态求值，双引擎一致性风险。
   - C（audit 增强）接入 `extract_symbols`/`extract_references` 作 LLM 代码地图输入。
   - D（不引入）维持现状，R8 边界已在能力清单诚实记录。

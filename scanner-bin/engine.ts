@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import { parseSource } from './ast.js'
 import { executeRules } from './rules/index.js'
+import { runPackageJson } from './rules/supply-chain.js'
 import { computeScore, computeVerdict } from './score.js'
 import { cacheKey, readCached, writeCached } from './cache.js'
 import { ENGINE_VERSION } from './protocol.js'
@@ -86,6 +87,14 @@ function scanFiles(request: ScanRequest): ScanResponse {
     if (i > 0 && Date.now() > deadline) {
       findings.push(skipFinding(file))
       break
+    }
+    // R10: package.json manifests are JSON, not source; scan them directly.
+    if (basename(file) === 'package.json') {
+      if (request.rules?.['R10'] !== false) {
+        const json = readOrDefault(file)
+        if (json !== '') findings.push(...runPackageJson(json, 'package.json'))
+      }
+      continue
     }
     const ext = extOf(file)
     if (ext === undefined || !SCANNABLE_EXT.has(ext)) continue

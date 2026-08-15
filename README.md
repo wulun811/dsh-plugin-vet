@@ -29,7 +29,7 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | `auditTimeoutMs` | `120000` | 每轮审计超时 |
 | `scannerTimeoutMs` | `15000` | 静态扫描子进程超时 |
 | `auditCacheTtlHours` | `168` | LLM 审计结果缓存（7 天） |
-| `rules` | `{}`（全开） | 规则开关（R1-R7、R9） |
+| `rules` | `{}`（全开） | 规则开关（R1-R7、R9-R11） |
 | `denyOn` | `critical` | `mode: deny` 时的拦截阈值 |
 | `allowlist` | `[]` | 包名/插件 id 白名单（跳过扫描） |
 
@@ -45,7 +45,7 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 - **`internal/plugin` 自动扫描**（`autoScan: true`）：新装第三方 npm 包加载时自动静态扫描；`deny` 模式 + verdict ≥ `denyOn` → 回滚加载。
 - **`tools/execute` 拦截**：`cordis_define` / `cordis_run` / `run_code` / `workflow` 执行前扫描代码字符串；`report` 模式在结果文本加 `VET:` 前缀，`deny` 模式直接拦截（isError）。
 
-## 静态规则表（R1-R7）
+## 静态规则表（R1-R11）
 
 | ID | 名称 | 默认级别 | 适用场景 | 确定性 |
 |---|---|---|---|---|
@@ -56,7 +56,9 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | R5 | ctx 逃逸尝试信号（withheld 成员/未声明服务） | medium | 仅 code | likely |
 | R6 | 字符串粗扫兜底 | info | both | heuristic |
 | R7 | 硬编码密钥 | high | both | likely |
-| R9 | 资源安全（无界分配/无出口同步循环/循环内 spawn） | high（分配/死循环/fork）/ info（异步常驻循环） | both | certain/likely/heuristic |
+| R9 | 资源安全（无界分配/无出口同步循环/循环内 spawn/ReDoS/递归无终止/循环内增长模式） | high（分配/死循环/fork）/ medium（ReDoS/递归/Map.set）/ info（常驻循环/+=/Promise.all） | both | certain/likely/heuristic |
+| R10 | 供应链（package.json install 钩子/依赖清单） | high（install 钩子）/ info（依赖清单） | files | likely/heuristic |
+| R11 | 破坏性文件操作（fs 删除/敏感路径读写） | high（敏感路径）/ medium（删除） | both | likely |
 
 ## 评分模型
 
@@ -78,7 +80,9 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | R3 | process 直访：`getBuiltinModule`/\`mainModule\`/\`module\`/\`exit\` → critical；其余成员 → high；`runtime='sandbox'` 封顶 high | critical / high | 矩阵 ✓ |
 | R4 | 宿主闭包捕获：agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob 的 `.constructor` 读取或 `Object.getPrototypeOf` 投喂 | critical | 矩阵 ✓ |
 | R7 | 硬编码密钥：`sk-` / `AKIA` / `AIza` / `gh[pousr]_` / `xox[baprs]-` / 环境变量赋值 / URL 内嵌 key（占位符排除） | high → suspicious | 矩阵 ✓ |
-| R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；含 `await` 的常驻循环仅 info（§14.1 不短路 LLM） | 矩阵 ✓ |
+| R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；ReDoS 嵌套量词 `(a+)+$`、递归无终止、循环内 `Map.set` → medium（不进 verdict）；含 `await` 常驻循环仅 info（§14.1 不短路 LLM） | 矩阵 ✓ |
+| R10 | 供应链：`package.json` scripts 的 preinstall/install/postinstall/uninstall 钩子（安装期任意代码执行）→ high；依赖清单 → info（已知漏洞匹配待数据源选型） | high → suspicious（install 钩子） | 矩阵 ✓ |
+| R11 | 破坏性文件操作：`fs.unlink/rm/rmdir(+Sync)` 删除敏感路径（/etc/root/.ssh 等）→ high，普通删除 → medium；`fs.writeFile` 等写入敏感路径 → high；`fs.readdir` 遍历敏感目录 → medium | high → suspicious（敏感路径）；medium 不进 verdict | 矩阵 ✓ |
 
 ### 能检测 —— 提示级（只降分，永不改变 verdict）
 
@@ -117,13 +121,15 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 5. **扫描耗时**：大插件包可能超时跳过（R8 info）；LLM 审计分钟级、按需调用。
 6. **qualityScore 是模型主观判断**，不构成安全保证。
 7. **`@deepseek-ai/*` 默认信任**：未来若官方生态被攻破需收紧（v1 留开关）。
+8. **R10 已知漏洞匹配未做**：install 钩子与依赖清单已扫；CVE 匹配需数据源选型（OSV/NVD），待定。
+9. **R11 只认 `fs.*` 形态**：解构/别名调用（`const { unlinkSync } = require('fs')`）与运行时路径漏检（已实测记录，属静态边界）。
 
 ## 开发
 
 ```sh
 npm run build       # scanner-bin + src 编译到 lib/
 npm run typecheck   # tsc --noEmit
-npm test            # 构建 + vitest（87 用例）
+npm test            # 构建 + vitest（105 用例）
 ```
 
 目录：`scanner-bin/` 静态引擎（独立进程）；`src/` 插件本体（tools/guards/audit/report）；`test/` fixtures + 单测。权威计划见 `PLAN.md`（v1.1）。

@@ -8,6 +8,7 @@ import * as ctxVerbs from './ctx-verbs.js'
 import * as stringHeuristics from './string-heuristics.js'
 import * as secrets from './secrets.js'
 import * as resourceSafety from './resource-safety.js'
+import * as destructiveOps from './destructive-ops.js'
 
 export interface Rule {
   id: string
@@ -24,6 +25,7 @@ export const RULES: Rule[] = [
   { id: 'R6', run: stringHeuristics.run },
   { id: 'R7', run: secrets.run },
   { id: 'R9', run: resourceSafety.run },
+  { id: 'R11', run: destructiveOps.run },
 ]
 
 /** Execute all enabled rules over one source file. */
