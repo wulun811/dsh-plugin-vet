@@ -64,9 +64,19 @@ function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, ad
       add(n, 'info', 'likely', 'require()（客户端加载器 factory 形参注入，DSH bundle 标准写法）')
       return
     }
-    // files: npm 包内 require 是真实 Node 能力触达 → high；code(沙箱): 被 trap 的通道 → medium
+    // F14：require 分级——危险内置模块（child_process/vm/net/worker 等，可执行/逃逸面）→ high；
+    // 普通模块（path/fs/自定义包）→ medium（正常 CJS 插件 require 标准库是常规操作，
+    // 整体判 suspicious 是误报——R6 已对危险模块单独提示）
+    const arg = n.arguments?.[0]
+    const mod = arg !== undefined && (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) ? arg.text : undefined
     if (ctx.request.kind === 'files') {
-      add(n, 'high', 'likely', 'require() 动态模块加载（npm 包内真实能力触达）')
+      if (mod !== undefined && /^(node:)?(child_process|vm|worker_threads|cluster|net|dgram|tls|https?|http2)/.test(mod)) {
+        add(n, 'high', 'likely', `require('${mod}') 危险内置模块（执行/网络能力触达）`)
+      } else if (mod !== undefined && /^(node:)?(fs|path|os|util|crypto|events)/.test(mod)) {
+        add(n, 'medium', 'likely', `require('${mod}') 标准内置模块`)
+      } else {
+        add(n, 'medium', 'likely', 'require() 动态模块加载（npm 包内能力触达）')
+      }
     } else if (!isTopLevelConstRequire(n)) {
       add(n, 'medium', 'likely', 'require()（沙箱内被 trap，但属逃逸尝试）')
     }
