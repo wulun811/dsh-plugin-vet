@@ -9,6 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { VetStatus } from './status.js'
 import { readHostMetrics } from './metrics.js'
 import type { VetConfig } from '../config.js'
@@ -56,16 +57,42 @@ function sameOrigin(req: IncomingMessage): boolean {
  * 用户点按钮触发（alarm-only 不冲突：是用户的操作，vet 只按指令写自己的配置）。
  * @returns ok + 给用户的提示语。
  */
+/**
+ * DSH 的 ctx.baseUrl 可能是 file: URL（如 file:/home/user/.dsh/profiles/web）
+ * 或普通目录路径，统一规整成文件系统路径（path.join 不认 URL）。
+ */
+function resolveProfileDir(baseUrl: string): string {
+  if (baseUrl.startsWith('file:')) {
+    try {
+      return fileURLToPath(baseUrl)
+    } catch {
+      // 解析失败退回字面量，由后续 IO 报错，避免吞掉真实原因
+    }
+  }
+  return baseUrl
+}
+
 export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok: boolean; note: string } {
   if (ctx.baseUrl === undefined) {
     return { ok: false, note: '无法定位 profile 配置目录（ctx.baseUrl 缺失）' }
   }
-  const patchPath = join(ctx.baseUrl, 'cordis.patch.yml')
+  const patchPath = join(resolveProfileDir(ctx.baseUrl), 'cordis.patch.yml')
   let content: string
   try {
     content = readFileSync(patchPath, 'utf8')
-  } catch {
-    return { ok: false, note: `无法读取 ${patchPath}` }
+  } catch (error) {
+    if (!enable) return { ok: true, note: '当前未开启' }
+    // 首次开启时 cordis.patch.yml 可能还不存在 → 直接新建
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      return { ok: false, note: `无法读取 ${patchPath}` }
+    }
+    const entry = `- id: ${PACKAGE_NAME}\n  config:\n    runtimeGuard: watch\n`
+    try {
+      writeFileSync(patchPath, entry)
+    } catch (writeError) {
+      return { ok: false, note: `写入失败：${String(writeError)}` }
+    }
+    return { ok: true, note: `已写入 ${patchPath}，重启 dsh web 后生效` }
   }
   const marker = `- id: ${PACKAGE_NAME}`
   if (enable) {

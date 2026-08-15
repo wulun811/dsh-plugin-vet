@@ -266,6 +266,33 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     expect(r.ok).toBe(true)
     rmSync(dir, { recursive: true, force: true })
   })
+
+  it('baseUrl 为 file: URL 时正常读写（DSH web profile 实际形态）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    writeFileSync(join(dir, 'cordis.patch.yml'), '- id: settings\n')
+    const r = writeRuntimeGuardConfig(mkCtx('file:' + dir), true)
+    expect(r.ok).toBe(true)
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('runtimeGuard: watch')
+    const r2 = writeRuntimeGuardConfig(mkCtx('file:' + dir), false)
+    expect(r2.ok).toBe(true)
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).not.toContain('plugin-vet')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('patch 文件不存在时 enable 直接新建', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const r = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(r.ok).toBe(true)
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('- id: @jieai/dsh-plugin-vet')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('patch 文件不存在时 disable 视为未开启', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const r = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(r.ok).toBe(true)
+    rmSync(dir, { recursive: true, force: true })
+  })
 })
 
 describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
