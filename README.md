@@ -1,15 +1,24 @@
 # @jieai/dsh-plugin-vet — DSH 插件信任流水线
 
+[![npm version](https://img.shields.io/npm/v/@jieai/dsh-plugin-vet)](https://www.npmjs.com/package/@jieai/dsh-plugin-vet)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933)](package.json)
+
 > 安装任何插件前，先让 dsh-plugin-vet 走一遍：静态规则给出 verdict（确定性、不可伪造），
 > agent 按 vet-audit-protocol 技能排查敏感点与质量问题（谁也无法替代），最终一张评分卡交给人/模型决定。
 >
-> **定位（D21）：监控报警器，不是打手。** vet 只做「检查 → 报警 → 给建议」：写时查（静态扫描）、
+> **定位：监控报警器，不是打手。** vet 只做「检查 → 报警 → 给建议」：写时查（静态扫描）、
 > 跑时盯（运行时守卫）、报警面（评分卡 + GUI 盾牌状态灯）。**vet 永不替用户动手**——不自动卸载、
 > 不自动杀进程、不自动改配置；deny 模式是部署者显式开启的 opt-in，不构成产品身份。最终怎么处置，
 > 由用户在自己的 DSH 上操作决定。
 
-@jieai/dsh-plugin-vet 是 deepseek-harness 生态的第一个"信任层"插件：占据
+@jieai/dsh-plugin-vet 是 deepseek-harness 生态的**信任层插件**：占据
 **下载 → 扫描 → 审计 → 评分 → 决定 → 运行时盯梢** 这一整套信任流水线。运行时盯梢内置**蜜罐诱饵**：谁偷偷翻找密钥文件，当场现形（opt-in，`honeypot.enabled`）。**不做**插件市场本体（目录/分发）。
+
+- 📚 架构设计：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 🧾 审查协议：[AUDIT_PROTOCOL.md](AUDIT_PROTOCOL.md)
+- 🛡️ 安全政策：[SECURITY.md](SECURITY.md)
+- 🤝 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
 
@@ -34,18 +43,18 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | `mode` | `report` | `report` 只报告不拦截；`deny` 显式开启拦截 |
 | `autoScan` | `true` | 新插件（`internal/plugin`）自动静态扫描 |
 | `scannerTimeoutMs` | `15000` | 静态扫描子进程超时 |
-| `requireAudit` | `false` | 审计门槛（D30，opt-in）：开启后新插件加载时检查 `~/.dsh/vet/audits/` 健康档案——无档案则 `report` 模式记录黄色 `audit-required` 告警、`deny` 模式拦截。档案由 agent 按 `vet-audit-protocol` 技能审查后手写落盘 |
+| `requireAudit` | `false` | 审计门槛（opt-in）：开启后新插件加载时检查 `~/.dsh/vet/audits/` 健康档案——无档案则 `report` 模式记录黄色 `audit-required` 告警、`deny` 模式拦截。档案由 agent 按 `vet-audit-protocol` 技能审查后手写落盘 |
 | `rules` | `{}`（全开） | 规则开关（R1-R7、R9-R11） |
 | `denyOn` | `critical` | `mode: deny` 时的拦截阈值 |
 | `allowlist` | `[]` | 包名/插件 id 白名单（跳过扫描） |
-| `runtimeGuard` | `off` | D22 运行时守卫（性能/稳定代价 opt-in）：`off` 关；`watch` 启用 T1 哨兵 + T2 钩子，**只报警不动作** |
+| `runtimeGuard` | `off` | 运行时守卫（性能/稳定代价 opt-in）：`off` 关；`watch` 启用 T1 哨兵 + T2 钩子，**只报警不动作** |
 | `runtimeIntervalMs` | `2000` | T1 哨兵 /proc 采样间隔 |
 | `runtimeMemLimitMb` | `2048` | T1 内存报警阈值（宿主 VmRSS，超限 → red） |
 | `runtimeForkBurstN` | `5` | T1 子进程突增报警阈值（单轮增量，→ red） |
 | `runtimeFdLimit` | `512` | T1 文件描述符报警阈值（→ yellow） |
 | `runtimeGrowthMb` | `256` | T1 内存持续膨胀报警阈值（窗口内 RSS 净增长，→ yellow 疑似泄漏） |
 | `runtimeGrowthWindowMs` | `600000` | 膨胀检测窗口（默认 10 分钟） |
-| `honeypot.enabled` | `false` | D27 蜜罐诱饵（需 `runtimeGuard: watch`）：往 `honeypot.dir` 放假密钥诱饵，T2 对诱饵路径的触碰（读/写/删）单独报 `honeypot` 类报警。目录/文件名/内容均无蜜罐关键词（反蜜罐），默认位置 `~/.dsh/.local`，诱饵值全是格式正确但无效的假凭据 |
+| `honeypot.enabled` | `false` | 蜜罐诱饵（需 `runtimeGuard: watch`）：往 `honeypot.dir` 放假密钥诱饵，T2 对诱饵路径的触碰（读/写/删）单独报 `honeypot` 类报警。目录/文件名/内容均无蜜罐关键词（反蜜罐），默认位置 `~/.dsh/.local`，诱饵值全是格式正确但无效的假凭据 |
 | `honeypot.dir` | `''` | 诱饵目录；空 = `$HOME/.dsh/.local` |
 | `osvCheck` | `true` | 扫描 package.json 时向 Google OSV 查询已知漏洞（按安装版本过滤，P0-3 修复）；默认开启会外发包名到 api.osv.dev，网络失败静默降级。介意隐私可设 false |
 
@@ -61,10 +70,10 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 - **`internal/plugin` 自动扫描**（`autoScan: true`）：新装第三方 npm 包加载时自动静态扫描；`deny` 模式 + verdict ≥ `denyOn` → 回滚加载。
 - **审计门槛**（`requireAudit: true`）：无健康档案的第三方插件加载时——`report` 模式记录黄色 `audit-required` 告警（进 /vet/status.json 告警列表，插件照常加载）；`deny` 模式回滚加载（引用 `vet-audit-protocol` 提示先审查）。
 - **`tools/execute` 拦截**：`cordis_define` / `cordis_run` / `run_code` / `workflow` 执行前扫描代码字符串；`report` 模式在结果文本加 `VET:` 前缀，`deny` 模式直接拦截（isError）。
-- **运行时守卫（D22，`runtimeGuard: watch`）**——alarm-only：
+- **运行时守卫（`runtimeGuard: watch`）**——alarm-only：
   - **T1 哨兵**：旁路子进程每 `runtimeIntervalMs` 读宿主 /proc（VmRSS / 子进程数 / fd 数），报警 JSON 行回传宿主 → 盾牌变黄/红。
   - **T2 钩子**：进程内包装 fs / child_process（含 fs.promises），危险操作（敏感路径写入/删除、读密钥文件、含 shell/下载外联关键词的子进程、蜜罐诱饵触碰）取栈归因到插件包名后报警；官方包归因的 spawn 降噪（能力授权）。**从不阻断调用**。
-- **GUI 盾牌（D22）**：浏览器半区注册进 `conversation.session.header.actions`，轮询 /vet/status.json 显示绿/黄/红灯 + 报警计数。激活需 `dsh web` 重启（重启后 client-modules 才扫描到 `dsh.client` 声明）。
+- **GUI 盾牌**：浏览器半区注册进 `conversation.session.header.actions`，轮询 /vet/status.json 显示绿/黄/红灯 + 报警计数。激活需 `dsh web` 重启（重启后 client-modules 才扫描到 `dsh.client` 声明）。
   - 交互：**可点击**——点击展开报警面板（**实时指标**：内存/CPU/I-O/子进程/fd；**守卫状态**：未开启时可一键写入 runtimeGuard: watch 配置（重启生效）；**报警列表**含严重度/归因/**逐条建议**；最近扫描回显、刷新、更新时刻），外部点击自动关闭；有报警时盾牌旁显示计数徽标（绿/黄/红主题色，明暗自适应）。
 
 ## 静态规则表（R1-R11）
@@ -114,7 +123,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | R6 | 字符串粗扫：拼接逃逸特征、`getBuiltinModule`/\`child_process\`/危险 require 模块引用、混淆特征（`String.fromCharCode`/\`Buffer.from(base64)\`/\`atob(\`/\`charCodeAt\`） | info/heuristic |
 | R8 | 扫描超时/文件过大跳过 | info 元规则 |
 
-### 运行时监控（D22，`runtimeGuard: watch` 时启用）——只报警
+### 运行时监控（`runtimeGuard: watch` 时启用）——只报警
 
 | 层 | 机制 | 能抓 | 局限 |
 |---|---|---|---|
@@ -142,7 +151,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 4. **不合成单一总分**——禁止把 verdict 与主观评估合并，防止污染 verdict 边界。
 5. **本产品不是安全边界**——是恶意代码的"减速带+取证层"（与 DSH 官方立场对齐）。
 6. **fail-open 起步**——默认 `mode: report`，`deny` 由部署者显式开启。
-7. **alarm-only（D21）**——运行时守卫只 watch 不 kill；vet 的自动行为（deny 拦截）仅存在于部署者显式开启的 opt-in 模式。报警只附建议，处置永远留给用户在 DSH 上操作。
+7. **alarm-only**——运行时守卫只 watch 不 kill；vet 的自动行为（deny 拦截）仅存在于部署者显式开启的 opt-in 模式。报警只附建议，处置永远留给用户在 DSH 上操作。
 
 ## Known Limitations
 
@@ -165,9 +174,15 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 ## 开发
 
 ```sh
-npm run build       # scanner-bin + src 编译到 lib/
-npm run typecheck   # tsc --noEmit
-npm test            # 构建 + vitest（138 用例）
+npm run build       # scanner-bin + src 编译到 lib/ + client bundle
+npm run typecheck   # tsc --noEmit 全量
+npm test            # 构建 + vitest（189 用例，含覆盖率阈值）
+npx vitest run --coverage   # 覆盖率报告（lines/functions >= 70%，branches >= 50%）
 ```
 
-目录：`scanner-bin/` 静态引擎（独立进程）；`src/` 插件本体（tools/guards/audit/report）；`test/` fixtures + 单测。权威计划见 `PLAN.md`（v1.1）。
+目录：`scanner-bin/` 静态引擎（独立进程）；`src/` 插件本体（tools/guards/audit/report/guard）；
+`src/client/` GUI 盾牌；`test/` fixtures + 单测 + 对抗矩阵。架构见 `docs/ARCHITECTURE.md`。
+
+## 许可证
+
+[MIT](LICENSE)。

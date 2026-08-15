@@ -1,7 +1,34 @@
 {
   "name": "@jieai/dsh-plugin-vet",
   "version": "0.1.0",
-  "description": "Plugin trust pipeline for deepseek-harness: deterministic static scan + LLM audit + two-score scorecard.",
+  "description": "Plugin trust pipeline for deepseek-harness (DSH): deterministic static scan, runtime guard (T1 sentinel + T2 hooks), audit protocol skill, GUI shield. Alarm-only monitor, never an enforcer.",
+  "license": "MIT",
+  "author": {
+    "name": "wulun811",
+    "url": "https://github.com/wulun811"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "security",
+    "trust",
+    "static-analysis",
+    "scan",
+    "audit",
+    "guard",
+    "vet",
+    "supply-chain",
+    "sandbox"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wulun811/dsh-plugin-vet.git"
+  },
+  "homepage": "https://github.com/wulun811/dsh-plugin-vet#readme",
+  "bugs": {
+    "url": "https://github.com/wulun811/dsh-plugin-vet/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.19"

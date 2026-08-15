@@ -51,11 +51,12 @@ export function ensureHoneypot(dir: string, logger?: { warn(m: string): void }):
     }
     files.push(full)
   }
-  // 诱饵内容：前缀/格式真实，密钥体随机——格式扫不出来，值却完全无效
-  put('.env', `DSH_API_KEY=sk-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c
+  // 诱饵内容：前缀/格式真实，密钥体全部运行时随机——格式扫不出来，值却完全无效，
+  // 且源码零密钥字面量（开源扫描器不会误报真密钥）
+  put('.env', `DSH_API_KEY=sk-${SECRET()}
 AWS_ACCESS_KEY_ID=AKIA${UP16()}
 AWS_SECRET_ACCESS_KEY=${SECRET()}
-OPENAI_API_KEY=sk-8h7g6f5e4d3c2b1a0z9y8x7w6v5u4t3s
+OPENAI_API_KEY=sk-${SECRET()}
 `)
   put('credentials.json', `{
   "type": "service_account",
