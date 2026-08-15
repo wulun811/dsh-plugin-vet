@@ -15,16 +15,16 @@ export interface HookConfig {
   sensitiveKeywords: string[]
   /** 密钥文件后缀（路径段以此结尾）。 */
   sensitiveExts: string[]
-  /** 子进程命令行报警关键词。 */
+  /** 子进程命令行报警关键词（shell 解释器 + 下载/外联工具；整词命中才报警）。 */
   shellTokens: string[]
 }
 
 export const DEFAULT_HOOK_CONFIG: HookConfig = {
   sensitiveRoots: ['/etc', '/usr', '/var', '/boot', '/bin', '/sbin'],
-  sensitiveSegments: ['.ssh', '.aws', '.gnupg', '.npmrc', '.env', 'credentials', 'credential', 'secrets', 'secret', 'tokens', 'token', 'passwd', 'shadow', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.git-credentials', '.kube', 'vault'],
+  sensitiveSegments: ['.ssh', '.aws', '.gnupg', '.npmrc', '.env', '.netrc', '.pgpass', '.gitconfig', 'credentials', 'credential', 'secrets', 'secret', 'tokens', 'token', 'passwd', 'shadow', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.git-credentials', '.kube', 'vault'],
   sensitiveKeywords: ['secret', 'secrets', 'credential', 'credentials', 'passwd', 'shadow', 'private', 'auth', 'vault'],
   sensitiveExts: ['.pem', '.key', '.p12', '.pfx', '.keystore', '.jks', '.env'],
-  shellTokens: ['sh', 'bash', 'zsh', 'cmd', 'powershell', 'pwsh'],
+  shellTokens: ['sh', 'bash', 'zsh', 'cmd', 'powershell', 'pwsh', 'curl', 'wget', 'nc', 'ncat', 'telnet'],
 }
 
 /** T2 报警候选（at/source 由调用方补全）。 */
@@ -45,9 +45,9 @@ export interface HookOp {
 /** 破坏性删除类 fs 操作（red）。 */
 const DESTROY_OPS = new Set(['unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync'])
 /** 写入类 fs 操作（yellow）。 */
-const WRITE_OPS = new Set(['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync', 'truncate', 'truncateSync', 'copyFile', 'copyFileSync'])
+const WRITE_OPS = new Set(['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync', 'truncate', 'truncateSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync'])
 /** 读取类 fs 操作（密钥路径 → yellow）。 */
-const READ_OPS = new Set(['readFile', 'readFileSync', 'createReadStream'])
+const READ_OPS = new Set(['readFile', 'readFileSync', 'createReadStream', 'open', 'openSync'])
 /** child_process 全部操作（spawn 面，yellow）。 */
 const PROC_OPS = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'])
 
@@ -57,8 +57,13 @@ function segmentHasKeyword(part: string, keyword: string): boolean {
   return new RegExp('(?:^|[._-])' + esc + '(?:[._-]|$)', 'i').test(part)
 }
 
-/** 归一化路径并判断是否敏感：敏感根前缀 / 敏感段名（精确）/ 密钥文件后缀 / 凭据关键词（边界）。 */
-export function isSensitivePath(p: string, cfg: HookConfig): boolean {
+/**
+ * 归一化路径并判断是否敏感。
+ * mode='mutate'（写/删）额外计入系统根前缀（/etc /usr /var …：写删系统文件=篡改/破坏）；
+ * mode='read' 只看密钥特征（段名/后缀/关键词）——读系统目录下的普通文件（库文件、配置）属正常
+ * 操作；枚举目标（/etc/passwd、/etc/shadow）已由精确段名覆盖，不需要系统根。
+ */
+export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'mutate' = 'mutate'): boolean {
   const norm = p.replace(/\\/g, '/')
   for (const part of norm.split('/')) {
     const low = part.toLowerCase()
@@ -67,6 +72,7 @@ export function isSensitivePath(p: string, cfg: HookConfig): boolean {
     if (cfg.sensitiveExts.some(ext => low.endsWith(ext))) return true
     if (cfg.sensitiveKeywords.some(k => segmentHasKeyword(low, k))) return true
   }
+  if (mode === 'read') return false
   for (const root of cfg.sensitiveRoots) {
     if (norm === root || norm.startsWith(root + '/')) return true
   }
@@ -85,26 +91,44 @@ function firstString(args: unknown[]): string | undefined {
   return undefined
 }
 
+/** 拼接命令行为可读目标（含参数，便于人工判断）。 */
+function commandString(args: unknown[]): string {
+  const parts: string[] = []
+  for (const a of args) {
+    if (typeof a === 'string') parts.push(a)
+  }
+  return parts.join(' ').slice(0, 200)
+}
+
+/** 命令行是否命中报警关键词：整词等于命令词或其 basename（'bash' 不误伤 'bashful'，'git' 不报警）。 */
+function hitsShellToken(command: string, tokens: string[]): boolean {
+  const words = command.split(/[^A-Za-z0-9._/-]+/).filter(Boolean)
+  return tokens.some(t => words.some(w => w === t || w.slice(w.lastIndexOf('/') + 1) === t))
+}
+
 /** 危险操作分类（纯函数）：返回报警候选（pluginHint 由调用方经栈归因补全）。 */
 export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
   const { module, op: name, args } = op
   const target = firstString(args) ?? ''
   if (module === 'child_process' && PROC_OPS.has(name)) {
+    // 只对含 shell 解释器/下载外联关键词的命令行报警（git/node/pnpm 等常规子进程不报）
+    const cmd = commandString(args)
+    if (!hitsShellToken(cmd, cfg.shellTokens)) return null
     return {
       severity: 'yellow',
       kind: 'spawn',
-      message: `子进程 spawn：${name}(${target.slice(0, 120)})`,
-      target,
+      message: `子进程 spawn：${name}(${cmd.slice(0, 120)})`,
+      target: cmd.slice(0, 120),
     }
   }
   if (module === 'fs') {
-    if (DESTROY_OPS.has(name) && isSensitivePath(target, cfg)) {
+    if (DESTROY_OPS.has(name) && isSensitivePath(target, cfg, 'mutate')) {
       return { severity: 'red', kind: 'fs-destroy', message: `敏感路径删除：${name}(${target.slice(0, 120)})`, target }
     }
-    if (WRITE_OPS.has(name) && isSensitivePath(target, cfg)) {
+    if (WRITE_OPS.has(name) && isSensitivePath(target, cfg, 'mutate')) {
       return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入：${name}(${target.slice(0, 120)})`, target }
     }
-    if (READ_OPS.has(name) && isSensitivePath(target, cfg)) {
+    if (READ_OPS.has(name) && isSensitivePath(target, cfg, 'read')) {
       return { severity: 'yellow', kind: 'fs-read', message: `敏感路径读取：${name}(${target.slice(0, 120)})`, target }
     }
   }

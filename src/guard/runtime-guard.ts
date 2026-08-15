@@ -107,6 +107,11 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   }
   const hookCfg = { ...DEFAULT_HOOK_CONFIG }
   disposers.push(patchModule(fs as unknown as Record<string, unknown>, 'fs', hookCfg, sink, rootIndex))
+  // fs.promises 是独立对象（require('fs').promises / node:fs/promises 同一对象），同步包装不覆盖 → 必须单独包装（D26 审核补漏）
+  const promisesMod = (fs as unknown as { promises?: Record<string, unknown> }).promises
+  if (promisesMod !== undefined) {
+    disposers.push(patchModule(promisesMod, 'fs', hookCfg, sink, rootIndex))
+  }
   disposers.push(patchModule(cp as unknown as Record<string, unknown>, 'child_process', hookCfg, sink, rootIndex))
 
   return () => {

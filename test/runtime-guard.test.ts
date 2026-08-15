@@ -175,9 +175,29 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(isSensitivePath('/home/u/.aws/credentials', DEFAULT_HOOK_CONFIG)).toBe(true)
   })
 
-  it('child_process spawn 一律 yellow', () => {
-    const alarm = classifyOp({ module: 'child_process', op: 'exec', args: ['curl http://x'] }, DEFAULT_HOOK_CONFIG)
-    expect(alarm).toMatchObject({ severity: 'yellow', kind: 'spawn' })
+  it('含 shell/下载关键词的子进程 → yellow spawn', () => {
+    expect(classifyOp({ module: 'child_process', op: 'exec', args: ['curl http://x'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ severity: 'yellow', kind: 'spawn' })
+    expect(classifyOp({ module: 'child_process', op: 'spawn', args: ['/bin/sh', ['-c', 'rm -rf /tmp/x']] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'spawn' })
+    expect(classifyOp({ module: 'child_process', op: 'spawn', args: ['wget', ['https://x/y']] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'spawn' })
+  })
+
+  it('常规子进程（git/node/pnpm）不报警', () => {
+    expect(classifyOp({ module: 'child_process', op: 'spawn', args: ['git', ['status']] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'child_process', op: 'execFile', args: ['node', ['server.js']] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'child_process', op: 'exec', args: ['npm run build'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+  })
+
+  it('读取系统根下普通文件不报警；写删仍报（read/mutate 分档）', () => {
+    expect(isSensitivePath('/usr/lib/node_modules/foo/index.js', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/usr/lib/node_modules/foo/index.js'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(isSensitivePath('/usr/lib/node_modules/foo/index.js', DEFAULT_HOOK_CONFIG, 'mutate')).toBe(true)
+    expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/usr/lib/node_modules/foo/index.js', 'x'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // /etc/passwd 由精确段名覆盖，读取仍报（枚举目标不漏）
+    expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/etc/passwd'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-read' })
+    // 新增敏感名：.netrc / .pgpass / .gitconfig
+    expect(isSensitivePath('/home/u/.netrc', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/home/u/.pgpass', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/home/u/.gitconfig', DEFAULT_HOOK_CONFIG)).toBe(true)
   })
 
   it('对象参数取 path', () => {
@@ -231,6 +251,26 @@ describe('patchModule（包装 + 恢复）', () => {
     // 恢复后调用不再报警
     ;(fake as unknown as { writeFile: (p: string) => void }).writeFile('/etc/x')
     expect(alarms).toEqual(['fs-write'])
+  })
+
+  it('fs.promises 独立对象也被包装（Promise 调用同样报警）', async () => {
+    const fakePromises = {
+      readFile: async (p: string) => Buffer.from('x'),
+      writeFile: async (p: string) => { },
+    }
+    const alarms: string[] = []
+    const dispose = patchModule(
+      fakePromises as unknown as Record<string, unknown>,
+      'fs',
+      DEFAULT_HOOK_CONFIG,
+      a => { alarms.push(a.kind) },
+      () => new Map(),
+    )
+    await (fakePromises as unknown as { readFile(p: string): Promise<Buffer> }).readFile('/home/user/.ssh/id_rsa')
+    expect(alarms).toEqual(['fs-read'])
+    await (fakePromises as unknown as { writeFile(p: string): Promise<void> }).writeFile('/home/user/.env')
+    expect(alarms).toEqual(['fs-read', 'fs-write'])
+    dispose()
   })
 })
 
