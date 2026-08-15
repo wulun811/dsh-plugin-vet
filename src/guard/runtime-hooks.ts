@@ -51,6 +51,8 @@ const DESTROY_OPS = new Set(['unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'r
 const WRITE_OPS = new Set(['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync', 'truncate', 'truncateSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync', 'createWriteStream'])
 /** 读取类 fs 操作（密钥路径 → yellow）。 */
 const READ_OPS = new Set(['readFile', 'readFileSync', 'createReadStream', 'open', 'openSync'])
+/** 侦察类 fs 操作（M7：列目录/stat/access 是凭据狩猎的第一步——readdirSync('~/.ssh') 此前完全不可见）。 */
+const PROBE_OPS = new Set(['readdir', 'readdirSync', 'opendir', 'opendirSync', 'stat', 'statSync', 'access', 'accessSync', 'existsSync', 'readlink', 'readlinkSync', 'realpath', 'realpathSync'])
 /** child_process 全部操作（spawn 面，yellow）。 */
 const PROC_OPS = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'])
 
@@ -148,7 +150,7 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
   }
   if (module === 'fs' && isHoneypotPath(target, cfg.honeypotRoots)) {
     // D27 蜜罐：触碰诱饵路径（读/写/删）→ 高置信的翻找密钥信号，独立报警类
-    if (DESTROY_OPS.has(name) || WRITE_OPS.has(name) || READ_OPS.has(name)) {
+    if (DESTROY_OPS.has(name) || WRITE_OPS.has(name) || READ_OPS.has(name) || PROBE_OPS.has(name)) {
       const severity = DESTROY_OPS.has(name) ? 'red' : 'yellow'
       return { severity, kind: 'honeypot', message: `蜜罐命中：${name}(${target.slice(0, 120)}) — 诱饵密钥文件被触碰（疑似翻找密钥）`, target }
     }
@@ -177,6 +179,10 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
     }
     if (READ_OPS.has(name) && isSensitivePath(target, cfg, 'read')) {
       return { severity: 'yellow', kind: 'fs-read', message: `敏感路径读取：${name}(${target.slice(0, 120)})`, target }
+    }
+    // M7：列目录/stat/access 敏感路径 = 侦察（凭据狩猎第一步）
+    if (PROBE_OPS.has(name) && isSensitivePath(target, cfg, 'read')) {
+      return { severity: 'yellow', kind: 'fs-probe', message: `敏感路径侦察：${name}(${target.slice(0, 120)})`, target }
     }
   }
   return null
@@ -216,7 +222,7 @@ export function patchModule(
   rootIndex: () => Map<string, string>,
 ): () => void {
   const original = new Map<string, unknown>()
-  const allOps = [...DESTROY_OPS, ...WRITE_OPS, ...READ_OPS, ...PROC_OPS]
+  const allOps = [...DESTROY_OPS, ...WRITE_OPS, ...READ_OPS, ...PROC_OPS, ...PROBE_OPS]
   for (const opName of allOps) {
     const fn = mod[opName]
     if (typeof fn !== 'function') continue

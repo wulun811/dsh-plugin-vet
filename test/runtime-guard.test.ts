@@ -184,6 +184,14 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(classifyOp({ module: 'child_process', op: 'spawn', args: ['wget', ['https://x/y']] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'spawn' })
   })
 
+  it('M7：readdir/stat 敏感路径侦察 → yellow fs-probe（凭据狩猎第一步可见）', () => {
+    expect(classifyOp({ module: 'fs', op: 'readdirSync', args: ['/home/user/.ssh'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ severity: 'yellow', kind: 'fs-probe' })
+    expect(classifyOp({ module: 'fs', op: 'statSync', args: ['/home/user/.env'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-probe' })
+    expect(classifyOp({ module: 'fs', op: 'accessSync', args: ['/etc/passwd'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-probe' })
+    // 普通目录/文件侦察不报
+    expect(classifyOp({ module: 'fs', op: 'readdirSync', args: ['/home/user/project'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+  })
+
   it('常规子进程（git/node/pnpm）不报警', () => {
     expect(classifyOp({ module: 'child_process', op: 'spawn', args: ['git', ['status']] }, DEFAULT_HOOK_CONFIG)).toBeNull()
     expect(classifyOp({ module: 'child_process', op: 'execFile', args: ['node', ['server.js']] }, DEFAULT_HOOK_CONFIG)).toBeNull()
@@ -529,6 +537,15 @@ describe('ensureHoneypot（蜜罐播种）', () => {
 
 describe('蜜罐报警（classifyOp）', () => {
   const mkCfg = (roots: string[]): typeof DEFAULT_HOOK_CONFIG => ({ ...DEFAULT_HOOK_CONFIG, honeypotRoots: roots })
+
+  it('M7：readdir 蜜罐根目录 → honeypot 报警（翻找的第一个动作）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-hp-probe-'))
+    ensureHoneypot(dir)
+    const cfg = mkCfg([dir])
+    expect(classifyOp({ module: 'fs', op: 'readdirSync', args: [dir] }, cfg)).toMatchObject({ kind: 'honeypot', severity: 'yellow' })
+    expect(classifyOp({ module: 'fs', op: 'readdir', args: [dir] }, cfg)).toMatchObject({ kind: 'honeypot' })
+    rmSync(dir, { recursive: true, force: true })
+  })
 
   it('触碰诱饵路径 → 独立 honeypot 报警（读黄/删红）', () => {
     const dir = mkdtempSync(join(process.cwd(), '.tmp-honeypot-'))

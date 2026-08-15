@@ -49,7 +49,10 @@ export async function scan(request: ScanRequest, options: ScanOptions = {}): Pro
     try {
       child.stdin.write(JSON.stringify(request))
     } catch (error) {
+      // L3: write 抛错（EPIPE/流销毁）时子进程可能还活着——必须 kill，否则成孤儿
+      try { child.kill('SIGKILL') } catch { /* 已退出 */ }
       finish({ ok: false, error: `scanner stdin write failed: ${String(error)}` })
+      return
     }
     child.stdin.end()
   })
