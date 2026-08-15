@@ -342,6 +342,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   const [dark, setDark] = useState<boolean>(() => isDark())
   const [helpOpen, setHelpOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
   const openTimer = useRef<number | null>(null)
   const closeTimer = useRef<number | null>(null)
@@ -381,7 +382,9 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent): void => {
-      if (rootRef.current !== null && !rootRef.current.contains(e.target as Node)) setOpen(false)
+      const inRoot = rootRef.current !== null && rootRef.current.contains(e.target as Node)
+      const inPanel = panelRef.current !== null && panelRef.current.contains(e.target as Node)
+      if (!inRoot && !inPanel) setOpen(false)
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
@@ -512,9 +515,10 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
 
       {open && createPortal(
         <div
+          ref={panelRef}
           style={{
             position: 'fixed',
-            top: 16,
+            top: 56,
             left: 320,
             zIndex: 1000,
           }}
@@ -589,7 +593,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
           <div style={{ display: 'flex', alignItems: 'center', background: pal.card, borderRadius: 8, padding: '8px 10px' }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: guard === 'watch' ? pal.sage : pal.faint, display: 'inline-block' }} />
             <span style={{ fontWeight: 700, marginLeft: 8 }}>{guard === 'watch' ? t('guard.on') : t('guard.off')}</span>
-            {guard === 'off' && (
+            {guard === 'off' ? (
               <button
                 type="button"
                 disabled={toggling}
@@ -608,6 +612,26 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 }}
               >
                 {toggling ? t('guard.writing') : t('guard.enable')}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={toggling}
+                onClick={() => { void toggleGuard(false) }}
+                style={{
+                  marginLeft: 'auto',
+                  border: 'none',
+                  background: pal.cardSoft,
+                  color: pal.muted,
+                  borderRadius: 7,
+                  padding: '3px 14px',
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  cursor: toggling ? 'default' : 'pointer',
+                  opacity: toggling ? 0.6 : 1,
+                }}
+              >
+                {toggling ? t('guard.writing') : t('guard.disable')}
               </button>
             )}
             <span
