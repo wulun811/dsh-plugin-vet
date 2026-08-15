@@ -6,4 +6,3 @@
       config:
         mode: report
         autoScan: true
-        autoAudit: false

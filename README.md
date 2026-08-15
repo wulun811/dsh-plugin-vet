@@ -22,18 +22,19 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 安装即生效链路：pnpm 安装 → `reconcilePlugins` 读 `dsh.bundle` → 下次启动 `loadProfile`
 解析 bundle 挂载插件。默认配置见下方 Config（fail-open：只报告不拦截）。
 
+> **监控范围 = 安装 vet 的 profile。** vet 的守卫是进程内事件（`internal/plugin`）——
+> vet 装进哪个 profile，就只守那个 profile 实例加载的插件。多 profile 部署时，
+> 每个要守的 profile 都要装一份 vet（`dsh plugin --profile <name> add @jieai/dsh-plugin-vet`），
+> 并把 requireAudit 配到对应 profile 的 cordis.patch.yml。
+
 ## Config（cordis.yml）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `mode` | `report` | `report` 只报告不拦截；`deny` 显式开启拦截 |
 | `autoScan` | `true` | 新插件（`internal/plugin`）自动静态扫描 |
-| `autoAudit` | `false` | 新插件自动 LLM 审计（花钱，默认关） |
-| `provider` / `model` | — | LLM 路由覆盖（必须成对；否则回落会话当前模型） |
-| `auditMaxTokens` | `2048` | 每轮审计输出上限 |
-| `auditTimeoutMs` | `120000` | 每轮审计超时 |
 | `scannerTimeoutMs` | `15000` | 静态扫描子进程超时 |
-| `auditCacheTtlHours` | `168` | LLM 审计结果缓存（7 天） |
+| `requireAudit` | `false` | 审计门槛（D30，opt-in）：开启后新插件加载时检查 `~/.dsh/vet/audits/` 健康档案——无档案则 `report` 模式记录黄色 `audit-required` 告警、`deny` 模式拦截。档案由 agent 按 `vet-audit-protocol` 技能审查后手写落盘 |
 | `rules` | `{}`（全开） | 规则开关（R1-R7、R9-R11） |
 | `denyOn` | `critical` | `mode: deny` 时的拦截阈值 |
 | `allowlist` | `[]` | 包名/插件 id 白名单（跳过扫描） |
@@ -52,11 +53,12 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 ## 工具
 
 - **`scan_plugin`** — 确定性静态扫描：`target` = `dynamic-code`（源码字符串）/ `package`（包目录）/ `file`（单文件）。返回评分卡（verdict + staticScore + findings）。verdict 只由静态规则产出。
-- **`audit_plugin`** — 深度审计：先静态扫描；**verdict=critical 直接短路**（不调 LLM）；否则按 `deep`（默认 true）跑 4 轮 LLM 审计（总览 → 敏感点 → 质量 → 汇总），或只跑轮 1+2（`deep: false`）。LLM 输出永远是建议/注释/质量分，绝不参与 verdict。
+- **`vet-audit-protocol`（技能）** — 审查流程协议（`AUDIT_PROTOCOL.md`）：agent 按预设步骤审查新插件——scan_plugin 静态判据 → 读清单/源码 → 逐条核实发现 → 主动深挖（网络/文件/进程/凭据/库语义）→ 用系统写入能力手写健康档案到 `~/.dsh/vet/audits/<plugin>-<version>-<ts>.md`。vet 不内置审计工具、不替 agent 调查，只给判据与落盘约定。
 
 ## 自动行为
 
 - **`internal/plugin` 自动扫描**（`autoScan: true`）：新装第三方 npm 包加载时自动静态扫描；`deny` 模式 + verdict ≥ `denyOn` → 回滚加载。
+- **审计门槛**（`requireAudit: true`）：无健康档案的第三方插件加载时——`report` 模式记录黄色 `audit-required` 告警（进 /vet/status.json 告警列表，插件照常加载）；`deny` 模式回滚加载（引用 `vet-audit-protocol` 提示先审查）。
 - **`tools/execute` 拦截**：`cordis_define` / `cordis_run` / `run_code` / `workflow` 执行前扫描代码字符串；`report` 模式在结果文本加 `VET:` 前缀，`deny` 模式直接拦截（isError）。
 - **运行时守卫（D22，`runtimeGuard: watch`）**——alarm-only：
   - **T1 哨兵**：旁路子进程每 `runtimeIntervalMs` 读宿主 /proc（VmRSS / 子进程数 / fd 数），报警 JSON 行回传宿主 → 盾牌变黄/红。
