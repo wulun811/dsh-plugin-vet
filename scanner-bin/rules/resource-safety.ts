@@ -214,6 +214,26 @@ function checkRecursion(sf: ts.SourceFile, found: Finding[]): void {
 // R9-3: in-loop accumulation / growth / concurrency signals (advisory)
 // ---------------------------------------------------------------------------
 
+/** 右侧表达式是否算术（数值累加而非字符串拼接）：数字字面量或算术/位运算表达式。 */
+function isArithmeticRhs(expr: ts.Expression): boolean {
+  if (ts.isNumericLiteral(expr)) return true
+  if (!ts.isBinaryExpression(expr)) return false
+  switch (expr.operatorToken.kind) {
+    case ts.SyntaxKind.AsteriskToken:
+    case ts.SyntaxKind.SlashToken:
+    case ts.SyntaxKind.PercentToken:
+    case ts.SyntaxKind.AsteriskAsteriskToken:
+    case ts.SyntaxKind.LessThanLessThanToken:
+    case ts.SyntaxKind.GreaterThanGreaterThanToken:
+    case ts.SyntaxKind.AmpersandToken:
+    case ts.SyntaxKind.BarToken:
+    case ts.SyntaxKind.CaretToken:
+      return true
+    default:
+      return false
+  }
+}
+
 function isAnyLoop(n: ts.Node): boolean {
   return ts.isForStatement(n) || ts.isWhileStatement(n) || ts.isDoStatement(n)
     || ts.isForInStatement(n) || ts.isForOfStatement(n)
@@ -226,6 +246,8 @@ function checkLoopBodyPatterns(sf: ts.SourceFile, found: Finding[]): void {
     const visit = (node: ts.Node): void => {
       if (ts.isFunctionLike(node)) return
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) {
+        // 右侧是算术表达式（total += w * coef 类）→ 数值累加，非字符串拼接，不报（自扫降噪）
+        if (isArithmeticRhs(node.right)) return
         found.push({
           rule: 'R9',
           severity: 'info',

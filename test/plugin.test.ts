@@ -12,7 +12,7 @@ import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
 import { VetConfigSchema, validateConfig } from '../lib/config.js'
 import type { VetConfig } from '../lib/config.js'
-import { renderScorecard } from '../lib/report/render.js'
+import { explainScore, renderScorecard } from '../lib/report/render.js'
 
 const ESCAPE = 'TextEncoder.constructor("return process")().cwd()'
 const CLEAN = 'module.exports = { ok: true }'
@@ -309,5 +309,21 @@ describe('目标身份分级（targetKind，§14.3 边界落地）', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('分数构成解释（explainScore，clean+低分可读性）', () => {
+  it('info 级命中构成：含 R3 info 明细与 verdict 说明', () => {
+    const s = explainScore([
+      { rule: 'R3', severity: 'info', confidence: 'certain' },
+      { rule: 'R3', severity: 'info', confidence: 'certain' },
+      { rule: 'R6', severity: 'info', confidence: 'heuristic' },
+    ])
+    expect(s).toContain('info 0') // info 级不扣分（评分模型修正后）
+    expect(s).toContain('R3×2')
+    expect(s).toContain('verdict 只由 critical/high 决定')
+  })
+  it('无发现 → 满分说明', () => {
+    expect(explainScore([])).toContain('满分')
   })
 })

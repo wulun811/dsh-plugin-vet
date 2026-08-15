@@ -1,6 +1,8 @@
 import type { Confidence, Finding, Severity, Verdict } from './protocol.js'
 
-const WEIGHTS: Record<Severity, number> = { critical: 45, high: 20, medium: 8, info: 2 }
+// info 级（字符串特征/能力触达面/超时跳过）是提示与取证，不构成威胁密度 → 不扣分。
+// staticScore 反映 decisive（critical/high/medium）威胁；info 只出现在 findings 里。
+const WEIGHTS: Record<Severity, number> = { critical: 45, high: 20, medium: 8, info: 0 }
 const CONFIDENCE_COEF: Record<Confidence, number> = { certain: 1.0, likely: 0.8, heuristic: 0.4 }
 
 /**

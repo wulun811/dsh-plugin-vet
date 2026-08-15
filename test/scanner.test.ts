@@ -117,7 +117,7 @@ describe('score & verdict', () => {
     // 只有 heuristic info（R6）→ clean；即使很多条也不升级
     const infos = [1, 2, 3, 4, 5].map(i => finding('R6', 'info', 'heuristic'))
     expect(computeVerdict(infos)).toBe('clean')
-    expect(computeScore(infos)).toBe(95) // 5 × 2 × 0.5 = 5
+    expect(computeScore(infos)).toBe(100) // info 级不扣分（评分模型修正：score 只反映 decisive）
   })
 
   it('score floor at 0 and mixed contributions', () => {
