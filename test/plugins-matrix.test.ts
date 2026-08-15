@@ -58,6 +58,17 @@ const SAMPLES: Sample[] = [
   // --- 混淆（R6，info 不升级） ---
   { name: '拼接逃逸', code: `const s = "return " + "process"; X.constructor(s)()`, language: 'js', runtime: 'host', verdict: 'critical', rules: ['R1', 'R6'] },
   { name: 'fromCharCode 混淆', code: `const s = String.fromCharCode(114,101,116,117,114,110)`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R6'] },
+  // --- 资源安全（R9，high/info，不升级 critical，§14.1） ---
+  { name: 'new Array 无界分配', code: `const a = new Array(2 ** 31)`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R9'] },
+  { name: 'Buffer.alloc 巨大缓冲', code: `Buffer.alloc(1 << 30)`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R9'] },
+  { name: 'Array.from 无界 length', code: `const a = Array.from({ length: 1e9 })`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R9'] },
+  { name: '无出口同步死循环', code: `while (true) { arr.push(1) }`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R9'] },
+  { name: 'for(;;) 内 spawn（fork 炸弹）', code: `for (;;) { spawn('node') }`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R9'] },
+  // --- R9 负例（不得误报） ---
+  { name: '异步常驻循环（合法服务）', code: `while (true) { await tick() }`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  { name: '正常有限循环', code: `for (let i = 0; i < 10; i++) { f(i) }`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
+  { name: '小分配 Buffer.alloc(1024)', code: `Buffer.alloc(1024)`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
+  { name: '非字面条件循环', code: `while (flag) { if (done) break }`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
   // --- 负例（不得误报） ---
   { name: '参数遮蔽 process', code: `function f(process) { return process.pid }`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
   { name: '干净工具插件', code: `export function apply(ctx) { ctx.tools.register(defineTool({ name: 't' })) }`, language: 'ts', runtime: 'host', verdict: 'clean', rules: [] },

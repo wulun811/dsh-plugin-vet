@@ -44,8 +44,8 @@ export interface ScanResponse {
 
 export const ENGINE_VERSION = 'static-v1' as const
 
-/** The 7 rules of v1. R8 is a meta finding emitted by the engine (scan timeout skip). */
-export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7'] as const
+/** The 8 rules of v1. R8 is a meta finding emitted by the engine (scan timeout skip). */
+export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9'] as const
 
 /** Shared context handed to every rule. */
 export interface RuleContext {

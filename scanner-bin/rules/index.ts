@@ -7,6 +7,7 @@ import * as hostCapture from './host-capture.js'
 import * as ctxVerbs from './ctx-verbs.js'
 import * as stringHeuristics from './string-heuristics.js'
 import * as secrets from './secrets.js'
+import * as resourceSafety from './resource-safety.js'
 
 export interface Rule {
   id: string
@@ -22,6 +23,7 @@ export const RULES: Rule[] = [
   { id: 'R5', run: ctxVerbs.run },
   { id: 'R6', run: stringHeuristics.run },
   { id: 'R7', run: secrets.run },
+  { id: 'R9', run: resourceSafety.run },
 ]
 
 /** Execute all enabled rules over one source file. */

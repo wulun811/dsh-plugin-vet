@@ -77,6 +77,45 @@ export function stringyValue(node: ts.Node, sf: ts.SourceFile): StringyValue | u
   return undefined
 }
 
+/**
+ * Statically evaluate a numeric-ish expression: numeric literal (1e9/0x/1_000
+ * forms), `**`/`<<`/`*`/`+`/`-` binary ops, unary minus, parentheses, or an
+ * identifier bound to a numeric const/let initializer (same first-declaration
+ * heuristic as {@link stringyValue}). Undefined when not statically numeric.
+ * For R9 unbounded-allocation checks.
+ */
+export function numberyValue(node: ts.Node, sf: ts.SourceFile): number | undefined {
+  if (ts.isNumericLiteral(node)) {
+    return Number(node.text.replace(/_/g, ''))
+  }
+  if (ts.isParenthesizedExpression(node)) {
+    return numberyValue(node.expression, sf)
+  }
+  if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.MinusToken) {
+    const v = numberyValue(node.operand, sf)
+    return v === undefined ? undefined : -v
+  }
+  if (ts.isBinaryExpression(node)) {
+    const left = numberyValue(node.left, sf)
+    const right = numberyValue(node.right, sf)
+    if (left === undefined || right === undefined) return undefined
+    switch (node.operatorToken.kind) {
+      case ts.SyntaxKind.AsteriskAsteriskToken: return left ** right
+      case ts.SyntaxKind.LessThanLessThanToken: return left << right
+      case ts.SyntaxKind.AsteriskToken: return left * right
+      case ts.SyntaxKind.PlusToken: return left + right
+      case ts.SyntaxKind.MinusToken: return left - right
+      default: return undefined
+    }
+  }
+  if (ts.isIdentifier(node)) {
+    const init = initializerMap(sf).get(node.text)
+    if (init === undefined) return undefined
+    return numberyValue(init, sf)
+  }
+  return undefined
+}
+
 // ---------------------------------------------------------------------------
 // Pragmatic lexical shadowing (for R3/R4 identifier-source checks)
 // ---------------------------------------------------------------------------

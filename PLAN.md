@@ -700,4 +700,46 @@ defineTool({
 | # | 决策 | 依据 |
 |---|---|---|
 | D13 | R2 补 vm.runInContext/runInNewContext（PLAN.md §4.3 命中清单核对补漏）；R6 混淆特征扫描面扩展至调用表达式文本（String.fromCharCode/atob/charCodeAt/Buffer.from base64，矩阵测试发现"代码里的混淆特征"漏检）；新增 28 用例对抗矩阵 test/plugins-matrix.test.ts（真实 DSH 插件 0 误报） | 审核对照 §4.3；矩阵测试 |
+| D14 | 能力边界诚实清单落地 README（判定级/提示级/明确不检测三档，间接引用与 base64 混淆漏检形态经实测确认）；README 用例数修正 50→78 | 实测探测：7 种间接/混淆形态全部漏检（仅 R6 info 或零 finding），正例对照 critical |
+
+### v1.1 路线与引擎评估（D15）
+
+| # | 决策 | 依据 |
+|---|---|---|
+| D15 | **AST 引擎评估（malong-parse）**：Rust tree-sitter 9 语言符号/引用/指标提取引擎（MIT）。本地 0bore/malong-parse v0.3.37 = 公开最新（GitHub v0.4.5-post6 的 Cargo.toml 同版本；Rust 引擎自 0.3.37 后未更新）。**「0.4.5.post7」不存在**：GitHub tags/releases 最新 v0.4.5-post6，npm @jieai/dsh-malong-bridge 最新 0.4.5-post6，PyPI 无此包。**结论：不引入替换型引擎**——malong-parse 是符号提取器非规则引擎，vet 的 R1-R9 依赖 TS 语义 AST（isShadowed 词法作用域 / stringyValue 静态求值 / node 类型判断），CST 移植需整体重写规则层。采纳**方案 A（两级扫描）**：TS compiler 保留为权威精扫（verdict 语义不变），复用 malong-parse 基础设施（parser pool / tree cache / npm 4 平台二进制发布机制）做 Rust tree-sitter **预筛层**，大包快速排除干净文件、可疑文件送精扫（解决 R8 超时）；方案 C（audit 层接入 extract_symbols/extract_references 作 LLM 代码地图）列为 audit 增强 | 调查：GitHub API / npm registry / PyPI / 本地 0bore/malong-parse 源码与二进制 |
+| D16 | **R9-1 资源安全规则族落地**（§14.2）：ast.ts 新增 numberyValue 数字静态求值（字面量/**/<</*/一元/括号/const 绑定）；新增 rules/resource-safety.ts 三检测——(1) new Array/Array(n)/Array.from({length})/Buffer.alloc*/allocUnsafe 无界分配 ≥1e8 → high certain；(2) while(true)/for(;;) 无出口同步循环（无 break/return/throw/await）→ high certain，含 await 常驻循环 → info heuristic（不升级）；(3) 无出口循环内 spawn/exec/execFile/fork/new Worker → high likely（fork 炸弹）。severity 上限 high 落实 §14.1（critical 会短路 LLM）；矩阵新增 9 样本（5 正例 + 4 负例），87/87 全绿，真实 DSH 插件 0 误报 | 矩阵测试；真实插件回归 |
+
+
+## 14. 未来路线（v1.1 后，未排期）
+
+### 14.1 静态→LLM 复核衔接（设计约束，已确认）
+
+1. 流水线不变：静态扫描（verdict 权威）→ critical 短路（不调 LLM）→ 非 critical 走 4 轮 LLM 审计（轮 1 总览含静态摘要 → 轮 2 敏感点 LLM **独立**找 secret/exfiltration/telemetry/obfuscation/dangerous-api/other → 轮 3 质量 → 轮 4 汇总含静态报告，LLM 不得修改/软化/重贴 verdict）。
+2. **R9 约束**：资源安全类规则默认 high/medium，**不升级 critical**——critical 会短路 LLM，而资源类问题（如 `while(true)`）需要 LLM 复核上下文（合法常驻服务循环），短路会丢失语义判断。
+3. 新增规则族的 findings 自动并入轮 1 静态摘要与轮 4 静态报告，由 LLM 复核。
+
+### 14.2 规则扩展路线（按优先级）
+
+| 阶段 | 内容 | 检测面 | 判定档 |
+|---|---|---|---|
+| R9-1 | 资源安全：无界分配字面量（`new Array(2**31)`/`Buffer.alloc(huge)`）、无出口同步循环、无界 spawn（fork 炸弹） | AST 数字字面量求值 + 控制流 | high/medium |
+| R9-2 | ReDoS 嵌套量词正则、递归无终止粗检 | 正则 AST | medium |
+| R9-3 | 循环内字符串 `+=`、无界 Map 增长、Promise.all 无界并发 | 结构启发式 | info/medium |
+| R10 | 供应链：`package.json` scripts/install 钩子、依赖清单、已知漏洞（数据源选型） | 包元数据 | high（install 钩子）/ info |
+| R11 | 破坏性行为：fs 删除 / 敏感路径写入模式 | 调用模式 | high（需降噪） |
+
+### 14.3 AST 引擎评估（malong-parse，详见 D15）
+
+- **能力**：Rust tree-sitter 9 语言（js/ts/python/go/rust/c/cpp/java/bash）符号/引用/指标提取；Unix socket JSON 帧服务（parser pool、tree cache、source cache、并发信号量、动态超时预算、认证 token、health）；MIT；已具备 npm 4 平台二进制发布机制（parse-bin.js）。
+- **vet 现状**：TS compiler API（语义 AST），78 测试绿；短板是大包扫描超时（R8 info）。
+- **方案**：
+  - **A（采纳）两级扫描**：Rust tree-sitter 预筛（快速排除干净文件）→ TS 精扫（verdict 权威不变）。规则层零改动，解决 R8 规模化问题。
+  - B（远期）规则引擎整体 Rust 化：需重写 R1-R9 + 自实现词法作用域/静态求值，双引擎一致性风险。
+  - C（audit 增强）接入 `extract_symbols`/`extract_references` 作 LLM 代码地图输入。
+  - D（不引入）维持现状，R8 边界已在能力清单诚实记录。
+- **前置条件**：tree-sitter 是 CST（无类型/绑定信息），预筛层只能做语法级模式匹配；遮蔽分析、字符串静态求值、R5 的变量身份判断保留在 TS 精扫层。
+
+### 14.4 运行时配合（上游建议，vet 不实现）
+
+动态插件跑主进程 `node:vm` 无堆上限（vm 无 resourceLimits），分配炸弹可拖垮整个 harness。vet 侧：R9-1 静态标记 + deny 模式拦截明确模式；真隔离（插件跑进有堆上限的 worker/子进程）是 DSH 上游 cordis-host-runner 改造，记录为建议项。
 

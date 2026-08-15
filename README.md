@@ -29,7 +29,7 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | `auditTimeoutMs` | `120000` | 每轮审计超时 |
 | `scannerTimeoutMs` | `15000` | 静态扫描子进程超时 |
 | `auditCacheTtlHours` | `168` | LLM 审计结果缓存（7 天） |
-| `rules` | `{}`（全开） | 规则开关（R1-R7） |
+| `rules` | `{}`（全开） | 规则开关（R1-R7、R9） |
 | `denyOn` | `critical` | `mode: deny` 时的拦截阈值 |
 | `allowlist` | `[]` | 包名/插件 id 白名单（跳过扫描） |
 
@@ -56,12 +56,48 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | R5 | ctx 逃逸尝试信号（withheld 成员/未声明服务） | medium | 仅 code | likely |
 | R6 | 字符串粗扫兜底 | info | both | heuristic |
 | R7 | 硬编码密钥 | high | both | likely |
+| R9 | 资源安全（无界分配/无出口同步循环/循环内 spawn） | high（分配/死循环/fork）/ info（异步常驻循环） | both | certain/likely/heuristic |
 
 ## 评分模型
 
 `staticScore = max(0, 100 - Σ(severity 权重 × 命中数 × confidence 系数))`
 
 verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `critical`；否则 high ≥ 1 → `suspicious`；其余 → `clean`。**两分制不合并**：staticScore（确定性）与 qualityScore（LLM 主观）分开呈现。
+
+## 能力边界（诚实清单）
+
+> 静态扫描是"减速带 + 取证层"，不是安全边界。以下按**判定影响**分两档，
+> 并如实列出**明确不检测**的形态（均已实测验证）。
+
+### 能检测 —— 判定级（会改变 verdict）
+
+| 规则 | 检测的问题类 | 命中 → verdict | 验证 |
+|---|---|---|---|
+| R1 | 构造器链逃逸：`x.constructor("return process")`（字符串参数静态可求值：字面量/模板/拼接/const 绑定） | critical | 矩阵 + 多文件 ✓ |
+| R2 | 动态执行：`eval()` / `Function()` / `new Function`/\`new AsyncFunction\`（参数含逃逸串 → critical）/ `(async)=>{}.constructor` 捕获 / `vm.runInContext`/\`runInNewContext\` / 动态 `import()` / `require()` | high（files）/ medium（code，逃逸串 critical） | 矩阵 ✓ |
+| R3 | process 直访：`getBuiltinModule`/\`mainModule\`/\`module\`/\`exit\` → critical；其余成员 → high；`runtime='sandbox'` 封顶 high | critical / high | 矩阵 ✓ |
+| R4 | 宿主闭包捕获：agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob 的 `.constructor` 读取或 `Object.getPrototypeOf` 投喂 | critical | 矩阵 ✓ |
+| R7 | 硬编码密钥：`sk-` / `AKIA` / `AIza` / `gh[pousr]_` / `xox[baprs]-` / 环境变量赋值 / URL 内嵌 key（占位符排除） | high → suspicious | 矩阵 ✓ |
+| R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；含 `await` 的常驻循环仅 info（§14.1 不短路 LLM） | 矩阵 ✓ |
+
+### 能检测 —— 提示级（只降分，永不改变 verdict）
+
+| 规则 | 检测的问题类 | 说明 |
+|---|---|---|
+| R5 | ctx 逃逸尝试信号：访问沙箱 withheld 框架成员/未声明服务（`ctx.plugin` 等） | 仅 code 场景；medium |
+| R6 | 字符串粗扫：拼接逃逸特征、`getBuiltinModule`/\`child_process\`/危险 require 模块引用、混淆特征（`String.fromCharCode`/\`Buffer.from(base64)\`/\`atob(\`/\`charCodeAt\`） | info/heuristic |
+| R8 | 扫描超时/文件过大跳过 | info 元规则 |
+
+### 明确不检测（实测验证）
+
+| 形态 | 实测结果 |
+|---|---|
+| 间接引用：别名函数 `const f = Function; f(...)`、计算访问 `x["constructor"]` / `process["getBuiltinModule"]`、`globalThis.process`、间接 eval `(0, eval)` | 仅 R6 info 或零 finding，verdict=clean |
+| 运行时/外部构造载荷：base64 串、hex/charCode 拼装、网络/环境变量/参数读码、自修改代码 | base64 构造器串实测**零 finding** |
+| 非源码文件：`.jsx`/\`.tsx\`/\`.vue\`/\`.json\`/二进制/wasm/shell 脚本 | 不在扫描面（仅 .js/.ts/.mjs/.cjs） |
+| 依赖链/供应链：import/require 图、依赖版本漏洞、`package.json` scripts/install 钩子、许可证、作者信誉 | 不解析 |
+| 运行时行为：网络外传、原型污染、死循环/资源耗尽、时序、权限滥用 | 无数据流/行为分析 |
+| 语义知识：插件实际注入的服务、bundler polyfill 中的 `process`、遮蔽判定边界 | R5 只认 4 个变量名；遮蔽检查是 v1 启发式（偏少报） |
 
 ## 信任边界
 
@@ -87,7 +123,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 ```sh
 npm run build       # scanner-bin + src 编译到 lib/
 npm run typecheck   # tsc --noEmit
-npm test            # 构建 + vitest（50 用例）
+npm test            # 构建 + vitest（87 用例）
 ```
 
 目录：`scanner-bin/` 静态引擎（独立进程）；`src/` 插件本体（tools/guards/audit/report）；`test/` fixtures + 单测。权威计划见 `PLAN.md`（v1.1）。
