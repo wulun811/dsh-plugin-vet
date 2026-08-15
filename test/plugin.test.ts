@@ -12,6 +12,7 @@ import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
 import { resolvePackageRoot } from '../lib/scanner/package-sources.js'
 import { VetConfigSchema } from '../lib/config.js'
+import { VetStatus } from '../lib/guard/status.js'
 import type { VetConfig } from '../lib/config.js'
 import { explainScore, renderScorecard } from '../lib/report/render.js'
 
@@ -247,6 +248,27 @@ describe('internal/plugin guard', () => {
       const f = fiber({ entry: { options: { name: '@vet-test/needs-audit' } } })
       expect(() => h(f)).toThrow(/尚未完成审计/)
       expect(f.dispose).toHaveBeenCalled()
+    } finally {
+      delete process.env.DSH_PLUGIN_VET_ARCHIVE_DIR
+    }
+  })
+
+  it('requireAudit report（watch）：无档案 → 只报警不拦截（alarm-only，D30）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-require3-'))
+    process.env.DSH_PLUGIN_VET_ARCHIVE_DIR = join(dir, 'audits')
+    try {
+      const ctx = new FakeCtx()
+      const status = new VetStatus()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'report', requireAudit: true }), status)
+      const h = ctx.handlers.get('internal/plugin')![0]
+      const f = fiber({ entry: { options: { name: '@vet-test/no-audit' } } })
+      expect(() => h(f)).not.toThrow()
+      expect(f.dispose).not.toHaveBeenCalled()
+      expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
+      const snap = status.snapshot()
+      expect(snap.alarmCount).toBe(1)
+      expect(snap.alarms[0].kind).toBe('audit-required')
+      expect(snap.alarms[0].severity).toBe('yellow')
     } finally {
       delete process.env.DSH_PLUGIN_VET_ARCHIVE_DIR
     }

@@ -37,6 +37,17 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     if (config.requireAudit && !hasAuditRecord(entryName)) {
       const msg = auditRequiredMessage(entryName)
       ctx.logger.warn(msg)
+      // alarm-only：未审计插件只记录黄色告警（观测/警报），不拦截——除非用户显式选择 deny。
+      status?.record({
+        id: `audit-required:${entryName}`,
+        severity: 'yellow',
+        source: 'scan',
+        kind: 'audit-required',
+        message: msg,
+        target: entryName,
+        pluginHint: entryName,
+        at: Date.now(),
+      })
       if (config.mode === 'deny') {
         void fiber.dispose()
         throw new Error(msg)

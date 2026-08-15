@@ -30,6 +30,6 @@ export function hasAuditRecord(pluginName: string): boolean {
 /** 提示消息（拦截/报警共用）：引用协议 skill，说明如何完成审查。 */
 export function auditRequiredMessage(pluginName: string): string {
   return `vet: 插件 ${pluginName} 尚未完成审计（无健康档案）。` +
-    `启用 requireAudit 后，新插件必须先按 vet-audit-protocol 审查并落盘档案到 ${archiveDir()}，` +
-    `然后重启 dsh web 才能加载。`
+    `启用 requireAudit 后，新插件应先按 vet-audit-protocol 审查并落盘档案到 ${archiveDir()}；` +
+    `未审计插件加载时触发黄色告警（deny 模式则拦截）。`
 }
