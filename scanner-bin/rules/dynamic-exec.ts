@@ -1,6 +1,6 @@
 import ts from 'typescript'
 import type { Finding, RuleContext, Severity, Confidence } from '../protocol.js'
-import { walk, stringyValue, lineOf } from '../ast.js'
+import { walk, stringyValue, lineOf, isShadowed } from '../ast.js'
 
 // F2：globalThis/global/window 前缀 + 括号访问都算逃逸特征（return globalThis.process /
 // process['exit'] 此前漏报）
@@ -45,12 +45,18 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
 function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, add: (n: ts.Node, sev: Severity, conf: Confidence, msg: string) => void): void {
   const callee = n.expression
   const name = ts.isIdentifier(callee) ? callee.text : undefined
+  // P2-1：eval/Function 被局部遮蔽（const Function = safe; Function(x)）时不是动态执行——
+  // 与 R3/R4 一致做 shadowing 检查，避免误报 high。
   if (name === 'eval') {
-    add(n, 'high', 'certain', 'eval 动态执行（任意代码执行）')
+    if (!isShadowed('eval', callee as ts.Identifier)) {
+      add(n, 'high', 'certain', 'eval 动态执行（任意代码执行）')
+    }
     return
   }
   if (name === 'Function') {
-    add(n, 'high', 'certain', 'Function() 动态构造函数')
+    if (!isShadowed('Function', callee as ts.Identifier)) {
+      add(n, 'high', 'certain', 'Function() 动态构造函数')
+    }
     return
   }
   if (name === 'import') {
@@ -93,7 +99,9 @@ function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, ad
 function checkNew(n: ts.NewExpression, sf: ts.SourceFile, add: (n: ts.Node, sev: Severity, conf: Confidence, msg: string) => void): void {
   const expr = n.expression
   const name = ts.isIdentifier(expr) ? expr.text : undefined
+  // P2-1：new Function/AsyncFunction 同样受局部遮蔽影响（const Function = safe; new Function(x)）
   if (name === 'Function' || name === 'AsyncFunction') {
+    if (ts.isIdentifier(expr) && isShadowed(name, expr)) return
     const arg = n.arguments?.[0]
     if (arg !== undefined) {
       const sv = stringyValue(arg, sf)
@@ -120,6 +128,9 @@ function isConstructorCapture(n: ts.Node): boolean {
 /**
  * D30：require 是箭头函数/函数的形参（DSH 客户端加载器 `factory: (require) =>` 注入）→
  * 调用点在形参绑定作用域内，非模块级 require，是客户端 bundle 标准写法，不报 high。
+ * P1-9：旧实现遇到「最近的函数没有 require 形参」就 return false——factory 内嵌套的
+ * 内层函数调用 require 时（闭包捕获外层形参）被误报 high。改为继续向外找绑定函数；
+ * 只有从调用点向上所有函数都没有 require 形参（即模块级 require）才返回 false。
  */
 function isFactoryParamRequire(call: ts.CallExpression): boolean {
   const name = 'require'
@@ -129,7 +140,7 @@ function isFactoryParamRequire(call: ts.CallExpression): boolean {
       for (const p of node.parameters) {
         if (ts.isIdentifier(p.name) && p.name.text === name) return true
       }
-      return false // 最近的函数没有 require 形参 → 不是加载器模式
+      // 本层函数无 require 形参 → 继续向外（外层 factory 可能注入）
     }
     node = node.parent
   }

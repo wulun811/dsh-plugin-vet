@@ -29,6 +29,27 @@ export let sidecarSpawned = false
  */
 const SIDECAR_PID_ENV = 'DSH_VET_SIDECAR_PID'
 
+/**
+ * P0-2：哨兵意外退出后是否重拉（纯函数，可测）。
+ * 条件：env 注册表仍指向本哨兵（mine）+ 非 stopping + 未达上限。
+ * 旧实现先删 env 再比较 → 恒 false，respawn 死代码；这里由调用方传入注册表 pid，判定与清理解耦。
+ */
+export function decideRespawn(
+  registeredPid: number | undefined,
+  childPid: number | undefined,
+  stopping: boolean,
+  respawnCount: number,
+  maxRespawn: number,
+): boolean {
+  // 两边都要有值才判 mine——undefined === undefined 是「spawn 失败/无注册」不是「本哨兵」
+  return registeredPid !== undefined && registeredPid === childPid && !stopping && respawnCount < maxRespawn
+}
+
+/** P1-6：T2 报警去重 id——拼 pluginHint，避免不同插件同路径互吞报警。 */
+export function t2AlarmId(kind: string, target: string | undefined, pluginHint: string | undefined): string {
+  return `t2:${kind}:${target ?? ''}:${pluginHint ?? ''}`
+}
+
 function envSidecarPid(): number | undefined {
   const raw = process.env[SIDECAR_PID_ENV]
   if (raw === undefined || raw === '') return undefined
@@ -165,12 +186,31 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
         }
       }
     })
+    child.on('error', (err) => {
+      // P2-3：spawn 失败（EACCES/无效路径等）不能无监听——未捕获 'error' 事件会崩宿主。
+      // 置为未存活并清掉残留 env（从未活过的 pid），不抛不 respawn（下次 apply 重新尝试）。
+      sidecarAlive = false
+      sidecarSpawned = false
+      if (envSidecarPid() === child?.pid) delete process.env[SIDECAR_PID_ENV]
+      ctx.logger.error(`vet: T1 哨兵启动失败：${String(err)}`)
+      status.record({
+        id: 't1:spawn-fail',
+        severity: 'yellow',
+        source: 't1',
+        kind: 'sentinel',
+        message: 'T1 哨兵启动失败，运行时内存/子进程/fd 监控未生效',
+        at: Date.now(),
+      })
+    })
     child.on('exit', (code) => {
       sidecarAlive = false
-      // env 注册表已被清/改指（off 分支或新实例接管后 kill）→ 不再 respawn，否则关了守卫哨兵又活回来
+      // P0-2：不再先删 env 再判定——那样 respawn 判定恒 false（env 刚被删），respawn 变死代码，
+      // 哨兵意外退出后监控静默中断到下次 apply。这里直接用 exit 时读到的 registered 判定：
+      // env 指向已死 pid 无害（spawnSidecar 的 pidAlive 探测失败会重新 spawn 并覆盖 env；
+      // off/接管场景 env 已被清/改指，decideRespawn 为 false 不复活）。
       const registered = envSidecarPid()
-      if (registered === child?.pid) delete process.env[SIDECAR_PID_ENV]
-      ctx.logger.warn(`vet: T1 哨兵退出（code=${code ?? 'null'}，respawn=${registered === child?.pid}）`)
+      const respawn = decideRespawn(registered, child?.pid, stopping, respawnCount, MAX_RESPAWN)
+      ctx.logger.warn(`vet: T1 哨兵退出（code=${code ?? 'null'}，respawn=${respawn}）`)
       if (stopping) return
       // 监控器失活本身是黄灯报警（vet 自己的进程挂了，用户该知道守护断了）
       status.record({
@@ -182,7 +222,7 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
         at: Date.now(),
       })
       // 仅当 env 注册表仍指向本哨兵时才 respawn（off/接管场景不复活）
-      if (respawnCount < MAX_RESPAWN && envSidecarPid() === child?.pid) {
+      if (respawn) {
         respawnCount++
         ctx.logger.warn(`vet: 5s 后重拉哨兵（第 ${respawnCount}/${MAX_RESPAWN} 次）`)
         setTimeout(spawnSidecar, RESPAWN_DELAY_MS).unref?.()
@@ -231,7 +271,8 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     // 官方归因的 spawn 降噪（官方能力授权）；第三方与无归因才报警
     if (alarm.kind === 'spawn' && alarm.pluginHint !== undefined && isOfficial(alarm.pluginHint)) return
     const entry: VetAlarm = {
-      id: `t2:${alarm.kind}:${alarm.target ?? ''}`,
+      // P1-6：id 拼 pluginHint——两个插件碰同一敏感路径不再同 id 互吞（后到者报警被去重吞掉）
+      id: t2AlarmId(alarm.kind, alarm.target, alarm.pluginHint),
       severity: alarm.severity,
       source: 't2',
       kind: alarm.kind,

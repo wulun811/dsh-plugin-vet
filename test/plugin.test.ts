@@ -215,11 +215,11 @@ describe('internal/plugin guard', () => {
     expect(ctx.logger.info).not.toHaveBeenCalled()
   })
 
-  it('report 模式：第三方包自动扫描 → logger.info', () => {
+  it('report 模式：第三方包自动扫描 → logger.info（异步，P0-4 不再同步阻塞）', async () => {
     const ctx = new FakeCtx()
     installInternalPluginGuard(ctx as never, cfg())
     const h = ctx.handlers.get('internal/plugin')![0]
-    h(fiber({ entry: { options: { name: '@vet-test/clean' } } }))
+    await h(fiber({ entry: { options: { name: '@vet-test/clean' } } }))
     expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining('auto-scan @vet-test/clean → clean'))
   })
 

@@ -32,7 +32,8 @@ const B64 = () => Buffer.from(RAND() + SECRET()).toString('base64')
 export function ensureHoneypot(dir: string, logger?: { warn(m: string): void }): string | undefined {
   const root = dir.trim() === '' ? DEFAULT_HONEYPOT_DIR : dir
   try {
-    mkdirSync(root, { recursive: true })
+    // P2-8：蜜罐目录 0700——旧默认 0777&umask（通常 0755），目录本身对同机其他用户可见可进
+    mkdirSync(root, { recursive: true, mode: 0o700 })
   } catch (error) {
     logger?.warn(`vet: 蜜罐目录创建失败（${root}）：${String(error)}`)
     return undefined
@@ -42,7 +43,8 @@ export function ensureHoneypot(dir: string, logger?: { warn(m: string): void }):
     const full = join(root, name)
     if (!existsSync(full)) {
       try {
-        writeFileSync(full, content)
+        // P2-8：诱饵文件 0600——旧默认 0644 对同机其他用户可读（虽是假密钥也应收紧）
+        writeFileSync(full, content, { mode: 0o600 })
       } catch {
         return
       }

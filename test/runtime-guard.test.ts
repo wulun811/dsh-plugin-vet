@@ -7,6 +7,7 @@ import {
 import { readHostMetrics } from '../src/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../src/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../src/guard/status-route.js'
+import { decideRespawn, t2AlarmId } from '../src/guard/runtime-guard.js'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -66,6 +67,45 @@ describe('VetStatus（盾牌聚合器）', () => {
     expect(s.snapshot().level).toBe('yellow')
     s.noteScan({ pluginName: 'good', verdict: 'clean', staticScore: 100, at: Date.now() })
     expect(s.snapshot().level).toBe('green')
+  })
+
+  it('P2-2：报警 TTL 过期后不再影响盾牌（误报不永久黄/红）', () => {
+    // 500ms 前报警，TTL 100ms → 已过期：snapshot 里消失、level 回 green
+    const s = new VetStatus({ alarmTtlMs: 100, dedupeWindowMs: 0 })
+    s.record({ id: 'old-red', severity: 'red', source: 't1', kind: 'mem', message: 'x', at: Date.now() - 500 })
+    expect(s.snapshot().level).toBe('green')
+    expect(s.snapshot().alarmCount).toBe(0)
+    // 新报警在 TTL 内 → 生效
+    s.record({ id: 'fresh-red', severity: 'red', source: 't1', kind: 'mem', message: 'x', at: Date.now() })
+    expect(s.snapshot().level).toBe('red')
+    expect(s.snapshot().alarmCount).toBe(1)
+  })
+})
+
+describe('decideRespawn / t2AlarmId（P0-2/P1-6 判定逻辑）', () => {
+  it('P0-2：env 指向本哨兵 + 非 stopping + 未达上限 → respawn（旧实现恒 false 的死代码回归）', () => {
+    expect(decideRespawn(42, 42, false, 0, 5)).toBe(true)
+    expect(decideRespawn(42, 42, false, 4, 5)).toBe(true)
+    // stopping → 不复活（off/卸载场景）
+    expect(decideRespawn(42, 42, true, 0, 5)).toBe(false)
+    // env 已清（undefined）或指向别的 pid → 不复活
+    expect(decideRespawn(undefined, 42, false, 0, 5)).toBe(false)
+    expect(decideRespawn(43, 42, false, 0, 5)).toBe(false)
+    // 达上限 → 不复活
+    expect(decideRespawn(42, 42, false, 5, 5)).toBe(false)
+    // child pid 未定义（spawn 失败）→ 不复活
+    expect(decideRespawn(undefined, undefined, false, 0, 5)).toBe(false)
+  })
+
+  it('P1-6：报警 id 拼 pluginHint——两插件同路径不同 id，不互吞', () => {
+    const a = t2AlarmId('fs-read', '/home/u/.ssh/id_rsa', 'evil-a')
+    const b = t2AlarmId('fs-read', '/home/u/.ssh/id_rsa', 'evil-b')
+    expect(a).not.toBe(b)
+    expect(t2AlarmId('fs-read', '/home/u/.ssh/id_rsa', 'evil-a'))
+      .toBe(t2AlarmId('fs-read', '/home/u/.ssh/id_rsa', 'evil-a'))
+    // 无归因时以 kind+target 为 id（与旧行为兼容）
+    expect(t2AlarmId('fs-read', '/home/u/.ssh/id_rsa', undefined))
+      .toBe('t2:fs-read:/home/u/.ssh/id_rsa:')
   })
 })
 
@@ -225,6 +265,28 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(classifyOp({ module: 'fs', op: 'open', args: ['/etc/hosts', 'w'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
     expect(classifyOp({ module: 'fs', op: 'openSync', args: ['/home/u/.env', 'a+'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
     expect(classifyOp({ module: 'fs', op: 'open', args: ['/etc/passwd', 'r'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-read' })
+  })
+
+  it('P1-7：open 首参路径以 r/w/a 开头不再误当 flags（open auth.txt 只读）', () => {
+    // 旧实现 args.find(/^[rwa]/) 命中 'auth.txt'（a 开头）→ 误报 fs-write；现在 flags 只认短形态
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['auth.txt', 'r'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-read' })
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['auth.txt', 'r'] }, DEFAULT_HOOK_CONFIG)).not.toMatchObject({ kind: 'fs-write' })
+    // 路径含 w 开头且只读 → 也不误报写
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['writable.txt', 'r'] }, DEFAULT_HOOK_CONFIG)).not.toMatchObject({ kind: 'fs-write' })
+    // 真正的写 flags 仍报
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['auth.txt', 'w'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // 长字符串（如模式串）不算 flags
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['/home/u/.env', 'w'], }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+  })
+
+  it('P1-8：exec 破坏性命令（rm -rf ~/.ssh）→ spawn 报警；常规清理不报', () => {
+    expect(classifyOp({ module: 'child_process', op: 'exec', args: ['rm -rf ~/.ssh'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'spawn' })
+    expect(classifyOp({ module: 'child_process', op: 'exec', args: ['rm -rf /tmp/x'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'child_process', op: 'exec', args: ['echo x > /etc/passwd'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'spawn' })
+    expect(classifyOp({ module: 'child_process', op: 'spawn', args: ['rm', ['-rf', '/home/u/.ssh']] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'spawn' })
+    expect(classifyOp({ module: 'child_process', op: 'spawn', args: ['cp', ['-r', '/tmp/a', '/tmp/b']] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // 常规 git/node 仍不报
+    expect(classifyOp({ module: 'child_process', op: 'exec', args: ['npm run build'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
   })
 
   it('cp/rename 双向：src 敏感（拷密钥出局）或 dest 敏感（覆盖系统文件）都报（D29 补漏）', () => {

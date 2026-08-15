@@ -3,7 +3,8 @@ import type { Confidence, Finding, Severity, Verdict } from './protocol.js'
 // info 级（字符串特征/能力触达面/超时跳过）是提示与取证，不构成威胁密度 → 不扣分。
 // staticScore 反映 decisive（critical/high/medium）威胁；info 只出现在 findings 里。
 const WEIGHTS: Record<Severity, number> = { critical: 45, high: 20, medium: 8, info: 0 }
-const CONFIDENCE_COEF: Record<Confidence, number> = { certain: 1.0, likely: 0.8, heuristic: 0.4 }
+// P3-3：heuristic 恒用 0.5（computeScore 内联），这里不收录——旧值 0.4 是死值误导
+const CONFIDENCE_COEF: Record<Exclude<Confidence, 'heuristic'>, number> = { certain: 1.0, likely: 0.8 }
 
 /**
  * Deterministic static score: 100 - Σ(severity weight × confidence coef × hits).

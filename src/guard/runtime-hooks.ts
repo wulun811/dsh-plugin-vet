@@ -55,6 +55,8 @@ const READ_OPS = new Set(['readFile', 'readFileSync', 'createReadStream', 'open'
 const PROBE_OPS = new Set(['readdir', 'readdirSync', 'opendir', 'opendirSync', 'stat', 'statSync', 'access', 'accessSync', 'existsSync', 'readlink', 'readlinkSync', 'realpath', 'realpathSync'])
 /** child_process 全部操作（spawn 面，yellow）。 */
 const PROC_OPS = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'])
+/** P1-8：破坏性命令词——命中且命令里出现敏感路径（参数或重定向目标）才报警，避免 rm -rf /tmp 这类常规清理误报。 */
+const DESTRUCTIVE_TOKENS = new Set(['rm', 'mv', 'cp', 'dd', 'mkfs', 'mkfs.ext4', 'mkfs.xfs', 'shred', 'truncate'])
 
 /** 关键词边界匹配：须出现在段首或 . _ - 之后（避免 'js-tokens' 这类库名误伤）。 */
 function segmentHasKeyword(part: string, keyword: string): boolean {
@@ -101,6 +103,7 @@ function allStrings(args: unknown[]): string[] {
   const out: string[] = []
   for (const a of args) {
     if (typeof a === 'string') out.push(a)
+    else if (Array.isArray(a)) out.push(...allStrings(a)) // spawn/execFile 的 argv 数组
     else if (typeof a === 'object' && a !== null && 'path' in a && typeof (a as { path?: unknown }).path === 'string') {
       out.push((a as { path: string }).path)
     }
@@ -123,6 +126,24 @@ function hitsShellToken(command: string, tokens: string[]): boolean {
   return tokens.some(t => words.some(w => w === t || w.slice(w.lastIndexOf('/') + 1) === t))
 }
 
+/**
+ * P1-8：命令串里的路径形 token（含 / 或 ~ 开头）——用于「破坏性命令 + 敏感路径」组合判定。
+ * exec('rm -rf ~/.ssh') 里 '~/.ssh' 是路径 token；exec('echo x') 没有。
+ * ~ 展开为 /home 前缀（保守形态：命中 .ssh 等段名即可判定，不必解析真实 HOME）。
+ */
+function pathTokens(command: string): string[] {
+  return command.split(/\s+/)
+    .map(w => w.replace(/^['"]|['"]$/g, ''))
+    .filter(w => w.includes('/') || w.startsWith('~'))
+    .map(w => w.replace(/^~/, '/home'))
+}
+
+/** P1-8：shell 重定向目标（> file / >> file / 2> file），用于 exec('echo x > /etc/passwd') 检测。 */
+function redirectTarget(command: string): string | undefined {
+  const m = /(?:^|\s)[12]?>>?\s*([^\s&;|]+)/.exec(command)
+  return m === null ? undefined : m[1].replace(/^['"]|['"]$/g, '').replace(/^~/, '/home')
+}
+
 /** 路径是否落在任一蜜罐根下（D27）。 */
 export function isHoneypotPath(p: string, roots: string[]): boolean {
   if (roots.length === 0) return false
@@ -138,9 +159,21 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
   const { module, op: name, args } = op
   const target = firstString(args) ?? ''
   if (module === 'child_process' && PROC_OPS.has(name)) {
-    // 只对含 shell 解释器/下载外联关键词的命令行报警（git/node/pnpm 等常规子进程不报）
     const cmd = commandString(args)
-    if (!hitsShellToken(cmd, cfg.shellTokens)) return null
+    // 命令全貌（含 spawn argv 数组的元素）：exec('rm -rf ~/.ssh') 与 spawn('rm', ['-rf', '/home/u/.ssh'])
+    // 都能被词/路径检测覆盖。注意 cmd 是字符串，不能展开成字符数组（...cmd 会每字符间插空格）。
+    const full = [cmd, ...allStrings(args)].join(' ')
+    // P1-8：破坏性命令（rm -rf ~/.ssh / dd of=/etc/… / mkfs / cp 覆盖敏感路径）——只对命令里
+    // 出现敏感路径（参数或重定向目标）的组合报警；exec('rm -rf /tmp/x') 常规清理不报。
+    const destr = hitsShellToken(full, [...DESTRUCTIVE_TOKENS])
+    const redirect = redirectTarget(full)
+    const redirectSensitive = redirect !== undefined && isSensitivePath(redirect, cfg, 'mutate')
+    if (!hitsShellToken(cmd, cfg.shellTokens)) {
+      // 触发条件：破坏性命令 + 敏感路径参数，或 shell 重定向到敏感路径（echo x > /etc/passwd）
+      if (!destr && !redirectSensitive) return null
+      const paths = [...pathTokens(full), redirect].filter((p): p is string => p !== undefined)
+      if (!paths.some(p => isSensitivePath(p, cfg, 'mutate'))) return null
+    }
     return {
       severity: 'yellow',
       kind: 'spawn',
@@ -168,8 +201,10 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
       }
     }
     // open/openSync 的 flags 参数带 w/a/+/x → 写意图（fs.open('/etc/passwd','w') 不该按读取报）
+    // P1-7：跳过首参（路径本身以 r/w/a 开头会误当 flags，如 open('auth.txt','r')）——
+    // flags 只认短合法形态（r/w/a/x 可带 +，长度 ≤2），且只在首个参数之后的字符串里找。
     if ((name === 'open' || name === 'openSync') && READ_OPS.has(name)) {
-      const flags = args.find((a): a is string => typeof a === 'string' && /^[rwa]/.test(a))
+      const flags = args.slice(1).find((a): a is string => typeof a === 'string' && /^[rwax]\+?$/.test(a))
       if (flags !== undefined && /[wax+]/.test(flags) && isSensitivePath(target, cfg, 'mutate')) {
         return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入（open flags=${flags}）：${target.slice(0, 120)}`, target }
       }

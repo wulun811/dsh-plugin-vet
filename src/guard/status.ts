@@ -39,22 +39,36 @@ export interface VetStatusOptions {
   alarmMax?: number
   /** 同 id 报警去重窗口 ms（默认 60s）。 */
   dedupeWindowMs?: number
+  /** 报警有效期 ms（默认 24h，P2-2）：超龄报警从缓冲与盾牌 level 判定中淘汰——
+   * 一次误报不再让盾牌永久黄/红；持续攻击会持续产生新报警，天然续期。 */
+  alarmTtlMs?: number
 }
 
 export class VetStatus {
   private readonly alarmMax: number
   private readonly dedupeWindowMs: number
+  private readonly alarmTtlMs: number
   private readonly alarms: VetAlarm[] = []
   private lastScanValue: ScanEcho | undefined
 
   constructor(options: VetStatusOptions = {}) {
     this.alarmMax = options.alarmMax ?? 20
     this.dedupeWindowMs = options.dedupeWindowMs ?? 60_000
+    this.alarmTtlMs = options.alarmTtlMs ?? 24 * 60 * 60 * 1000
+  }
+
+  /** 淘汰超龄报警（TTL 过期）；level 与列表都只看存活报警。 */
+  private expire(now: number): void {
+    const cutoff = now - this.alarmTtlMs
+    for (let i = this.alarms.length - 1; i >= 0; i--) {
+      if (this.alarms[i].at < cutoff) this.alarms.splice(i, 1)
+    }
   }
 
   /** 记录一条报警；同 id 在去重窗口内返回 'deduped'。 */
   record(alarm: VetAlarm): 'new' | 'deduped' {
     const now = Date.now()
+    this.expire(now)
     const recent = this.alarms.find(a => a.id === alarm.id && now - a.at < this.dedupeWindowMs)
     if (recent !== undefined) return 'deduped'
     this.alarms.unshift({ ...alarm })
@@ -68,6 +82,7 @@ export class VetStatus {
   }
 
   snapshot(): VetStatusSnapshot {
+    this.expire(Date.now())
     const level: ShieldLevel =
       this.alarms.some(a => a.severity === 'red') ? 'red'
       : (this.alarms.some(a => a.severity === 'yellow') || (this.lastScanValue !== undefined && this.lastScanValue.verdict !== 'clean')) ? 'yellow'

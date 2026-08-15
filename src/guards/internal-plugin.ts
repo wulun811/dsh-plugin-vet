@@ -1,6 +1,7 @@
 import type { Context, Fiber } from '@deepseek-ai/cordis'
+import type { ScanResponse } from '../scanner/protocol.js'
 import type { VetConfig } from '../config.js'
-import { scanSync } from '../scanner/client.js'
+import { scan, scanSync } from '../scanner/client.js'
 import { listSourceFiles, resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../invariant.js'
 import { hasAuditRecord, auditRequiredMessage } from '../audit/archive.js'
@@ -56,16 +57,10 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       }
     }
 
-    const check = (): void => {
-      // DSH 把插件装进 profile 的 node_modules（vet 可能被符号链接，realpath 解析不到）→
-      // 用 loader 的解析基准（ctx.baseUrl = profile 目录）定位第三方插件根目录。
-      const profileDir = (ctx as { baseUrl?: string }).baseUrl
-      const root = resolvePackageRoot(entryName, profileDir)
-      if (root === undefined) return
-
-      const files = listSourceFiles(root)
-      if (files.length === 0) return
-      const res = scanSync({ kind: 'files', files, osv: config.osvCheck === true }, { timeoutMs: config.scannerTimeoutMs })
+    // P0-4：扫描与后处理拆分——deny 用同步 scanSync（observer 内需要同步抛错回滚挂载），
+    // report 用异步 scan()（spawn 子进程不阻塞事件循环；旧实现 report 也走 scanSync，
+    // async IIFE 包不住同步阻塞，大包扫描会冻结整个 DSH 最长 scannerTimeoutMs）。
+    const finish = (res: ScanResponse): void => {
       if (!res.ok || res.report === undefined) {
         // M9：deny 模式扫描失败必须 fail-closed（拦截 + 告警），否则恶意包可借
         // 扫描超时/异常静默放行；report 模式记录告警（扫描器失活本身是异常信号）
@@ -96,16 +91,33 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       }
     }
 
+    // DSH 把插件装进 profile 的 node_modules（vet 可能被符号链接，realpath 解析不到）→
+    // 用 loader 的解析基准（ctx.baseUrl = profile 目录）定位第三方插件根目录。
+    const profileDir = (ctx as { baseUrl?: string }).baseUrl
+    const root = resolvePackageRoot(entryName, profileDir)
+    if (root === undefined) return
+    const files = listSourceFiles(root)
+    if (files.length === 0) return
+    const request = { kind: 'files' as const, files, osv: config.osvCheck === true }
+    // P2-5：engine 的扫描预算 = files×2s；守卫超时若小于它，大包会在 engine 发出 R8-skip 前
+    // 被 kill → 扫描静默失败。超时按文件数放大（上限 60s），让 engine 能优雅降级而不是被杀。
+    const scanTimeoutMs = Math.min(Math.max(config.scannerTimeoutMs, files.length * 2000), 60_000)
+
     if (config.mode === 'deny') {
-      check()
-    } else {
-      void (async () => {
-        try {
-          check()
-        } catch (error) {
-          ctx.logger.error(String(error))
-        }
-      })()
+      // 同步路径：observer 内同步抛错才能让 cordis 回滚挂载（拦截语义必须同步）
+      const res = scanSync(request, { timeoutMs: scanTimeoutMs })
+      finish(res)
+      return
     }
+    // report 异步路径：spawn 子进程不阻塞事件循环（P0-4 修复——旧实现 report 也走 scanSync，
+    // 大包扫描会冻结整个 DSH 最长 scannerTimeoutMs）。返回 promise 便于测试 await 扫描完成。
+    return (async () => {
+      try {
+        const res = await scan(request, { timeoutMs: scanTimeoutMs })
+        finish(res)
+      } catch (error) {
+        ctx.logger.error(String(error))
+      }
+    })()
   })
 }

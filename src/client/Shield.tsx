@@ -519,6 +519,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
       {open && createPortal(
         <div
           ref={panelRef}
+          onMouseEnter={cancelHelpClose}
+          onMouseLeave={scheduleHelpClose}
           style={{
             position: 'fixed',
             top: 56,

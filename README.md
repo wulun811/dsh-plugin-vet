@@ -1,7 +1,7 @@
 # @jieai/dsh-plugin-vet — DSH 插件信任流水线
 
 > 安装任何插件前，先让 dsh-plugin-vet 走一遍：静态规则给出 verdict（确定性、不可伪造），
-> LLM 按编排查敏感点与质量问题（谁也无法替代），最终一张两分制评分卡交给人/模型决定。
+> agent 按 vet-audit-protocol 技能排查敏感点与质量问题（谁也无法替代），最终一张评分卡交给人/模型决定。
 >
 > **定位（D21）：监控报警器，不是打手。** vet 只做「检查 → 报警 → 给建议」：写时查（静态扫描）、
 > 跑时盯（运行时守卫）、报警面（评分卡 + GUI 盾牌状态灯）。**vet 永不替用户动手**——不自动卸载、
@@ -47,6 +47,7 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | `runtimeGrowthWindowMs` | `600000` | 膨胀检测窗口（默认 10 分钟） |
 | `honeypot.enabled` | `false` | D27 蜜罐诱饵（需 `runtimeGuard: watch`）：往 `honeypot.dir` 放假密钥诱饵，T2 对诱饵路径的触碰（读/写/删）单独报 `honeypot` 类报警。目录/文件名/内容均无蜜罐关键词（反蜜罐），默认位置 `~/.dsh/.local`，诱饵值全是格式正确但无效的假凭据 |
 | `honeypot.dir` | `''` | 诱饵目录；空 = `$HOME/.dsh/.local` |
+| `osvCheck` | `true` | 扫描 package.json 时向 Google OSV 查询已知漏洞（按安装版本过滤，P0-3 修复）；默认开启会外发包名到 api.osv.dev，网络失败静默降级。介意隐私可设 false |
 
 `@deepseek-ai/*` 官方包默认豁免（内置信任）。
 
@@ -85,7 +86,7 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 
 `staticScore = max(0, 100 - Σ(severity 权重 × 命中数 × confidence 系数))`
 
-verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `critical`；否则 high ≥ 1 → `suspicious`；其余 → `clean`。**两分制不合并**：staticScore（确定性）与 qualityScore（LLM 主观）分开呈现。
+verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `critical`；否则 high ≥ 1 → `suspicious`；其余 → `clean`。**verdict 只由静态层产出**：staticScore 与 verdict 分开呈现，不合成单一总分。
 
 ## 能力边界（诚实清单）
 
@@ -101,7 +102,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | R3 | process 直访：`getBuiltinModule`/\`mainModule\`/\`module\`/\`exit\` → critical；其余成员 → high；`runtime='sandbox'` 封顶 high | critical / high | 矩阵 ✓ |
 | R4 | 宿主闭包捕获：agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob 的 `.constructor` 读取或 `Object.getPrototypeOf` 投喂 | critical | 矩阵 ✓ |
 | R7 | 硬编码密钥：`sk-` / `AKIA` / `AIza` / `gh[pousr]_` / `xox[baprs]-` / 环境变量赋值 / URL 内嵌 key（占位符排除） | high → suspicious | 矩阵 ✓ |
-| R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；ReDoS 嵌套量词 `(a+)+$`、递归无终止、循环内 `Map.set` → medium（不进 verdict）；含 `await` 常驻循环仅 info（§14.1 不短路 LLM） | 矩阵 ✓ |
+| R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；ReDoS 嵌套量词 `(a+)+$`、递归无终止、循环内 `Map.set` → medium（不进 verdict）；含 `await` 常驻循环仅 info（§14.1 不短路审查） | 矩阵 ✓ |
 | R10 | 供应链：`package.json` scripts 的 preinstall/install/postinstall/uninstall 钩子（安装期任意代码执行）→ high；依赖清单 → info（已知漏洞匹配待数据源选型） | high → suspicious（install 钩子） | 矩阵 ✓ |
 | R11 | 破坏性文件操作：`fs.unlink/rm/rmdir(+Sync)` 删除敏感路径（/etc/root/.ssh 等）→ high，普通删除 → medium；`fs.writeFile` 等写入敏感路径 → high；`fs.readdir` 遍历敏感目录 → medium | high → suspicious（敏感路径）；medium 不进 verdict | 矩阵 ✓ |
 
@@ -135,10 +136,10 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 
 ## 信任边界
 
-1. **verdict 只由确定性静态层产出**——LLM 可被提示注入欺骗，规则不能。
+1. **verdict 只由确定性静态层产出**——规则是正则/AST 判定，不可被提示注入欺骗。
 2. **静态层与插件代码物理隔离**——scanner 是独立进程，AST 只读、从不 eval。
-3. **LLM 输入先过静态层**——critical 直接短路，不浪费 token；提示词要求以怀疑态度复核。
-4. **两分制不合并**——禁止合成单一总分，防止 LLM 污染 verdict 边界。
+3. **审查走 agent 协议**——agent 按 vet-audit-protocol 技能步骤复核（静态判据先行，敏感点逐条深挖），verdict 不受审查环节影响。
+4. **不合成单一总分**——禁止把 verdict 与主观评估合并，防止污染 verdict 边界。
 5. **本产品不是安全边界**——是恶意代码的"减速带+取证层"（与 DSH 官方立场对齐）。
 6. **fail-open 起步**——默认 `mode: report`，`deny` 由部署者显式开启。
 7. **alarm-only（D21）**——运行时守卫只 watch 不 kill；vet 的自动行为（deny 拦截）仅存在于部署者显式开启的 opt-in 模式。报警只附建议，处置永远留给用户在 DSH 上操作。
@@ -146,11 +147,13 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 ## Known Limitations
 
 1. **静态扫描不是安全边界**：混淆/编码/动态生成代码可绕过 AST 规则；R6 只提供"疑似"信号。
-2. **LLM 审计可被提示注入**：verdict 永不来自 LLM，但 LLM 可能漏报——置信度字段让用户知晓。
+1b. **源码枚举限制**：internal/plugin 自动扫描只递归收集 ≤6 层深、非隐藏（非 `.` 开头）的 .js/.ts/.mjs/.cjs 文件——深层或隐藏目录里的源码静默不扫（无提示）；需要全量时可手动用 scan_plugin(target=package) 扫整个目录。
+2. **agent 审查可被提示注入**：verdict 永不来自审查环节，但 agent 可能漏报——置信度字段让用户知晓。
 3. **`internal/plugin` 守卫不覆盖运行时动态挂载逃逸**：vm 路径由 `tools/execute` 守卫在调用层拦截。
 4. **R5 仅 code 场景**：files 场景的 ctx 访问默认不报（误报率高）。
-5. **扫描耗时**：大插件包可能超时跳过（R8 info）；LLM 审计分钟级、按需调用。
-6. **qualityScore 是模型主观判断**，不构成安全保证。
+5. **扫描耗时**：大插件包可能超时跳过（R8 info）；agent 审查按 vet-audit-protocol 步骤进行。
+6. **verdict 是静态层确定性判定**；agent 的主观判断记录在健康档案里，不构成安全保证。
+7. **/vet/status.json 无鉴权**：盾牌轮询需要匿名 GET，路由本身不鉴权——若 dsh web 绑定非回环地址，局域网内可读扫描结论/报警目标。vet 是 alarm-only 观测器，不做越权的访问控制；介意就保持回环绑定或信任网络（POST 开关守卫已有同源校验，无 Origin 拒绝）。
 7. **`@deepseek-ai/*` 默认信任**：未来若官方生态被攻破需收紧（v1 留开关）。
 8. **R10 已知漏洞匹配未做**：install 钩子与依赖清单已扫；CVE 匹配需数据源选型（OSV/NVD），待定。
 9. **R11 只认 `fs.*` 形态**：解构/别名调用（`const { unlinkSync } = require('fs')`）与运行时路径漏检（已实测记录，属静态边界）。

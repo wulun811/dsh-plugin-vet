@@ -14,14 +14,19 @@ import { walk, stringyValue, lineOf } from '../ast.js'
  */
 const SENSITIVE_PATH = /(\/etc\/|\/root\/|\/usr\/|\/boot\/|\/proc\/|\/sys\/|\/var\/(spool|run|cache|log)\/|\.ssh|\/.aws|\/.gnupg|crontab)/
 const DELETE_OPS = new Set(['unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync'])
-const WRITE_OPS = new Set(['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync'])
+// P2-6：写集与 T2 对齐——copyFile/cp/createWriteStream/truncate 此前静态层漏检
+const WRITE_OPS = new Set(['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync', 'createWriteStream', 'truncate', 'truncateSync'])
 const READDIR_OPS = new Set(['readdir', 'readdirSync'])
 
-/** fs.* or fs.promises.* call base name, else undefined. */
+/** fs.* or fs.promises.* call base name, else undefined.
+ * P2-6：旧实现用 base.startsWith('fs')——自定义对象 fsmap.rm() / fsUtil.writeFile() 会被误判成 fs 调用。
+ * 只认字面量 'fs' 与 'fs.promises'（编译器可确认的模块绑定，不猜变量名）。 */
 function fsBase(callee: ts.PropertyAccessExpression): string | undefined {
   const base = callee.expression
-  if (ts.isIdentifier(base)) return base.text
-  if (ts.isPropertyAccessExpression(base) && ts.isIdentifier(base.expression)) return base.expression.text + '.' + base.name.text
+  if (ts.isIdentifier(base) && base.text === 'fs') return 'fs'
+  if (ts.isPropertyAccessExpression(base)
+    && ts.isIdentifier(base.expression) && base.expression.text === 'fs'
+    && base.name.text === 'promises') return 'fs.promises'
   return undefined
 }
 

@@ -9,3 +9,9 @@ dsh-src/
 
 # 真实第三方插件测试素材（不入库）
 .real-plugins/
+# 会话/调试残留（不入库）
+.tmp-*/
+.conv.js
+.locale.js
+.subagent.js
+.index.html
