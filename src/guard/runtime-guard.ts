@@ -14,6 +14,7 @@ import type { WatchAlarm } from './runtime-watch.js'
 import { DEFAULT_HOOK_CONFIG, patchModule, type HookAlarm } from './runtime-hooks.js'
 import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../invariant.js'
+import { ensureHoneypot } from './honeypot.js'
 
 /** T1 哨兵是否已启动（invariant 断言用）。 */
 export let sidecarSpawned = false
@@ -106,6 +107,11 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     status.record(entry)
   }
   const hookCfg = { ...DEFAULT_HOOK_CONFIG }
+  // D27 蜜罐：guard watch 时按配置播种诱饵并登记蜜罐根（alarm-only；失败只告警）
+  if (config.honeypot.enabled) {
+    const hpRoot = ensureHoneypot(config.honeypot.dir, ctx.logger)
+    if (hpRoot !== undefined) hookCfg.honeypotRoots = [hpRoot]
+  }
   disposers.push(patchModule(fs as unknown as Record<string, unknown>, 'fs', hookCfg, sink, rootIndex))
   // fs.promises 是独立对象（require('fs').promises / node:fs/promises 同一对象），同步包装不覆盖 → 必须单独包装（D26 审核补漏）
   const promisesMod = (fs as unknown as { promises?: Record<string, unknown> }).promises

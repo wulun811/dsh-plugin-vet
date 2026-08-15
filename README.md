@@ -44,6 +44,8 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | `runtimeFdLimit` | `512` | T1 文件描述符报警阈值（→ yellow） |
 | `runtimeGrowthMb` | `256` | T1 内存持续膨胀报警阈值（窗口内 RSS 净增长，→ yellow 疑似泄漏） |
 | `runtimeGrowthWindowMs` | `600000` | 膨胀检测窗口（默认 10 分钟） |
+| `honeypot.enabled` | `false` | D27 蜜罐诱饵（需 `runtimeGuard: watch`）：往 `honeypot.dir` 放假密钥诱饵，T2 对诱饵路径的触碰（读/写/删）单独报 `honeypot` 类报警。目录/文件名/内容均无蜜罐关键词（反蜜罐），默认位置 `~/.dsh/.local`，诱饵值全是格式正确但无效的假凭据 |
+| `honeypot.dir` | `''` | 诱饵目录；空 = `$HOME/.dsh/.local` |
 
 `@deepseek-ai/*` 官方包默认豁免（内置信任）。
 
@@ -58,7 +60,7 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 - **`tools/execute` 拦截**：`cordis_define` / `cordis_run` / `run_code` / `workflow` 执行前扫描代码字符串；`report` 模式在结果文本加 `VET:` 前缀，`deny` 模式直接拦截（isError）。
 - **运行时守卫（D22，`runtimeGuard: watch`）**——alarm-only：
   - **T1 哨兵**：旁路子进程每 `runtimeIntervalMs` 读宿主 /proc（VmRSS / 子进程数 / fd 数），报警 JSON 行回传宿主 → 盾牌变黄/红。
-  - **T2 钩子**：进程内包装 fs / child_process（含 fs.promises），危险操作（敏感路径写入/删除、读密钥文件、含 shell/下载外联关键词的子进程）取栈归因到插件包名后报警；官方包归因的 spawn 降噪（能力授权）。**从不阻断调用**。
+  - **T2 钩子**：进程内包装 fs / child_process（含 fs.promises），危险操作（敏感路径写入/删除、读密钥文件、含 shell/下载外联关键词的子进程、蜜罐诱饵触碰）取栈归因到插件包名后报警；官方包归因的 spawn 降噪（能力授权）。**从不阻断调用**。
 - **GUI 盾牌（D22）**：浏览器半区注册进 `conversation.session.header.actions`，轮询 /vet/status.json 显示绿/黄/红灯 + 报警计数。激活需 `dsh web` 重启（重启后 client-modules 才扫描到 `dsh.client` 声明）。
   - 交互：**可点击**——点击展开报警面板（**实时指标**：内存/CPU/I-O/子进程/fd；**守卫状态**：未开启时可一键写入 runtimeGuard: watch 配置（重启生效）；**报警列表**含严重度/归因/**逐条建议**；最近扫描回显、刷新、更新时刻），外部点击自动关闭；有报警时盾牌旁显示计数徽标（绿/黄/红主题色，明暗自适应）。
 

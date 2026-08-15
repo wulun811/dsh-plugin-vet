@@ -17,6 +17,8 @@ export interface HookConfig {
   sensitiveExts: string[]
   /** 子进程命令行报警关键词（shell 解释器 + 下载/外联工具；整词命中才报警）。 */
   shellTokens: string[]
+  /** 蜜罐根目录（D27）：命中即按蜜罐报警——触碰任何诱饵路径都是高置信信号。 */
+  honeypotRoots: string[]
 }
 
 export const DEFAULT_HOOK_CONFIG: HookConfig = {
@@ -25,6 +27,7 @@ export const DEFAULT_HOOK_CONFIG: HookConfig = {
   sensitiveKeywords: ['secret', 'secrets', 'credential', 'credentials', 'passwd', 'shadow', 'private', 'auth', 'vault'],
   sensitiveExts: ['.pem', '.key', '.p12', '.pfx', '.keystore', '.jks', '.env'],
   shellTokens: ['sh', 'bash', 'zsh', 'cmd', 'powershell', 'pwsh', 'curl', 'wget', 'nc', 'ncat', 'telnet'],
+  honeypotRoots: [],
 }
 
 /** T2 报警候选（at/source 由调用方补全）。 */
@@ -106,6 +109,16 @@ function hitsShellToken(command: string, tokens: string[]): boolean {
   return tokens.some(t => words.some(w => w === t || w.slice(w.lastIndexOf('/') + 1) === t))
 }
 
+/** 路径是否落在任一蜜罐根下（D27）。 */
+export function isHoneypotPath(p: string, roots: string[]): boolean {
+  if (roots.length === 0) return false
+  const norm = p.replace(/\\/g, '/')
+  return roots.some(r => {
+    const root = r.replace(/\\/g, '/')
+    return norm === root || norm.startsWith(root + '/')
+  })
+}
+
 /** 危险操作分类（纯函数）：返回报警候选（pluginHint 由调用方经栈归因补全）。 */
 export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
   const { module, op: name, args } = op
@@ -119,6 +132,13 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
       kind: 'spawn',
       message: `子进程 spawn：${name}(${cmd.slice(0, 120)})`,
       target: cmd.slice(0, 120),
+    }
+  }
+  if (module === 'fs' && isHoneypotPath(target, cfg.honeypotRoots)) {
+    // D27 蜜罐：触碰诱饵路径（读/写/删）→ 高置信的翻找密钥信号，独立报警类
+    if (DESTROY_OPS.has(name) || WRITE_OPS.has(name) || READ_OPS.has(name)) {
+      const severity = DESTROY_OPS.has(name) ? 'red' : 'yellow'
+      return { severity, kind: 'honeypot', message: `蜜罐命中：${name}(${target.slice(0, 120)}) — 诱饵密钥文件被触碰（疑似翻找密钥）`, target }
     }
   }
   if (module === 'fs') {

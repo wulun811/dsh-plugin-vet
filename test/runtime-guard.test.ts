@@ -5,6 +5,7 @@ import {
   classifyOp, isSensitivePath, patchModule, pluginFromStack, DEFAULT_HOOK_CONFIG,
 } from '../src/guard/runtime-hooks.js'
 import { readHostMetrics } from '../src/guard/metrics.js'
+import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../src/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig } from '../src/guard/status-route.js'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -401,5 +402,71 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
     expect(ok).toBe(true)
     expect(routes).toHaveLength(1)
     expect((routes[0] as { path: string }).path).toBe('/vet')
+  })
+})
+
+describe('ensureHoneypot（蜜罐播种）', () => {
+  it('创建诱饵文件集，内容/文件名无蜜罐关键词（反蜜罐）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-hp-data-'))
+    const root = ensureHoneypot(dir)
+    expect(root).toBe(dir)
+    const names = ['id_rsa.pem', 'id_rsa.pub', '.env', 'credentials.json', '.npmrc', '.netrc', 'aws-credentials']
+    for (const n of names) {
+      expect(readFileSync(join(dir, n), 'utf8').length).toBeGreaterThan(10)
+    }
+    // 反蜜罐：文件名/内容都不该出现 honeypot/vet/decoy/fake 关键词
+    for (const n of names) {
+      expect(n).not.toMatch(/honeypot|vet|decoy|fake/i)
+      expect(readFileSync(join(dir, n), 'utf8')).not.toMatch(/honeypot|vet[-_]|decoy|fake/i)
+    }
+    // RSA 诱饵是真实格式
+    expect(readFileSync(join(dir, 'id_rsa.pem'), 'utf8')).toContain('BEGIN PRIVATE KEY')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('幂等：已存在诱饵不重写；被删诱饵自动重建', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-honeypot-'))
+    ensureHoneypot(dir)
+    const before = readFileSync(join(dir, '.env'), 'utf8')
+    ensureHoneypot(dir)
+    expect(readFileSync(join(dir, '.env'), 'utf8')).toBe(before)
+    // 用户预置文件不被覆盖
+    writeFileSync(join(dir, '.env'), 'REAL=value')
+    ensureHoneypot(dir)
+    expect(readFileSync(join(dir, '.env'), 'utf8')).toBe('REAL=value')
+    // 被删诱饵重建（自愈）
+    rmSync(join(dir, '.npmrc'))
+    ensureHoneypot(dir)
+    expect(readFileSync(join(dir, '.npmrc'), 'utf8').length).toBeGreaterThan(10)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('默认目录位于 ~/.dsh 下且无蜜罐关键词', () => {
+    expect(DEFAULT_HONEYPOT_DIR).toContain('.dsh')
+    expect(DEFAULT_HONEYPOT_DIR).toContain('.local')
+    expect(DEFAULT_HONEYPOT_DIR).not.toMatch(/honeypot|vet|decoy|fake/i)
+  })
+})
+
+describe('蜜罐报警（classifyOp）', () => {
+  const mkCfg = (roots: string[]): typeof DEFAULT_HOOK_CONFIG => ({ ...DEFAULT_HOOK_CONFIG, honeypotRoots: roots })
+
+  it('触碰诱饵路径 → 独立 honeypot 报警（读黄/删红）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-honeypot-'))
+    ensureHoneypot(dir)
+    const cfg = mkCfg([dir])
+    const read = classifyOp({ module: 'fs', op: 'readFileSync', args: [join(dir, '.env')] }, cfg)
+    expect(read).toMatchObject({ kind: 'honeypot', severity: 'yellow' })
+    const del = classifyOp({ module: 'fs', op: 'rmSync', args: [join(dir, 'credentials.json')] }, cfg)
+    expect(del).toMatchObject({ kind: 'honeypot', severity: 'red' })
+    const write = classifyOp({ module: 'fs', op: 'writeFile', args: [join(dir, '.npmrc'), 'x'] }, cfg)
+    expect(write).toMatchObject({ kind: 'honeypot', severity: 'yellow' })
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('未启用蜜罐（空蜜罐根）不产生 honeypot 报警；普通敏感路径仍按原规则', () => {
+    const cfg = mkCfg([])
+    expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/home/user/.ssh/id_rsa'] }, cfg)).toMatchObject({ kind: 'fs-read' })
+    expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/tmp/whatever/index.js'] }, cfg)).toBeNull()
   })
 })

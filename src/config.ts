@@ -25,6 +25,12 @@ export interface VetConfig {
   runtimeGrowthWindowMs: number
   /** OSV 已知漏洞核对（谷歌漏洞库，npm 生态）：扫描 package.json 时自动查询已知漏洞（网络，失败静默降级）。 */
   osvCheck: boolean
+  /** D27：蜜罐诱饵（opt-in，需 runtimeGuard: watch 才生效）：往 honeypot.dir 放假密钥诱饵，T2 对诱饵路径的触碰单独报警。 */
+  honeypot: {
+    enabled: boolean
+    /** 诱饵目录；空 = $HOME/.dsh/.local（隐蔽位置，反蜜罐：目录/文件名/内容均无蜜罐关键词）。 */
+    dir: string
+  }
 }
 
 export const VetConfigSchema: z<VetConfig> = z.object({
@@ -48,6 +54,10 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   runtimeGrowthMb: z.natural().default(256),
   runtimeGrowthWindowMs: z.natural().default(600_000),
   osvCheck: z.boolean().default(true),
+  honeypot: z.object({
+    enabled: z.boolean().default(false),
+    dir: z.string().default(''),
+  }).default({ enabled: false, dir: '' }),
 })
 
 /** load 时 fail-loud：provider/model 必须成对。 */
