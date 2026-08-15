@@ -432,7 +432,10 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   }
   const scheduleHelpClose = (): void => {
     cancelHelpClose()
-    closeTimer.current = window.setTimeout(() => setHelpOpen(false), 300)
+    // M6：关闭延迟必须 > 打开延迟(400ms)——鼠标从按钮移向介绍栏的途中会短暂离开
+    // root（mouseleave 触发），若关闭太快会先关后开造成闪烁。600ms 足够穿越间隔，
+    // 且进入介绍栏（root 子元素）时 onMouseEnter 会 cancelHelpClose 取消关闭。
+    closeTimer.current = window.setTimeout(() => setHelpOpen(false), 600)
   }
   const onHelpEnter = (): void => {
     cancelHelpClose()

@@ -7,7 +7,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VetStatus } from './status.js'
@@ -35,8 +35,43 @@ const RETRY_MS = 400
 const RETRY_MAX = 150
 
 function writeJson(res: ServerResponse, code: number, body: unknown): void {
-  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-  res.end(JSON.stringify(body))
+  // M3：响应可能已被结束（413 后 destroy + 客户端 RST 触发 error 监听再写）——
+  // 双写会在事件监听器里抛 ERR_HTTP_HEADERS_SENT → 未捕获 → 宿主进程退出。
+  if (res.writableEnded) return
+  try {
+    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(JSON.stringify(body))
+  } catch {
+    // 写入已结束/连接已断：忽略，绝不向上抛
+  }
+}
+
+/**
+ * M2：原子写 patch 文件——先写同目录 .tmp，再 rename 覆盖（POSIX 同文件系统 rename 原子）。
+ * 崩溃中途不会留下半写的主文件；.bak.latest 是改动前固定快照名（防 Date.now 碰撞/无限堆积）。
+ */
+function atomicWritePatch(patchPath: string, content: string, previousContent: string): void {
+  const tmp = patchPath + '.tmp'
+  const backup = patchPath + '.bak.latest'
+  try {
+    // 改动前快照（固定名，供人工回滚）
+    writeFileSync(backup, previousContent, { mode: 0o600 })
+  } catch {
+    // 快照失败不阻断主写入
+  }
+  writeFileSync(tmp, content, { mode: 0o600 })
+  renameSync(tmp, patchPath)
+  // tmp 残留清理（rename 成功后不应存在，防异常残留）
+  try {
+    rmSync(tmp, { force: true })
+  } catch {
+    // 无害
+  }
+}
+
+/** L3：提示语里的配置文件名（不泄露绝对路径）。 */
+function profileName(): string {
+  return 'cordis.patch.yml'
 }
 
 /** 同源校验（POST 用）：Origin 缺失或与 Host 不符 → 拒绝（跨站/无浏览器上下文 POST 防护）。 */
@@ -84,7 +119,9 @@ function stripVetEntries(lines: string[]): string[] {
   const out: string[] = []
   let skipping = false
   for (const line of lines) {
-    if (VET_ENTRY_RE.test(line.trim())) {
+    // M1：只认顶格条目——缩进的 "- id: plugin-vet"（如嵌在别的插件 insert 列表里）
+    // 不是 vet 顶层条目，若匹配会吞掉外层条目的尾部并留下真实 vet 条目 → 重复/损坏
+    if (line.startsWith('-') && VET_ENTRY_RE.test(line)) {
       skipping = true
       continue
     }
@@ -155,15 +192,15 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
     if (!enable) return { ok: true, note: '当前未开启' }
     // 首次开启时 cordis.patch.yml 可能还不存在 → 直接新建
     if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-      return { ok: false, note: `无法读取 ${patchPath}` }
+      return { ok: false, note: `无法读取 ${profileName()}` }
     }
     const entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
     try {
-      writeFileSync(patchPath, entry)
+      atomicWritePatch(patchPath, entry, '')
     } catch (writeError) {
       return { ok: false, note: `写入失败：${String(writeError)}` }
     }
-    return { ok: true, note: `已写入 ${patchPath}，重启 dsh web 后生效` }
+    return { ok: true, note: `已写入 ${profileName()}，重启 dsh web 后生效` }
   }
   // 先摘掉所有历史 vet 条目（含早期误写的包名 id 形态），再按目标状态重写：幂等且能自愈旧文件。
   const stripped = stripVetEntries(content.split('\n'))
@@ -184,12 +221,11 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
       entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
     }
     try {
-      writeFileSync(patchPath + '.bak.' + Date.now(), content)
-      writeFileSync(patchPath, stripped.join('\n').trimEnd() + '\n' + entry)
+      atomicWritePatch(patchPath, stripped.join('\n').trimEnd() + '\n' + entry, content)
     } catch (error) {
       return { ok: false, note: `写入失败：${String(error)}` }
     }
-    return { ok: true, note: `已写入 ${patchPath}，重启 dsh web 后生效` }
+    return { ok: true, note: `已写入 ${profileName()}，重启 dsh web 后生效` }
   }
   if (!changed) {
     return { ok: true, note: '当前未开启' }
@@ -200,8 +236,7 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
     const rest = stripped.join('\n')
     const hasReal = rest.split('\n').some(l => l.trim() !== '' && !l.trim().startsWith('#'))
     const finalContent = hasReal ? rest : '[]'
-    writeFileSync(patchPath + '.bak.' + Date.now(), content)
-    writeFileSync(patchPath, finalContent)
+    atomicWritePatch(patchPath, finalContent, content)
   } catch (error) {
     return { ok: false, note: `写入失败：${String(error)}` }
   }
