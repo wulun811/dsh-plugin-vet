@@ -127,33 +127,34 @@ const SUGGEST: Record<string, string> = {
   'fs-read': '检查该插件读取密钥文件的意图',
 }
 
-/** 「?」右侧介绍栏内容：卖点 1-2-3（大白话，避免纯技术语言）。 */
+/** 「?」右侧介绍栏内容：卖点 1-2-3 + 硬数据（规则数/报警类数/官方包过检数），大白话。 */
 const INTRO_POINTS = [
   {
     n: '①',
     title: '装之前——先过检',
-    body: '规则引擎 + AI 双重复核：逃逸、偷密钥、藏后门的代码当场现形，附 0-100 分评分卡。',
+    body: '10 类静态检查 + AI 复核，专盯五类恶意套路：逃逸沙箱（constructor 链 / eval / 动态 import）、偷 API 密钥、删敏感文件、资源炸弹（无界数组 / fork 风暴）、安装钩子后门（preinstall / postinstall）。附 0-100 分评分卡，低分直接亮红牌。',
   },
   {
     n: '②',
     title: '装之后——全天值班',
-    body: '内存膨胀、疯狂开子进程、乱写乱删文件……任何异常动作，第一时间报警给你。',
+    body: '8 类实时报警：内存飙升、持续膨胀（疑似泄漏）、疯狂开子进程、文件句柄泄漏、偷读密钥文件、乱写乱删敏感文件、插件偷偷 spawn 进程。一有动静，盾牌当场变色。',
   },
   {
     n: '③',
     title: '出情况——给方案',
-    body: '每条报警都带处置建议，可直接发给 DSH 里的 LLM 帮手协助排查；动手与否你说了算。',
+    body: '每条报警都归因到具体插件（@包名）+ 给处置建议；把预警丢给 DSH 里的 LLM 帮手即可继续深挖。动手与否，你说了算。',
   },
 ]
 
-/** 右侧介绍栏：与主面板等高、更窄，展示 vet 的三大卖点。 */
-function VetIntroPanel({ pal }: { pal: MorandiPalette }): ReactNode {
+/** 右侧介绍栏：与主面板等高、更窄；width 由宿主按可用空间传入。 */
+function VetIntroPanel({ pal, width }: { pal: MorandiPalette; width: number }): ReactNode {
   return (
     <aside
       role="dialog"
       aria-label="vet 插件介绍"
       style={{
-        width: 250,
+        width,
+        flexShrink: 0,
         background: pal.bg,
         border: '1px solid ' + pal.border,
         borderRadius: 12,
@@ -170,8 +171,17 @@ function VetIntroPanel({ pal }: { pal: MorandiPalette }): ReactNode {
         <ShieldIcon level="green" color={pal.sage} size={16} />
         <span style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.02em' }}>vet 是什么</span>
       </div>
-      <div style={{ fontSize: 10.5, color: pal.faint, marginBottom: 10 }}>
+      <div style={{ fontSize: 10.5, color: pal.faint, marginBottom: 8 }}>
         @jieai/dsh-plugin-vet v{typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'}
+      </div>
+
+      <div style={{ background: pal.card, borderRadius: 8, padding: '7px 10px', marginBottom: 10, fontSize: 11, color: pal.muted }}>
+        <div>
+          <b style={{ color: pal.ink }}>10 类静态检查</b> · 8 类实时报警
+        </div>
+        <div style={{ marginTop: 1 }}>
+          <b style={{ color: pal.ink }}>195 个官方包</b>已全量过检
+        </div>
       </div>
 
       {INTRO_POINTS.map(p => (
@@ -239,6 +249,7 @@ function isDark(): boolean {
 function panelStyle(pal: MorandiPalette): CSSProperties {
   return {
     width: 340,
+    flexShrink: 0,
     // 面板整体向下延伸（最高到视口 92%），日常内容无需滚动；极矮视口才出现滚动条。
     maxHeight: 'min(92vh, 800px)',
     overflowY: 'auto',
@@ -326,6 +337,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   const [toggling, setToggling] = useState(false)
   const [dark, setDark] = useState<boolean>(() => isDark())
   const [helpOpen, setHelpOpen] = useState(false)
+  const [fit, setFit] = useState<{ flip: boolean; introW: number }>({ flip: false, introW: 250 })
   const rootRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
   const openTimer = useRef<number | null>(null)
@@ -429,6 +441,27 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
     if (!open) setHelpOpen(false)
   }, [open])
 
+  // 介绍栏布局自适应：盾牌左侧空间够 → 并排（介绍栏在右）；不够 → 翻转（介绍栏在左），
+  // 且按剩余空间收窄。无论哪种，主框都钉在盾牌右缘，绝不被挤出去。
+  useEffect(() => {
+    if (!open) return
+    const measure = (): void => {
+      const el = rootRef.current
+      if (el === null) return
+      const r = el.getBoundingClientRect()
+      const spaceLeft = r.left - 8
+      if (spaceLeft >= 340 + 8 + 250) {
+        setFit({ flip: false, introW: 250 })
+        return
+      }
+      const w = Math.max(176, Math.min(250, spaceLeft - 340 - 8))
+      setFit({ flip: true, introW: w })
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [open, helpOpen])
+
   // 卸载时清理定时器。
   useEffect(() => () => {
     if (openTimer.current !== null) window.clearTimeout(openTimer.current)
@@ -497,6 +530,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
             right: 0,
             zIndex: 1000,
             display: 'flex',
+            flexDirection: fit.flip ? 'row-reverse' : 'row',
             alignItems: 'stretch',
             gap: 8,
           }}
@@ -690,7 +724,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           </div>
         </div>
 
-        {helpOpen && <VetIntroPanel pal={pal} />}
+        {helpOpen && <VetIntroPanel pal={pal} width={fit.introW} />}
         </div>
       )}
     </div>
