@@ -2,8 +2,7 @@
  * vet 盾牌状态灯（D22）：会话头部动作区的守护指示器。
  * 数据：轮询宿主 webServer /vet/status.json（5s）。alarm-only：面板只展示与建议，
  * 唯一动作是「开启运行时守卫」按钮——用户主动点击，vet 按其指令写自己的配置（重启生效）。
- * 交互：点击展开面板（实时指标/守卫状态/报警列表含建议），外部点击/切换关闭。
- * 主题用 --dsw-* CSS 变量（带兜底），明暗自适应；类型本地最小结构（私有包不可编译期依赖）。
+ * 设计：纯静态 inline 样式 + --dsw-* 主题令牌（带兜底），无动画/无库，资源开销≈0。
  */
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
@@ -16,7 +15,6 @@ export interface VetAlarmWire {
 }
 
 export interface VetMetricsWire {
-  /** 进程总 RSS（MB）= DSH + 全部插件 + vet。 */
   rssMb: number
   heapUsedMb: number
   heapTotalMb: number
@@ -40,10 +38,28 @@ export interface ShieldSnapshotWire {
 
 const POLL_MS = 5000
 
+/** 主题语义令牌（全部带兜底，明暗自适应）。 */
+const T = {
+  success: 'var(--dsw-alias-state-success-primary, #30a46c)',
+  warn: 'var(--dsw-alias-state-warn-primary, #f5a623)',
+  error: 'var(--dsw-alias-state-error-primary, #e5484d)',
+  bgOverlay: 'var(--dsw-alias-bg-overlay, #ffffff)',
+  bgLayer1: 'var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.03))',
+  bgLayer2: 'var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.06))',
+  hover: 'var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,0.05))',
+  border: 'var(--dsw-alias-border-l2, rgba(0,0,0,0.12))',
+  borderLight: 'var(--dsw-alias-border-l3, rgba(0,0,0,0.08))',
+  textPrimary: 'var(--dsw-alias-label-primary, #111827)',
+  textSecondary: 'var(--dsw-alias-label-secondary, #6b7280)',
+  textTertiary: 'var(--dsw-alias-label-tertiary, #9ca3af)',
+  shadow: 'var(--dsw-shadow-lv2, 0 8px 24px rgba(0,0,0,0.16))',
+  buttonPrimary: 'var(--dsw-alias-button-primary-fill, #3b82f6)',
+}
+
 const COLOR: Record<'green' | 'yellow' | 'red', string> = {
-  green: 'var(--dsw-alias-state-success-primary, #30a46c)',
-  yellow: 'var(--dsw-alias-state-warn-primary, #f5a623)',
-  red: 'var(--dsw-alias-state-error-primary, #e5484d)',
+  green: T.success,
+  yellow: T.warn,
+  red: T.error,
 }
 
 const LABEL: Record<'green' | 'yellow' | 'red', string> = {
@@ -58,7 +74,6 @@ const LEVEL_TEXT: Record<'green' | 'yellow' | 'red', string> = {
   red: '检测到高风险报警，请查看详情并在 DSH 中处置（vet 只报警不代劳）。',
 }
 
-/** 每类报警的可执行建议（把"报警"变成"下一步做什么"）。 */
 const SUGGEST: Record<string, string> = {
   mem: '检查是否有插件无界分配内存（R9-1），或调高 runtimeMemLimitMb',
   growth: '检查是否有插件内存泄漏（对象/缓存持续累积）；可重启 DSH 或调高 runtimeGrowthMb 降噪',
@@ -76,27 +91,17 @@ const panelStyle: CSSProperties = {
   right: 0,
   zIndex: 1000,
   width: 340,
-  maxHeight: 420,
+  maxHeight: 480,
   overflow: 'auto',
-  background: 'var(--dsw-alias-bg-overlay, #ffffff)',
-  border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.12))',
-  borderRadius: 8,
-  boxShadow: 'var(--dsw-shadow-lv2, 0 8px 24px rgba(0,0,0,0.16))',
+  background: T.bgOverlay,
+  border: `1px solid ${T.border}`,
+  borderRadius: 10,
+  boxShadow: T.shadow,
   fontSize: 12,
-  color: 'var(--dsw-alias-label-primary, #111827)',
-  padding: 10,
+  color: T.textPrimary,
+  padding: '12px 12px 8px',
   textAlign: 'left',
   lineHeight: 1.5,
-}
-
-const btnStyle: CSSProperties = {
-  border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.12))',
-  background: 'var(--dsw-alias-button-floating-fill, transparent)',
-  color: 'inherit',
-  borderRadius: 6,
-  padding: '2px 10px',
-  cursor: 'pointer',
-  fontSize: 11,
 }
 
 function ShieldIcon({ color, size = 20 }: { color: string; size?: number }): ReactNode {
@@ -107,19 +112,31 @@ function ShieldIcon({ color, size = 20 }: { color: string; size?: number }): Rea
   )
 }
 
+function SectionLabel({ children }: { children: ReactNode }): ReactNode {
+  return (
+    <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.textTertiary, margin: '10px 0 6px', fontWeight: 600 }}>
+      {children}
+    </div>
+  )
+}
+
+/** 指标卡：标签在上、数值在下（2 列网格，对齐美观）。 */
+function Metric({ label, value, hint }: { label: string; value: string; hint?: string }): ReactNode {
+  return (
+    <div
+      title={hint}
+      style={{ background: T.bgLayer1, borderRadius: 7, padding: '6px 9px', display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}
+    >
+      <span style={{ fontSize: 10, color: T.textTertiary }}>{label}</span>
+      <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textPrimary, wordBreak: 'break-word' }}>{value}</span>
+    </div>
+  )
+}
+
 function fmtTime(at: number): string {
   const d = new Date(at)
   const pad = (n: number): string => String(n).padStart(2, '0')
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-
-function Metric({ label, value }: { label: string; value: string }): ReactNode {
-  return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: 'var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,0.05))', borderRadius: 5, padding: '1px 6px' }}>
-      <span style={{ color: 'var(--dsw-alias-label-secondary, #6b7280)' }}>{label}</span>
-      <span style={{ fontWeight: 600 }}>{value}</span>
-    </span>
-  )
 }
 
 /**
@@ -156,7 +173,6 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
     }
   }, [])
 
-  // 外部点击关闭面板
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent): void => {
@@ -207,16 +223,16 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
           padding: '2px 8px',
           height: 28,
           border: 'none',
-          background: 'transparent',
+          background: open ? T.hover : 'transparent',
           cursor: 'pointer',
           borderRadius: 6,
-          position: 'relative',
+          transition: 'background 120ms ease',
         }}
       >
         <ShieldIcon color={color} />
         {metrics !== undefined && metrics.rssMb > 0 && (
           <span
-            style={{ fontSize: 10, color: 'var(--dsw-alias-label-secondary, #6b7280)', fontWeight: 600, lineHeight: 1 }}
+            style={{ fontSize: 10, color: T.textSecondary, fontWeight: 600, lineHeight: 1 }}
             title="DSH + 全部插件总内存（同一进程，仅总量）"
           >
             ≈{Math.round(metrics.rssMb)}M
@@ -228,7 +244,7 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
               fontSize: 11,
               fontWeight: 700,
               color,
-              background: 'var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.06))',
+              background: T.bgLayer2,
               borderRadius: 9,
               padding: '1px 5px',
               lineHeight: 1.4,
@@ -243,96 +259,139 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
 
       {open && (
         <div style={panelStyle} role="dialog" aria-label="vet 报警面板">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-            <ShieldIcon color={color} size={14} />
-            <span style={{ fontWeight: 700 }}>vet {LABEL[level]}</span>
-            <span style={{ marginLeft: 'auto', color: 'var(--dsw-alias-label-secondary, #6b7280)' }}>
+          {/* 头部：状态点 + 标题 + 计数 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 4, background: color, display: 'inline-block' }} />
+            <span style={{ fontWeight: 800, fontSize: 13 }}>vet {LABEL[level]}</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11, color: T.textSecondary, background: T.bgLayer1, borderRadius: 9, padding: '1px 8px' }}>
               {count} 条报警
             </span>
           </div>
-          <div style={{ color: 'var(--dsw-alias-label-secondary, #6b7280)', marginBottom: 8 }}>{LEVEL_TEXT[level]}</div>
+          <div style={{ color: T.textSecondary, marginTop: 4 }}>{LEVEL_TEXT[level]}</div>
 
-          {/* 实时指标：进程总量 = DSH + 全部插件 */}
+          {/* 实时指标：2 列卡片网格 */}
           {metrics !== undefined && (
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
-                <Metric label="总内存" value={`${metrics.rssMb} MB`} />
-                <Metric label="V8 堆" value={`${metrics.heapUsedMb}/${metrics.heapTotalMb} MB`} />
-                <Metric label="原生+外部" value={`${metrics.externalMb} MB`} />
+            <>
+              <SectionLabel>实时指标</SectionLabel>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
+                <Metric label="总内存" value={`${metrics.rssMb} MB`} hint="DSH 宿主 + 全部插件 + vet（同一进程，OS 仅见总量）" />
+                <Metric label="V8 堆" value={`${metrics.heapUsedMb} / ${metrics.heapTotalMb} MB`} />
+                <Metric label="原生 + 外部" value={`${metrics.externalMb} MB`} />
                 <Metric label="CPU" value={`${metrics.cpuPct}%`} />
                 <Metric label="I/O 读" value={`${metrics.ioReadMb} MB`} />
                 <Metric label="I/O 写" value={`${metrics.ioWriteMb} MB`} />
                 <Metric label="子进程" value={`${metrics.childCount >= 0 ? metrics.childCount : '—'}`} />
                 <Metric label="fd" value={`${metrics.fdCount >= 0 ? metrics.fdCount : '—'}`} />
               </div>
-              <div style={{ color: 'var(--dsw-alias-label-tertiary, #9ca3af)' }}>
-                总内存 = DSH 宿主 + 全部插件 + vet（同一进程）。Node 共享堆无法按插件拆分（无分配归因 API）；按需堆快照分析列为远期实验。
-              </div>
-            </div>
+            </>
           )}
 
-          {/* 运行时守卫状态 + 开关 */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              marginBottom: 8,
-              padding: '5px 8px',
-              borderRadius: 6,
-              background: 'var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,0.05))',
-            }}
-          >
-            <span style={{ fontWeight: 600 }}>
-              运行时守卫：{guard === 'watch' ? '开启中（watch）' : '未开启'}
-            </span>
+          {/* 运行时守卫：状态 + 代价说明 + 开启按钮 */}
+          <SectionLabel>运行时守卫</SectionLabel>
+          <div style={{ background: T.bgLayer1, borderRadius: 8, padding: '8px 10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 4, background: guard === 'watch' ? T.success : T.textTertiary, display: 'inline-block' }} />
+              <span style={{ fontWeight: 700 }}>{guard === 'watch' ? '已开启（watch）' : '未开启'}</span>
+              {guard === 'off' && (
+                <button
+                  type="button"
+                  disabled={toggling}
+                  onClick={() => { void toggleGuard(true) }}
+                  style={{
+                    marginLeft: 'auto',
+                    border: 'none',
+                    background: T.buttonPrimary,
+                    color: '#fff',
+                    borderRadius: 6,
+                    padding: '3px 14px',
+                    fontSize: 11.5,
+                    fontWeight: 700,
+                    cursor: toggling ? 'default' : 'pointer',
+                    opacity: toggling ? 0.6 : 1,
+                  }}
+                >
+                  {toggling ? '写入中…' : '开启'}
+                </button>
+              )}
+            </div>
             {guard === 'off' && (
-              <button type="button" disabled={toggling} onClick={() => { void toggleGuard(true) }} style={{ ...btnStyle, marginLeft: 'auto' }}>
-                {toggling ? '写入中…' : '开启'}
-              </button>
+              <div style={{ marginTop: 6, fontSize: 10.5, color: T.textSecondary, lineHeight: 1.45 }}>
+                开启代价：哨兵子进程约占 10–30 MB 内存 + 轻量轮询；T2 钩子使文件/子进程调用开销增加约 5%（热点场景更高）。写入配置后需重启生效。
+              </div>
             )}
           </div>
           {toggleMsg !== null && (
-            <div style={{ marginBottom: 8, color: 'var(--dsw-alias-state-warn-primary, #b45309)' }}>{toggleMsg}</div>
+            <div style={{ marginTop: 6, fontSize: 11, color: T.warn }}>{toggleMsg}</div>
           )}
 
+          {/* 最近扫描 */}
           {lastScan !== undefined && (
-            <div style={{ marginBottom: 8, padding: '5px 8px', background: 'var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,0.05))', borderRadius: 6 }}>
-              最近扫描：{lastScan.pluginName} → <b>{lastScan.verdict}</b>（{lastScan.staticScore} 分）
-            </div>
+            <>
+              <SectionLabel>最近扫描</SectionLabel>
+              <div style={{ background: T.bgLayer1, borderRadius: 8, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lastScan.pluginName}</span>
+                <span style={{ marginLeft: 'auto', fontWeight: 700, color: lastScan.verdict === 'clean' ? T.success : lastScan.verdict === 'suspicious' ? T.warn : T.error }}>
+                  {lastScan.verdict}
+                </span>
+                <span style={{ fontSize: 11, color: T.textTertiary }}>{lastScan.staticScore} 分</span>
+              </div>
+            </>
           )}
 
+          {/* 报警列表 */}
+          <SectionLabel>报警</SectionLabel>
           {alarms.length === 0 ? (
-            <div style={{ color: 'var(--dsw-alias-label-tertiary, #9ca3af)', padding: '4px 0' }}>暂无报警记录</div>
+            <div style={{ color: T.textTertiary, padding: '4px 2px' }}>暂无报警记录</div>
           ) : (
             <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
               {alarms.slice(0, 8).map((a, i) => (
                 <li
                   key={i}
                   style={{
-                    padding: '5px 6px',
-                    borderRadius: 6,
-                    borderLeft: `3px solid ${a.severity === 'red' ? COLOR.red : a.severity === 'yellow' ? COLOR.yellow : 'transparent'}`,
-                    marginBottom: 2,
+                    background: T.bgLayer1,
+                    borderRadius: 8,
+                    borderLeft: `3px solid ${a.severity === 'red' ? T.error : a.severity === 'yellow' ? T.warn : 'transparent'}`,
+                    padding: '7px 10px',
+                    marginBottom: 5,
                   }}
                 >
-                  <div style={{ fontWeight: 600 }}>
-                    [{a.kind}]{a.pluginHint !== undefined ? ` @${a.pluginHint}` : ''}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, background: T.bgLayer2, borderRadius: 4, padding: '1px 6px', color: T.textSecondary }}>
+                      {a.kind}
+                    </span>
+                    {a.pluginHint !== undefined && (
+                      <span style={{ fontSize: 10.5, color: T.textTertiary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
+                    )}
                   </div>
-                  <div style={{ color: 'var(--dsw-alias-label-secondary, #6b7280)', wordBreak: 'break-word' }}>{a.message}</div>
+                  <div style={{ marginTop: 3, wordBreak: 'break-word' }}>{a.message}</div>
                   {SUGGEST[a.kind] !== undefined && (
-                    <div style={{ color: 'var(--dsw-alias-state-warn-primary, #b45309)' }}>建议：{SUGGEST[a.kind]}</div>
+                    <div style={{ marginTop: 3, fontSize: 11, color: T.warn }}>建议：{SUGGEST[a.kind]}</div>
                   )}
                 </li>
               ))}
             </ul>
           )}
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, paddingTop: 6, borderTop: '1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.08))' }}>
+          {/* 底部：更新时间 + 刷新 */}
+          <div style={{ display: 'flex', alignItems: 'center', marginTop: 10, paddingTop: 8, borderTop: `1px solid ${T.borderLight}` }}>
             {loadedAt > 0 && (
-              <span style={{ color: 'var(--dsw-alias-label-tertiary, #9ca3af)' }}>更新于 {fmtTime(loadedAt)}</span>
+              <span style={{ fontSize: 10.5, color: T.textTertiary }}>更新于 {fmtTime(loadedAt)}</span>
             )}
-            <button type="button" onClick={() => { loadRef.current() }} style={{ ...btnStyle, marginLeft: 'auto' }}>
+            <button
+              type="button"
+              onClick={() => { loadRef.current() }}
+              style={{
+                marginLeft: 'auto',
+                border: `1px solid ${T.border}`,
+                background: 'transparent',
+                color: T.textSecondary,
+                borderRadius: 6,
+                padding: '2px 12px',
+                cursor: 'pointer',
+                fontSize: 11,
+                transition: 'background 120ms ease',
+              }}
+            >
               刷新
             </button>
           </div>
