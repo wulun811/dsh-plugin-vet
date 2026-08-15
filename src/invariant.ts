@@ -4,6 +4,8 @@ import type { VetConfig } from './config.js'
 import { sidecarSpawned } from './guard/runtime-guard.js'
 
 export const PACKAGE_NAME = '@jieai/dsh-plugin-vet'
+/** bundle cordis.patch.yml 里 insert 的条目 id（profile patch 层按它覆盖配置）。 */
+export const PLUGIN_ENTRY_ID = 'plugin-vet'
 
 interface InvariantRegistryLike {
   register(packageName: string, installer: (child: Context, fail: (message: string) => never) => void | Promise<void>): () => void

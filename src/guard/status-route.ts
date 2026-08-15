@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { VetStatus } from './status.js'
 import { readHostMetrics } from './metrics.js'
 import type { VetConfig } from '../config.js'
-import { PACKAGE_NAME } from '../invariant.js'
+import { PLUGIN_ENTRY_ID } from '../invariant.js'
 
 interface WebServerLike {
   register(route: {
@@ -72,6 +72,31 @@ function resolveProfileDir(baseUrl: string): string {
   return baseUrl
 }
 
+/** vet 条目的历史形态：早期误写成了包名 id（DSH 曾自动加引号），统一识别为 vet 条目。 */
+const VET_ENTRY_RE = /^-\s*id:\s*(?:["']?@?jieai\/dsh-plugin-vet["']?|plugin-vet)\s*$/
+
+/** 从 patch 行中摘掉所有 vet 条目（含其 config 块），其余行原样保留。 */
+function stripVetEntries(lines: string[]): string[] {
+  const out: string[] = []
+  let skipping = false
+  for (const line of lines) {
+    if (VET_ENTRY_RE.test(line.trim())) {
+      skipping = true
+      continue
+    }
+    if (skipping) {
+      const trimmed = line.trim()
+      if (trimmed === '' || trimmed.startsWith('- ')) {
+        skipping = false
+        out.push(line)
+      }
+      continue
+    }
+    out.push(line)
+  }
+  return out
+}
+
 export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok: boolean; note: string } {
   if (ctx.baseUrl === undefined) {
     return { ok: false, note: '无法定位 profile 配置目录（ctx.baseUrl 缺失）' }
@@ -86,7 +111,7 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
     if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
       return { ok: false, note: `无法读取 ${patchPath}` }
     }
-    const entry = `- id: ${PACKAGE_NAME}\n  config:\n    runtimeGuard: watch\n`
+    const entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
     try {
       writeFileSync(patchPath, entry)
     } catch (writeError) {
@@ -94,46 +119,25 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
     }
     return { ok: true, note: `已写入 ${patchPath}，重启 dsh web 后生效` }
   }
-  const marker = `- id: ${PACKAGE_NAME}`
+  // 先摘掉所有历史 vet 条目（含早期误写的包名 id 形态），再按目标状态重写：幂等且能自愈旧文件。
+  const stripped = stripVetEntries(content.split('\n'))
+  const changed = stripped.join('\n') !== content
   if (enable) {
-    if (content.includes(marker)) {
-      return { ok: false, note: `${patchPath} 已有 plugin-vet 条目，请手动将其 config.runtimeGuard 改为 watch（避免重复叠加）` }
-    }
-    const entry = `- id: ${PACKAGE_NAME}\n  config:\n    runtimeGuard: watch\n`
+    const entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
     try {
       writeFileSync(patchPath + '.bak.' + Date.now(), content)
-      writeFileSync(patchPath, content.trimEnd() + '\n' + entry)
+      writeFileSync(patchPath, stripped.join('\n').trimEnd() + '\n' + entry)
     } catch (error) {
       return { ok: false, note: `写入失败：${String(error)}` }
     }
     return { ok: true, note: `已写入 ${patchPath}，重启 dsh web 后生效` }
   }
-  if (!content.includes(marker)) {
+  if (!changed) {
     return { ok: true, note: '当前未开启' }
-  }
-  const lines = content.split('\n')
-  const out: string[] = []
-  let skipping = false
-  for (const line of lines) {
-    if (line.trim() === marker) {
-      skipping = true
-      continue
-    }
-    if (skipping) {
-      const trimmed = line.trim()
-      if (trimmed === '' || trimmed.startsWith('- ')) {
-        skipping = false
-        out.push(line)
-      } else {
-        continue
-      }
-    } else {
-      out.push(line)
-    }
   }
   try {
     writeFileSync(patchPath + '.bak.' + Date.now(), content)
-    writeFileSync(patchPath, out.join('\n'))
+    writeFileSync(patchPath, stripped.join('\n'))
   } catch (error) {
     return { ok: false, note: `写入失败：${String(error)}` }
   }

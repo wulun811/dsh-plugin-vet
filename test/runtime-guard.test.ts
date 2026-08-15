@@ -236,7 +236,7 @@ describe('readHostMetrics（宿主实时指标）', () => {
 describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   const mkCtx = (baseUrl: string): { baseUrl: string; logger?: undefined } => ({ baseUrl })
 
-  it('enable 追加条目 + 幂等保护 + disable 移除', () => {
+  it('enable 写入条目 + 重复 enable 幂等 + disable 移除', () => {
     const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
     const patch = join(dir, 'cordis.patch.yml')
     writeFileSync(patch, '- id: settings\n  config:\n    watch: false\n')
@@ -245,16 +245,40 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     const r1 = writeRuntimeGuardConfig(ctx, true)
     expect(r1.ok).toBe(true)
     const content1 = readFileSync(patch, 'utf8')
-    expect(content1).toContain('- id: @jieai/dsh-plugin-vet')
+    expect(content1).toContain('- id: plugin-vet')
     expect(content1).toContain('runtimeGuard: watch')
 
-    const r2 = writeRuntimeGuardConfig(ctx, true)
-    expect(r2.ok).toBe(false) // 幂等：已存在
+    const r2 = writeRuntimeGuardConfig(ctx, true) // 重复开启：重写而不是叠加，仍只有一条
+    expect(r2.ok).toBe(true)
+    const content2 = readFileSync(patch, 'utf8')
+    expect(content2.match(/- id: plugin-vet/g)?.length).toBe(1)
 
     const r3 = writeRuntimeGuardConfig(ctx, false)
     expect(r3.ok).toBe(true)
     const content3 = readFileSync(patch, 'utf8')
     expect(content3).not.toContain('plugin-vet')
+    expect(content3).toContain('- id: settings')
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('旧形态包名条目（含引号）会被重写/移除（自愈）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: settings\n- id: "@jieai/dsh-plugin-vet"\n  config:\n    runtimeGuard: watch\n')
+
+    const r1 = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(r1.ok).toBe(true)
+    const content1 = readFileSync(patch, 'utf8')
+    expect(content1).toContain('- id: plugin-vet')
+    expect(content1).not.toContain('@jieai/dsh-plugin-vet')
+
+    const r2 = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(r2.ok).toBe(true)
+    const content2 = readFileSync(patch, 'utf8')
+    expect(content2).not.toContain('plugin-vet')
+    expect(content2).not.toContain('@jieai/dsh-plugin-vet')
+    expect(content2).toContain('- id: settings')
 
     rmSync(dir, { recursive: true, force: true })
   })
@@ -283,7 +307,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
     const r = writeRuntimeGuardConfig(mkCtx(dir), true)
     expect(r.ok).toBe(true)
-    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('- id: @jieai/dsh-plugin-vet')
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('- id: plugin-vet')
     rmSync(dir, { recursive: true, force: true })
   })
 
