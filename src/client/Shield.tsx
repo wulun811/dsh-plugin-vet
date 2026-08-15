@@ -252,8 +252,12 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   const [toggleMsg, setToggleMsg] = useState<string | null>(null)
   const [toggling, setToggling] = useState(false)
   const [dark, setDark] = useState<boolean>(() => isDark())
+  const [helpOpen, setHelpOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
+  const helpElRef = useRef<HTMLSpanElement | null>(null)
+  const openTimer = useRef<number | null>(null)
+  const closeTimer = useRef<number | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -322,6 +326,83 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
   const lastScan = snap?.lastScan
   const metrics = snap?.metrics
   const guard = snap?.runtimeGuard ?? 'off'
+
+  // 「?」帮助提示：自定义浮层（替代浏览器 title 的迟钝延迟），悬停 400ms 弹出。
+  const cancelHelpClose = (): void => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current)
+      closeTimer.current = null
+    }
+  }
+  const scheduleHelpClose = (): void => {
+    cancelHelpClose()
+    closeTimer.current = window.setTimeout(() => setHelpOpen(false), 160)
+  }
+  const onHelpEnter = (): void => {
+    cancelHelpClose()
+    if (openTimer.current !== null) window.clearTimeout(openTimer.current)
+    openTimer.current = window.setTimeout(() => setHelpOpen(true), 400)
+  }
+  const onHelpLeave = (): void => {
+    if (openTimer.current !== null) {
+      window.clearTimeout(openTimer.current)
+      openTimer.current = null
+    }
+    scheduleHelpClose()
+  }
+
+  // 浮层挂到 document.body（面板 overflow 会裁剪内部绝对定位，不能放面板里）。
+  useEffect(() => {
+    if (!helpOpen) return
+    const anchor = helpElRef.current
+    if (anchor === null) return
+    const tip = document.createElement('div')
+    tip.style.position = 'fixed'
+    tip.style.zIndex = '2000'
+    tip.style.width = '280px'
+    tip.style.maxHeight = '50vh'
+    tip.style.overflowY = 'auto'
+    tip.style.padding = '10px 12px'
+    tip.style.borderRadius = '10px'
+    tip.style.fontSize = '11.5px'
+    tip.style.lineHeight = '1.6'
+    tip.style.whiteSpace = 'pre-line'
+    tip.style.background = pal.bg
+    tip.style.border = '1px solid ' + pal.border
+    tip.style.color = pal.ink
+    tip.style.boxShadow = '0 10px 28px rgba(20,18,14,0.35)'
+    tip.textContent = GUARD_HELP
+    document.body.appendChild(tip)
+    const r = anchor.getBoundingClientRect()
+    const gap = 8
+    let left = Math.max(8, Math.min(r.left, window.innerWidth - tip.offsetWidth - 8))
+    let top = r.bottom + gap
+    if (top + tip.offsetHeight > window.innerHeight - 8) {
+      top = Math.max(8, r.top - tip.offsetHeight - gap)
+    }
+    tip.style.left = left + 'px'
+    tip.style.top = top + 'px'
+    const onTipEnter = (): void => cancelHelpClose()
+    const onTipLeave = (): void => scheduleHelpClose()
+    tip.addEventListener('mouseenter', onTipEnter)
+    tip.addEventListener('mouseleave', onTipLeave)
+    return () => {
+      tip.removeEventListener('mouseenter', onTipEnter)
+      tip.removeEventListener('mouseleave', onTipLeave)
+      if (tip.parentNode !== null) tip.parentNode.removeChild(tip)
+    }
+  }, [helpOpen, pal])
+
+  // 面板收起时同步关闭帮助浮层。
+  useEffect(() => {
+    if (!open) setHelpOpen(false)
+  }, [open])
+
+  // 卸载时清理定时器。
+  useEffect(() => () => {
+    if (openTimer.current !== null) window.clearTimeout(openTimer.current)
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current)
+  }, [])
 
   return (
     <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
@@ -459,7 +540,14 @@ export function Shield(_props: Record<string, unknown>): ReactNode {
               </button>
             )}
             <span
-              title={GUARD_HELP}
+              ref={helpElRef}
+              tabIndex={0}
+              role="button"
+              aria-label="运行时守卫说明（悬停查看）"
+              onMouseEnter={onHelpEnter}
+              onMouseLeave={onHelpLeave}
+              onFocus={onHelpEnter}
+              onBlur={onHelpLeave}
               style={{
                 marginLeft: 8,
                 width: 16,
