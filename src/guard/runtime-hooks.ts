@@ -9,15 +9,21 @@ export type HookModule = 'fs' | 'child_process'
 export interface HookConfig {
   /** 命中即报警的系统目录前缀。 */
   sensitiveRoots: string[]
-  /** 任一路径段命中即敏感的密钥/凭据特征。 */
+  /** 敏感段名：路径任一段整体等于其中一项（大小写不敏感）即敏感。 */
   sensitiveSegments: string[]
+  /** 凭据关键词：路径段中以段首或 . _ - 为边界出现即敏感（不含 token——'js-tokens' 这类库名会误伤）。 */
+  sensitiveKeywords: string[]
+  /** 密钥文件后缀（路径段以此结尾）。 */
+  sensitiveExts: string[]
   /** 子进程命令行报警关键词。 */
   shellTokens: string[]
 }
 
 export const DEFAULT_HOOK_CONFIG: HookConfig = {
   sensitiveRoots: ['/etc', '/usr', '/var', '/boot', '/bin', '/sbin'],
-  sensitiveSegments: ['.ssh', '.aws', '.gnupg', '.npmrc', '.env', 'credentials', 'secrets', 'tokens'],
+  sensitiveSegments: ['.ssh', '.aws', '.gnupg', '.npmrc', '.env', 'credentials', 'credential', 'secrets', 'secret', 'tokens', 'token', 'passwd', 'shadow', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.git-credentials', '.kube', 'vault'],
+  sensitiveKeywords: ['secret', 'secrets', 'credential', 'credentials', 'passwd', 'shadow', 'private', 'auth', 'vault'],
+  sensitiveExts: ['.pem', '.key', '.p12', '.pfx', '.keystore', '.jks', '.env'],
   shellTokens: ['sh', 'bash', 'zsh', 'cmd', 'powershell', 'pwsh'],
 }
 
@@ -45,11 +51,21 @@ const READ_OPS = new Set(['readFile', 'readFileSync', 'createReadStream'])
 /** child_process 全部操作（spawn 面，yellow）。 */
 const PROC_OPS = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'])
 
-/** 归一化路径并判断是否敏感：命中敏感根前缀或任一敏感段。 */
+/** 关键词边界匹配：须出现在段首或 . _ - 之后（避免 'js-tokens' 这类库名误伤）。 */
+function segmentHasKeyword(part: string, keyword: string): boolean {
+  const esc = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp('(?:^|[._-])' + esc + '(?:[._-]|$)', 'i').test(part)
+}
+
+/** 归一化路径并判断是否敏感：敏感根前缀 / 敏感段名（精确）/ 密钥文件后缀 / 凭据关键词（边界）。 */
 export function isSensitivePath(p: string, cfg: HookConfig): boolean {
   const norm = p.replace(/\\/g, '/')
-  for (const seg of cfg.sensitiveSegments) {
-    if (norm.split('/').some(part => part.includes(seg))) return true
+  for (const part of norm.split('/')) {
+    const low = part.toLowerCase()
+    if (low === '.env' || low.startsWith('.env.')) return true
+    if (cfg.sensitiveSegments.some(s => low === s.toLowerCase())) return true
+    if (cfg.sensitiveExts.some(ext => low.endsWith(ext))) return true
+    if (cfg.sensitiveKeywords.some(k => segmentHasKeyword(low, k))) return true
   }
   for (const root of cfg.sensitiveRoots) {
     if (norm === root || norm.startsWith(root + '/')) return true

@@ -159,6 +159,22 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/home/user/a.txt', 'x'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
   })
 
+  it('库名含 token 子串不误报（js-tokens 回归）', () => {
+    // 旧规则：sensitiveSegments 子串匹配把合法库名 js-tokens 当敏感词
+    expect(isSensitivePath('/home/chen/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/js-tokens/index.js', DEFAULT_HOOK_CONFIG)).toBe(false)
+    expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/home/chen/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/js-tokens/index.js'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // 沙箱清理临时文件（文件名带 js-tokens）也不该触发 fs-destroy
+    expect(classifyOp({ module: 'fs', op: 'rmdir', args: ['/home/chen/1q/plugin-vet/scripts/._probe-js-tokens.mjs.4152567.abc.tmpdir'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+  })
+
+  it('凭据语义路径仍报警（精度不丢）', () => {
+    expect(isSensitivePath('/app/secrets.prod.yaml', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/home/u/creds/credentials.json', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/home/u/server.key', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/home/u/prod.env', DEFAULT_HOOK_CONFIG)).toBe(true)
+    expect(isSensitivePath('/home/u/.aws/credentials', DEFAULT_HOOK_CONFIG)).toBe(true)
+  })
+
   it('child_process spawn 一律 yellow', () => {
     const alarm = classifyOp({ module: 'child_process', op: 'exec', args: ['curl http://x'] }, DEFAULT_HOOK_CONFIG)
     expect(alarm).toMatchObject({ severity: 'yellow', kind: 'spawn' })
