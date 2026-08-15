@@ -7,7 +7,7 @@ import {
 import { readHostMetrics } from '../lib/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../lib/guard/status-route.js'
-import { decideRespawn, t2AlarmId, installRuntimeGuard } from '../lib/guard/runtime-guard.js'
+import { decideRespawn, t2AlarmId, installRuntimeGuard, isAttributableEntry } from '../lib/guard/runtime-guard.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import fsDefault from 'node:fs'
 import { join } from 'node:path'
@@ -149,6 +149,22 @@ describe('decideRespawn / t2AlarmId（P0-2/P1-6 判定逻辑）', () => {
     expect(t2AlarmId('fs-read', '/home/u/.ssh/id_rsa', undefined))
       .toBe('t2:fs-read:/home/u/.ssh/id_rsa:')
   })
+
+  it('A9：归因映射排除 vet 自身（isAttributableEntry）——包装器帧不再把宿主报警栽给 vet', () => {
+    expect(isAttributableEntry('@jieai/dsh-plugin-vet')).toBe(false)
+    expect(isAttributableEntry('@deepseek-ai/dsh')).toBe(true)
+    expect(isAttributableEntry('evil-plugin')).toBe(true)
+    // 栈归因配合排除后的映射：首个非 vet 根命中 → 归因到真实调用方
+    const roots = new Map([
+      ['/app/node_modules/evil-plugin/lib', 'evil-plugin'],
+    ])
+    // 栈顶是 vet 包装器帧（不在映射里）→ 跳过 → 命中 evil-plugin
+    const stack = 'Error\n    at wrapped (/app/node_modules/@jieai/dsh-plugin-vet/lib/guard/runtime-hooks.js:306:20)\n    at caller (/app/node_modules/evil-plugin/lib/index.js:10:5)'
+    expect(pluginFromStack(stack, roots)).toBe('evil-plugin')
+    // 全部帧都是 vet 自身 → 归因落空（无主），不栽赃
+    const vetOnly = 'Error\n    at wrapped (/app/node_modules/@jieai/dsh-plugin-vet/lib/guard/runtime-hooks.js:306:20)'
+    expect(pluginFromStack(vetOnly, roots)).toBeUndefined()
+  })
 })
 
 describe('analyzeSample（T1 差分判定）', () => {
@@ -289,6 +305,49 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(classifyOp({ module: 'fs', op: 'accessSync', args: ['/etc/passwd'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-probe' })
     // 普通目录/文件侦察不报
     expect(classifyOp({ module: 'fs', op: 'readdirSync', args: ['/home/user/project'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+  })
+
+  it('A9：node_modules 包目录豁免——敏感词包名（dsh-credentials-local 等）不再误报 fs-probe', () => {
+    // 用户实测报警：宿主模块解析 require.resolve 内部 realpathSync 包内 package.json
+    const pkg = '/home/chen/.dsh/profiles/node_modules/@deepseek-ai/dsh-credentials-local/package.json'
+    expect(isSensitivePath(pkg, DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    expect(classifyOp({ module: 'fs', op: 'realpathSync', args: [pkg] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'fs', op: 'realpath', args: [pkg] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'fs', op: 'statSync', args: [pkg] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // AWS SDK 凭据提供者全家桶（真实 12 个敏感词包名之一）
+    expect(isSensitivePath('/home/chen/.dsh/profiles/node_modules/@aws-sdk/credential-provider-env/package.json', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    // 包内 .env 也不敏感（包文件是公开工件，凭据在用户/系统目录）
+    expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/home/chen/.dsh/profiles/web/node_modules/foo/.env'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // mutate 下系统根前缀仍生效：删 /usr/lib/node_modules 下的文件照样报
+    expect(isSensitivePath('/usr/lib/node_modules/foo/index.js', DEFAULT_HOOK_CONFIG, 'mutate')).toBe(true)
+    expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/usr/lib/node_modules/foo/index.js', 'x'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // 豁免只作用于 node_modules 段之后：~/.ssh/node_modules/x 仍命中 .ssh
+    expect(isSensitivePath('/home/u/.ssh/node_modules/x', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
+    expect(classifyOp({ module: 'fs', op: 'readdirSync', args: ['/home/u/.ssh/node_modules'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-probe' })
+  })
+
+  it('A9 集成：包装器在线上报的 realpathSync 场景不再产生任何报警（端到端复刻）', () => {
+    const tmp = mkdtempSync(join(process.cwd(), '.tmp-a9-'))
+    const pkgDir = join(tmp, 'node_modules', '@deepseek-ai', 'dsh-credentials-local')
+    mkdirSync(pkgDir, { recursive: true })
+    mkdirSync(join(tmp, '.ssh'), { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), '{}')
+    const alarms: HookAlarm[] = []
+    // 生产 rootIndex：归因映射不含 vet 根（isAttributableEntry 已排除）
+    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), () => new Map([['/app/node_modules/evil/lib', 'evil-plugin']]))
+    try {
+      // 宿主模块解析链：realpathSync 包内 package.json（属性访问触发包装器，同线上）
+      fsDefault.realpathSync(join(pkgDir, 'package.json'))
+      fsDefault.statSync(join(pkgDir, 'package.json'))
+      expect(alarms).toHaveLength(0)
+      // 对照：真敏感路径（不在 node_modules 下）照常报警——豁免没有吞掉探测能力
+      fsDefault.writeFileSync(join(tmp, '.ssh', 'probe'), 'x')
+      expect(alarms).toHaveLength(1)
+      expect(alarms[0].kind).toBe('fs-write')
+    } finally {
+      dispose()
+      rmSync(tmp, { recursive: true, force: true })
+    }
   })
 
   it('常规子进程（git/node/pnpm）不报警', () => {

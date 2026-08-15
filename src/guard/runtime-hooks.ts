@@ -105,6 +105,13 @@ export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'muta
   const parts = norm.split('/')
   for (let i = 0; i < parts.length; i++) {
     const low = parts[i].toLowerCase()
+    // A9 包目录豁免：node_modules 段之后的路径段不做敏感匹配。包名/包内文件是公开工件——
+    // 含 credential/secret 等词的包名是正常生态（实测 @aws-sdk/credential-provider-*、
+    // @deepseek-ai/dsh-credentials-local 等 12 个），宿主模块解析（require.resolve 内部
+    // realpathSync/stat 包内 package.json）与 vet 扫描读取都会高频触碰 → 既往全部误报成
+    // fs-probe 且归因到 vet 自己。真实凭据在用户/系统目录，不在包目录；node_modules 之前的
+    // 段照常判定（~/.ssh/node_modules/x 仍命中 .ssh）。
+    if (low === 'node_modules') break
     if (low === '.env' || low.startsWith('.env.')) return true
     // 末段是工具链临时产物（.secrets.ts.165387.<uuid>.tmpdir）→ 跳过敏感词判定；父段照常
     // 全量判定（~/.ssh/config.bak 仍命中 .ssh；.env.tmp 已在上方命中）。

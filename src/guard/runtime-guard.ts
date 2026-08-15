@@ -87,6 +87,15 @@ function isOfficial(name: string): boolean {
   return name.startsWith('@deepseek-ai/') || name === PACKAGE_NAME
 }
 
+/**
+ * A9 归因排除：vet 自身不参与 T2 栈归因。包装器帧（runtime-hooks.js）永远是报警栈的栈顶，
+ * 若 vet 根在归因映射里，一切宿主/无主报警都会归到 vet 头上（"vet 把自己算成警报"）。
+ * 纯函数便于测试；排除后 vet 自己的敏感操作仍会报警（归因落空显示无主），不隐藏行为。
+ */
+export function isAttributableEntry(name: string): boolean {
+  return name !== PACKAGE_NAME
+}
+
 interface LoaderLike {
   entries(): { options: { name: string } }[]
 }
@@ -247,7 +256,12 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   })
 
   // ── T2 钩子 ─────────────────────────────────────────────
+  // A9 归因映射（root→包名）只建一次并缓存：每个被分类的 fs 调用都会走归因，重建=每条
+  // 报警 N×require.resolve 的 CPU 空转（报警风暴时放大）；热重载会重新 apply 生成新闭包，
+  // 天然重建，无需失效机制。
+  let rootsCache: Map<string, string> | undefined
   const rootIndex = (): Map<string, string> => {
+    if (rootsCache !== undefined) return rootsCache
     const map = new Map<string, string>()
     // R31：归因阶段自身的 fs 探测（resolvePackageRoot 的 realpathSync）会再次进入
     // T2 包装器；敏感包名（如 dsh-credentials）会再次 alarm → 归因 → 无限递归，
@@ -267,12 +281,15 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     const profileDir = (ctx as { baseUrl?: string }).baseUrl
     try {
       for (const name of names) {
+        // A9 归因排除 vet 自身（见 isAttributableEntry 注释）
+        if (!isAttributableEntry(name)) continue
         const root = resolvePackageRoot(name, profileDir)
         if (root !== undefined) map.set(root, name)
       }
     } finally {
       setRootIndexing(false)
     }
+    rootsCache = map
     return map
   }
   const sink = (alarm: HookAlarm): void => {

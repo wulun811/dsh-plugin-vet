@@ -11,6 +11,10 @@
   - T1 growth：测量跨度必须覆盖完整窗口——起窗初期 20 秒内涨 274MB 的瞬时尖峰不再被标成"10 分钟持续膨胀疑似泄漏"。
 - 新功能：报警单条忽略/恢复——面板每条报警可「忽略」（不再计入盾牌等级与计数，记录保留、可「恢复」；报警停止后忽略自动失效，复发重新可见；与报警存储同生命周期，重启重置）。
 - **R31 崩溃修复（watch 模式实测崩溃，实为递归爆栈）**：T2 报警归因阶段（rootIndex 遍历 100+ 插件根）自身的 fs 探测再次进入被包装的 fs → 敏感包名（dsh-credentials / dsh-token-meter 等，实测递归 4041 层）再次 alarm → 归因 → 无限递归 → 每层重建正则 → V8 RegExpCompiler 栈耗尽，误报 OOM 进程崩溃。修复：归因期间置直通标志，包装器直通原始 fs 断开递归；segmentHasKeyword 正则按关键词缓存。护栏标志模块私有（不挂 globalThis——挂在全局等于给恶意插件一把让 vet 全体失明的钥匙）。
+- **A9 自伤修复（用户实测）**：T2 把 vet 自己误报成警报源的两条根因一并修掉：
+  - 归因排除 vet 自身：包装器帧（runtime-hooks.js）永远是报警栈栈顶，vet 根在归因映射里时一切宿主/无主报警都会栽到 vet 头上（实测 fs-probe realpathSync(...@deepseek-ai/dsh-credentials-local/package.json) 被归因为 @jieai/dsh-plugin-vet）。现在归因映射排除 vet，报警照发但归因到真实调用方（官方包/无主）。
+  - node_modules 包目录豁免：包名/包内文件是公开工件，含 credential/secret 等词的包名是正常生态（本机实测 12 个：@aws-sdk/credential-provider-*、@deepseek-ai/dsh-credentials(-local) 等）——宿主模块解析（require.resolve 内部 realpathSync/stat 包内 package.json）与 vet 扫描读取都会高频触碰，既往全部误报成 fs-probe。node_modules 段之后的路径段不再做敏感匹配；node_modules 之前的段照常判定（~/.ssh/node_modules/x 仍命中）；mutate 下系统根前缀（/usr 等）仍生效。
+  - rootIndex 归因映射只建一次并缓存：原来每次被分类的 fs 调用都重建（N×require.resolve），报警风暴时放大为 CPU 空转。
 - 安装可用性对照 DSH 官方 bundle 契约验证并修正：
   - peerDependencies 对齐 DSH 0.1.0-rc.6 版本族（原 `^0.0.1-rc.1` 与真实安装版本不符，纯属侥幸可用）。
   - 新增 `prepublishOnly`：发布前强制构建，防止 lib/（含 client bundle）缺失或过期。
