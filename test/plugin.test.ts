@@ -10,6 +10,7 @@ import { buildRequest, createScanPluginTool } from '../lib/tools/scan-plugin.js'
 import { installToolExecuteGuard } from '../lib/guards/tool-execute.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
+import { resolvePackageRoot } from '../lib/scanner/package-sources.js'
 import { VetConfigSchema, validateConfig } from '../lib/config.js'
 import type { VetConfig } from '../lib/config.js'
 import { explainScore, renderScorecard } from '../lib/report/render.js'
@@ -54,6 +55,40 @@ const okResult = { isError: false, value: {}, content: [{ type: 'text', text: 'O
 // 临时"已安装"恶意包：node_modules/@vet-test/evil（node_modules 已 gitignore）
 const EVIL_PKG = join(import.meta.dirname, '..', 'node_modules', '@vet-test', 'evil')
 const CLEAN_PKG = join(import.meta.dirname, '..', 'node_modules', '@vet-test', 'clean')
+
+describe('resolvePackageRoot（符号链接/非 vet 安装目录解析）', () => {
+  it('baseDir 指向独立 node_modules 时能解析该目录里的包（DSH profile 场景）', () => {
+    // 模拟 dsh profile：包的 node_modules 在 profile 下，vet 自身不依赖它
+    const profile = mkdtempSync(join(tmpdir(), 'vet-profile-'))
+    const pkgDir = join(profile, 'node_modules', '@vet-test', 'remote')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@vet-test/remote', version: '1.0.0', main: 'index.js' }))
+    try {
+      // 不传 baseDir（vet realpath 解析）→ 找不到
+      expect(resolvePackageRoot('@vet-test/remote')).toBeUndefined()
+      // 传 profile 目录 → 找到
+      expect(resolvePackageRoot('@vet-test/remote', profile)).toBe(join(profile, 'node_modules', '@vet-test', 'remote'))
+    } finally {
+      rmSync(profile, { recursive: true, force: true })
+    }
+  })
+
+  it('file: URL baseDir 也能解析（ctx.baseUrl 的 file: 形态）', () => {
+    const profile = mkdtempSync(join(tmpdir(), 'vet-profile-'))
+    const pkgDir = join(profile, 'node_modules', '@vet-test', 'fileurl')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@vet-test/fileurl', version: '1.0.0', main: 'index.js' }))
+    try {
+      expect(resolvePackageRoot('@vet-test/fileurl', 'file://' + profile)).toBe(join(profile, 'node_modules', '@vet-test', 'fileurl'))
+    } finally {
+      rmSync(profile, { recursive: true, force: true })
+    }
+  })
+
+  it('vet 自身安装位置仍作为回退基准（历史行为）', () => {
+    expect(resolvePackageRoot('@vet-test/evil')).toBe(EVIL_PKG)
+  })
+})
 
 beforeAll(() => {
   for (const [dir, name, code] of [

@@ -75,7 +75,11 @@ function resolveProfileDir(baseUrl: string): string {
 /** vet 条目的历史形态：早期误写成了包名 id（DSH 曾自动加引号），统一识别为 vet 条目。 */
 const VET_ENTRY_RE = /^-\s*id:\s*(?:["']?@?jieai\/dsh-plugin-vet["']?|plugin-vet)\s*$/
 
-/** 从 patch 行中摘掉所有 vet 条目（含其 config 块），其余行原样保留。 */
+/**
+ * 从 patch 行中摘掉所有 vet 条目（含其 config 块），其余行原样保留。
+ * 按缩进判定条目边界：config 块（含嵌套列表）都缩进，只有回到顶格（注释/下一个
+ * 顶层条目）才结束跳过——避免 vet 配置里的嵌套列表项被误判为新条目。
+ */
 function stripVetEntries(lines: string[]): string[] {
   const out: string[] = []
   let skipping = false
@@ -85,8 +89,8 @@ function stripVetEntries(lines: string[]): string[] {
       continue
     }
     if (skipping) {
-      const trimmed = line.trim()
-      if (trimmed === '' || trimmed.startsWith('- ')) {
+      // 顶格非空行 = 下一个顶层条目或注释 → 结束跳过；缩进行（config/嵌套列表）继续跳过
+      if (/^\S/.test(line)) {
         skipping = false
         out.push(line)
       }
@@ -150,13 +154,28 @@ function handleToggle(req: IncomingMessage, res: ServerResponse, ctx: ContextLik
     return
   }
   const chunks: Buffer[] = []
-  req.on('data', (c: Buffer) => { chunks.push(c) })
+  let total = 0
+  req.on('data', (c: Buffer) => {
+    total += c.length
+    if (total > 8192) {
+      writeJson(res, 413, { ok: false, note: '请求体过大' })
+      req.destroy()
+      return
+    }
+    chunks.push(c)
+  })
   req.on('end', () => {
-    let enable = false
+    // enable 必须是显式布尔：空 body / 缺字段 / 非布尔 → 400 拒绝，绝不默认当「关闭」误关守卫
+    let enable: unknown
     try {
-      enable = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}').enable === true
+      enable = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}').enable
     } catch {
-      enable = false
+      writeJson(res, 400, { ok: false, note: '请求体不是合法 JSON' })
+      return
+    }
+    if (typeof enable !== 'boolean') {
+      writeJson(res, 400, { ok: false, note: '缺少布尔字段 enable' })
+      return
     }
     const result = writeRuntimeGuardConfig(ctx, enable)
     writeJson(res, result.ok ? 200 : 500, result)

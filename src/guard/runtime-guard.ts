@@ -33,7 +33,13 @@ interface LoaderLike {
  * @returns disposer：恢复钩子并终止哨兵（HMR/卸载安全）。
  */
 export function installRuntimeGuard(ctx: Context, config: VetConfig, status: VetStatus): () => void {
-  if (config.runtimeGuard !== 'watch') return () => {}
+  if (config.runtimeGuard !== 'watch') {
+    // 蜜罐依赖 T2 钩子：guard 未开时蜜罐静默不生效——显式告警，避免用户以为开了其实没开
+    if (config.honeypot?.enabled === true) {
+      ctx.logger.warn('vet: honeypot.enabled=true 但 runtimeGuard 非 watch——蜜罐未生效（需先开启运行时守卫）')
+    }
+    return () => {}
+  }
   const disposers: (() => void)[] = []
 
   // ── T1 哨兵 ─────────────────────────────────────────────
@@ -46,30 +52,57 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     String(config.runtimeGrowthWindowMs),
   ]
   const sidecarPath = fileURLToPath(new URL('../guard/runtime-watch.js', import.meta.url))
-  const child = spawn(process.execPath, [sidecarPath, '--vet-sidecar', ...watchArgs], {
-    stdio: ['ignore', 'pipe', 'inherit'],
-  })
-  sidecarSpawned = true
-  let sidecarAlive = true
-  child.stdout?.setEncoding('utf8')
-  child.stdout?.on('data', (chunk: string) => {
-    for (const line of chunk.split('\n')) {
-      const trimmed = line.trim()
-      if (trimmed === '') continue
-      try {
-        const a = JSON.parse(trimmed) as WatchAlarm
-        status.record({ ...a, source: 't1' })
-      } catch {
-        ctx.logger.warn(`vet: 哨兵输出无法解析: ${trimmed.slice(0, 120)}`)
+  let child: ReturnType<typeof spawn> | undefined
+  let sidecarAlive = false
+  let stopping = false
+  /** 意外退出重拉：上限 5 次 + 5s 退避（监控器自身失活必须可见，不能静默）。 */
+  const MAX_RESPAWN = 5
+  const RESPAWN_DELAY_MS = 5000
+  let respawnCount = 0
+  const spawnSidecar = (): void => {
+    if (stopping) return
+    child = spawn(process.execPath, [sidecarPath, '--vet-sidecar', ...watchArgs], {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    })
+    sidecarSpawned = true
+    sidecarAlive = true
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => {
+      for (const line of chunk.split('\n')) {
+        const trimmed = line.trim()
+        if (trimmed === '') continue
+        try {
+          const a = JSON.parse(trimmed) as WatchAlarm
+          status.record({ ...a, source: 't1' })
+        } catch {
+          ctx.logger.warn(`vet: 哨兵输出无法解析: ${trimmed.slice(0, 120)}`)
+        }
       }
-    }
-  })
-  child.on('exit', (code) => {
-    sidecarAlive = false
-    ctx.logger.warn(`vet: T1 哨兵退出（code=${code ?? 'null'}）`)
-  })
+    })
+    child.on('exit', (code) => {
+      sidecarAlive = false
+      ctx.logger.warn(`vet: T1 哨兵退出（code=${code ?? 'null'}）`)
+      if (stopping) return
+      // 监控器失活本身是黄灯报警（vet 自己的进程挂了，用户该知道守护断了）
+      status.record({
+        id: 't1:sentinel-down',
+        severity: 'yellow',
+        source: 't1',
+        kind: 'sentinel',
+        message: 'T1 哨兵意外退出，运行时内存/子进程/fd 监控中断',
+        at: Date.now(),
+      })
+      if (respawnCount < MAX_RESPAWN) {
+        respawnCount++
+        ctx.logger.warn(`vet: 5s 后重拉哨兵（第 ${respawnCount}/${MAX_RESPAWN} 次）`)
+        setTimeout(spawnSidecar, RESPAWN_DELAY_MS).unref?.()
+      }
+    })
+  }
+  spawnSidecar()
   disposers.push(() => {
-    if (sidecarAlive) child.kill()
+    stopping = true
+    if (sidecarAlive && child !== undefined) child.kill()
   })
 
   // ── T2 钩子 ─────────────────────────────────────────────
@@ -85,8 +118,10 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     if (loader !== undefined) {
       for (const entry of loader.entries()) names.push(entry.options.name)
     }
+    // vet 被符号链接安装时 realpath 解析不到 profile node_modules → 用 loader 基准（ctx.baseUrl）
+    const profileDir = (ctx as { baseUrl?: string }).baseUrl
     for (const name of names) {
-      const root = resolvePackageRoot(name)
+      const root = resolvePackageRoot(name, profileDir)
       if (root !== undefined) map.set(root, name)
     }
     return map

@@ -10,6 +10,8 @@ import { prompts } from './prompts.js'
 import { appendAuditEvent, type SessionPersistenceLike } from './session-log.js'
 
 const MAX_CHUNK_BYTES = 32 * 1024
+/** 轮 2 最多审计的分块数（超出的代码块不逐块调 LLM，防大包 LLM 成本爆炸；round3/4 仍看全貌截断）。 */
+const MAX_AUDIT_CHUNKS = 12
 
 /** 按 ≤32KB（utf8）切分代码块（PLAN.md §5.1 输入字节上限）。 */
 export function chunkCode(code: string): string[] {
@@ -212,16 +214,19 @@ export async function runAudit(
 
   let partial = false
 
-  // 轮 1 总览
+  // 轮 1 总览（代码全貌截断到审计上限块——大包总览不能只基于第一块）
+  const overviewCode = input.codeChunks.slice(0, MAX_AUDIT_CHUNKS).join('\n---\n') || ''
   const r1 = await attemptRound(deps, 1, prompts.round1,
-    frame(staticReport, [['代码', input.codeChunks[0] ?? '']]),
+    frame(staticReport, [['代码', overviewCode]]),
     validateRound1)
   if (!r1.ok) return { error: 'audit-failed', reason: r1.error }
-  log('audit-plugin-vet/request', { pluginName: input.pluginName, round: 1, inputBytes: input.codeChunks[0]?.length ?? 0, provider: deps.route.provider, model: deps.route.model })
+  log('audit-plugin-vet/request', { pluginName: input.pluginName, round: 1, inputBytes: overviewCode.length, provider: deps.route.provider, model: deps.route.model })
 
-  // 轮 2 敏感点（代码全量分块）
+  // 轮 2 敏感点（代码分块，封顶 MAX_AUDIT_CHUNKS——大包不逐块烧 LLM，超出标记 partial）
   const findings: LlmFinding[] = []
-  for (const chunk of input.codeChunks) {
+  const auditChunks = input.codeChunks.slice(0, MAX_AUDIT_CHUNKS)
+  if (input.codeChunks.length > MAX_AUDIT_CHUNKS) partial = true
+  for (const chunk of auditChunks) {
     const r2 = await attemptRound(deps, 2, prompts.round2,
       frame(staticReport, [['轮 1 总览', JSON.stringify(r1.value)], ['代码块', chunk]]),
       validateRound2)
@@ -243,9 +248,9 @@ export async function runAudit(
     }
   }
 
-  // 轮 3 质量
+  // 轮 3 质量（代码全貌截断到审计上限块，防上下文超限）
   const r3 = await attemptRound(deps, 3, prompts.round3,
-    frame(staticReport, [['轮 1 总览', JSON.stringify(r1.value)], ['轮 2 发现', JSON.stringify(findings)], ['代码', input.codeChunks.join('\n---\n')]]),
+    frame(staticReport, [['轮 1 总览', JSON.stringify(r1.value)], ['轮 2 发现', JSON.stringify(findings)], ['代码', auditChunks.join('\n---\n')]]),
     validateRound3)
   if (r3.ok) partial = partial || false
   else partial = true

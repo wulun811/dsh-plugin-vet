@@ -32,7 +32,10 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     if (isExempt(entryName, config)) return
 
     const check = (): void => {
-      const root = resolvePackageRoot(entryName)
+      // DSH 把插件装进 profile 的 node_modules（vet 可能被符号链接，realpath 解析不到）→
+      // 用 loader 的解析基准（ctx.baseUrl = profile 目录）定位第三方插件根目录。
+      const profileDir = (ctx as { baseUrl?: string }).baseUrl
+      const root = resolvePackageRoot(entryName, profileDir)
       if (root === undefined) return
       const files = listSourceFiles(root)
       if (files.length === 0) return

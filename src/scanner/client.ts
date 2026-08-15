@@ -16,29 +16,41 @@ export async function scan(request: ScanRequest, options: ScanOptions = {}): Pro
     const child = spawn(process.execPath, [SCANNER_BIN], { stdio: ['pipe', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
+    let done = false
+    const finish = (value: ScanResponse): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      resolve(value)
+    }
     const timer = setTimeout(() => {
       child.kill('SIGKILL')
-      resolve({ ok: false, error: `scanner timeout after ${timeoutMs}ms` })
+      finish({ ok: false, error: `scanner timeout after ${timeoutMs}ms` })
     }, timeoutMs)
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', chunk => { stderr += chunk })
-    child.on('error', err => { clearTimeout(timer); resolve({ ok: false, error: String(err) }) })
+    child.on('error', err => finish({ ok: false, error: String(err) }))
     child.on('close', () => {
-      clearTimeout(timer)
       const line = stdout.trim().split('\n').pop()
       if (line === undefined) {
-        resolve({ ok: false, error: `scanner produced no output; stderr: ${stderr.slice(0, 200)}` })
+        finish({ ok: false, error: `scanner produced no output; stderr: ${stderr.slice(0, 200)}` })
         return
       }
       try {
-        resolve(JSON.parse(line) as ScanResponse)
+        finish(JSON.parse(line) as ScanResponse)
       } catch (err) {
-        resolve({ ok: false, error: `scanner invalid output: ${String(err)}; stderr: ${stderr.slice(0, 200)}` })
+        finish({ ok: false, error: `scanner invalid output: ${String(err)}; stderr: ${stderr.slice(0, 200)}` })
       }
     })
-    child.stdin.write(JSON.stringify(request))
+    // scanner-bin 启动失败时 stdin 流可能已销毁：write 抛错/EPIPE 必须兜住，不能崩宿主
+    child.stdin.on('error', () => { /* close 事件会走失败分支 */ })
+    try {
+      child.stdin.write(JSON.stringify(request))
+    } catch (error) {
+      finish({ ok: false, error: `scanner stdin write failed: ${String(error)}` })
+    }
     child.stdin.end()
   })
 }
@@ -48,12 +60,18 @@ export async function scan(request: ScanRequest, options: ScanOptions = {}): Pro
  */
 export function scanSync(request: ScanRequest, options: ScanOptions = {}): ScanResponse {
   const timeoutMs = options.timeoutMs ?? 15_000
-  const result = spawnSync(process.execPath, [SCANNER_BIN], {
-    input: JSON.stringify(request),
-    encoding: 'utf8',
-    timeout: timeoutMs,
-    maxBuffer: 64 * 1024 * 1024,
-  })
+  let result
+  try {
+    result = spawnSync(process.execPath, [SCANNER_BIN], {
+      input: JSON.stringify(request),
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 64 * 1024 * 1024,
+    })
+  } catch (error) {
+    // maxBuffer 超限/参数异常会抛而非返回 → 归为失败，绝不向上抛（deny 守卫同步路径无外层保护）
+    return { ok: false, error: `scanner spawnSync failed: ${String(error)}` }
+  }
   if (result.status !== 0) {
     return { ok: false, error: `scanner exit ${result.status}: ${String(result.stderr).slice(0, 200)}` }
   }

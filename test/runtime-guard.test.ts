@@ -205,6 +205,28 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     const alarm = classifyOp({ module: 'fs', op: 'rm', args: [{ path: '/etc/passwd', recursive: true }] }, DEFAULT_HOOK_CONFIG)
     expect(alarm).toMatchObject({ severity: 'red' })
   })
+
+  it('createWriteStream 写敏感路径 → yellow fs-write（D29 补漏：流式写入此前漏报）', () => {
+    expect(classifyOp({ module: 'fs', op: 'createWriteStream', args: ['/home/user/.ssh/authorized_keys'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ severity: 'yellow', kind: 'fs-write' })
+    expect(classifyOp({ module: 'fs', op: 'createWriteStream', args: ['/home/user/log.txt'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+  })
+
+  it('open 带写 flags → fs-write；只读 flags → fs-read（D29 补漏）', () => {
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['/etc/hosts', 'w'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    expect(classifyOp({ module: 'fs', op: 'openSync', args: ['/home/u/.env', 'a+'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['/etc/passwd', 'r'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-read' })
+  })
+
+  it('cp/rename 双向：src 敏感（拷密钥出局）或 dest 敏感（覆盖系统文件）都报（D29 补漏）', () => {
+    // src 敏感：把 .env 拷出去
+    expect(classifyOp({ module: 'fs', op: 'cpSync', args: ['/home/u/.env', '/tmp/stolen'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // dest 敏感：把恶意文件覆盖成 /etc/hosts
+    expect(classifyOp({ module: 'fs', op: 'cpSync', args: ['/tmp/evil', '/etc/hosts'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // rename 落位系统路径
+    expect(classifyOp({ module: 'fs', op: 'rename', args: ['/tmp/evil', '/etc/passwd'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // 普通 cp 不报
+    expect(classifyOp({ module: 'fs', op: 'cpSync', args: ['/tmp/a.txt', '/tmp/b.txt'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+  })
 })
 
 describe('pluginFromStack（栈归因）', () => {
@@ -339,6 +361,22 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     expect(content2).not.toContain('@jieai/dsh-plugin-vet')
     expect(content2).toContain('- id: settings')
 
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('vet 条目 config 含嵌套列表也能完整剥离（D29：缩进边界）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: settings\n  config:\n    watch: false\n- id: plugin-vet\n  config:\n    runtimeGuard: watch\n    allowlist:\n      - foo\n      - bar\n- id: other\n  config:\n    x: 1\n')
+
+    const r = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(r.ok).toBe(true)
+    const content = readFileSync(patch, 'utf8')
+    expect(content).not.toContain('plugin-vet')
+    expect(content).not.toContain('allowlist')
+    expect(content).toContain('- id: settings')
+    expect(content).toContain('- id: other')
+    expect(content).toContain('x: 1')
     rmSync(dir, { recursive: true, force: true })
   })
 

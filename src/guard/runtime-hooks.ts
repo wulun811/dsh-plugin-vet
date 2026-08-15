@@ -48,7 +48,7 @@ export interface HookOp {
 /** 破坏性删除类 fs 操作（red）。 */
 const DESTROY_OPS = new Set(['unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync'])
 /** 写入类 fs 操作（yellow）。 */
-const WRITE_OPS = new Set(['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync', 'truncate', 'truncateSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync'])
+const WRITE_OPS = new Set(['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync', 'truncate', 'truncateSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync', 'createWriteStream'])
 /** 读取类 fs 操作（密钥路径 → yellow）。 */
 const READ_OPS = new Set(['readFile', 'readFileSync', 'createReadStream', 'open', 'openSync'])
 /** child_process 全部操作（spawn 面，yellow）。 */
@@ -92,6 +92,18 @@ function firstString(args: unknown[]): string | undefined {
     }
   }
   return undefined
+}
+
+/** 取全部字符串参数（cp/rename 的 src+dest 都要检查——dest 覆盖系统文件/密钥也应报警）。 */
+function allStrings(args: unknown[]): string[] {
+  const out: string[] = []
+  for (const a of args) {
+    if (typeof a === 'string') out.push(a)
+    else if (typeof a === 'object' && a !== null && 'path' in a && typeof (a as { path?: unknown }).path === 'string') {
+      out.push((a as { path: string }).path)
+    }
+  }
+  return out
 }
 
 /** 拼接命令行为可读目标（含参数，便于人工判断）。 */
@@ -144,6 +156,21 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
   if (module === 'fs') {
     if (DESTROY_OPS.has(name) && isSensitivePath(target, cfg, 'mutate')) {
       return { severity: 'red', kind: 'fs-destroy', message: `敏感路径删除：${name}(${target.slice(0, 120)})`, target }
+    }
+    // cp/rename 是成对路径：src 敏感（拷贝密钥出局）或 dest 敏感（覆盖系统文件/密钥落位）都要报
+    if (name === 'cp' || name === 'cpSync' || name === 'rename' || name === 'renameSync' || name === 'copyFile' || name === 'copyFileSync') {
+      const paths = allStrings(args)
+      const sensitive = paths.find(p => isSensitivePath(p, cfg, 'mutate'))
+      if (sensitive !== undefined) {
+        return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入（${name}）：${sensitive.slice(0, 120)}`, target: sensitive.slice(0, 120) }
+      }
+    }
+    // open/openSync 的 flags 参数带 w/a/+/x → 写意图（fs.open('/etc/passwd','w') 不该按读取报）
+    if ((name === 'open' || name === 'openSync') && READ_OPS.has(name)) {
+      const flags = args.find((a): a is string => typeof a === 'string' && /^[rwa]/.test(a))
+      if (flags !== undefined && /[wax+]/.test(flags) && isSensitivePath(target, cfg, 'mutate')) {
+        return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入（open flags=${flags}）：${target.slice(0, 120)}`, target }
+      }
     }
     if (WRITE_OPS.has(name) && isSensitivePath(target, cfg, 'mutate')) {
       return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入：${name}(${target.slice(0, 120)})`, target }
