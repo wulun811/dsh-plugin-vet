@@ -156,8 +156,50 @@ export function analyzeSample(prev: ProcSample | null, curr: ProcSample, cfg: Wa
  * 哨兵子进程入口：监视 PPID（宿主）。宿主退出（/proc/<ppid>/stat 不可读）即自杀。
  * 每轮把报警以 JSON 行写到 stdout，宿主侧按行解析。
  */
+/**
+ * 单例锁（D30 修漏）：同宿主（PPID）下只允许一个 vet 哨兵。
+ * dsh 配置热重载（改 cordis.patch.yml 触发）会重新 apply vet 插件 → installRuntimeGuard
+ * 重复执行 → 重复 spawn sidecar。旧实例的 disposer 不一定被调用（重复 apply 而非替换），
+ * 导致同宿主堆积多个 sidecar。让哨兵自己认亲：启动时扫 /proc，发现同 PPID 已有
+ * vet-sidecar 兄弟（自己除外）即退出——无论宿主怎么重复 apply，同宿主永远只有一个哨兵。
+ */
+function siblingSidecarPids(hostPid: number): number[] {
+  const out: number[] = []
+  let entries: string[]
+  try {
+    entries = readdirSync('/proc')
+  } catch {
+    return out
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    const pid = Number(entry)
+    if (pid === process.pid) continue
+    try {
+      const stat = readFileSync(`/proc/${entry}/stat`, 'utf8')
+      const close = stat.lastIndexOf(')')
+      if (close === -1) continue
+      const fields = stat.slice(close + 2).trim().split(' ')
+      if (Number(fields[1]) !== hostPid) continue // 不是本宿主的子进程
+      const cmdline = readFileSync(`/proc/${entry}/cmdline`, 'utf8').replace(/\0/g, ' ')
+      if (cmdline.includes('runtime-watch.js') && cmdline.includes('--vet-sidecar')) out.push(pid)
+    } catch {
+      // 进程刚退出（/proc 竞态）——忽略
+    }
+  }
+  return out
+}
+
+/**
+ * 哨兵子进程入口：监视 PPID（宿主）。宿主退出（/proc/<ppid>/stat 不可读）即自杀。
+ * 每轮把报警以 JSON 行写到 stdout，宿主侧按行解析。
+ */
 export function sidecarMain(cfg: WatchConfig): void {
   const hostPid = process.ppid
+  // 单例锁：同宿主已有 vet-sidecar 兄弟 → 自己是重复 spawn 的冗余实例，直接退出
+  if (siblingSidecarPids(hostPid).length > 0) {
+    process.exit(0)
+  }
   let prev: ProcSample | null = null
   let samples: RssSample[] = []
   let growthMultiples = 0

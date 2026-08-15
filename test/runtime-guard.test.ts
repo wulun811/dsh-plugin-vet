@@ -9,6 +9,8 @@ import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../src/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig } from '../src/guard/status-route.js'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512, growthMb: 256, growthWindowMs: 600_000 }
 
@@ -508,5 +510,28 @@ describe('蜜罐报警（classifyOp）', () => {
     const cfg = mkCfg([])
     expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/home/user/.ssh/id_rsa'] }, cfg)).toMatchObject({ kind: 'fs-read' })
     expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/tmp/whatever/index.js'] }, cfg)).toBeNull()
+  })
+})
+describe('sidecar 单例锁（D30 修漏：配置热重载重复 apply 不再叠加哨兵）', () => {
+  // spawn 子进程需要真实可执行 JS：用编译产物（npm test = build + vitest；源码是 .ts 不能直接跑）
+  const watchPath = fileURLToPath(new URL('../lib/guard/runtime-watch.js', import.meta.url))
+  const args = [watchPath, '--vet-sidecar', '2000', '2048', '5', '512', '256', '600000']
+
+  it('同宿主重复 spawn → 后者立即退出（exit 0），前者存活', async () => {
+    const first = spawn(process.execPath, args, { stdio: 'ignore' })
+    // 等第一个完成 exec（cmdline 可读）再 spawn 第二个，避免 /proc 竞态
+    // 等 first 进入稳态（单例锁已通过、setInterval 已建立）再 spawn second——
+    // 模拟生产时序：热重载时旧哨兵早已运行，新 spawn 的哨兵晚到 → 新自杀、旧存活。
+    // 不能只等 exec：first 和 second 若几乎同时 exec 完，各自扫描都能看到对方 → 两个都自杀（测试竞态）。
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+    const second = spawn(process.execPath, args, { stdio: 'ignore' })
+    const code = await new Promise<number | null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), 5000)
+      second.on('exit', (c) => { clearTimeout(timer); resolve(c) })
+    })
+    expect(code).toBe(0) // 后者自杀退出
+    // 前者还活着
+    expect(first.exitCode).toBeNull()
+    first.kill()
   })
 })

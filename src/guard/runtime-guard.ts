@@ -19,6 +19,48 @@ import { ensureHoneypot } from './honeypot.js'
 /** T1 哨兵是否已启动（invariant 断言用）。 */
 export let sidecarSpawned = false
 
+/**
+ * D30 修漏：哨兵 pid 注册表（process.env，跨模块热重载保留）。
+ * dsh 配置热重载会重新 apply vet 插件 → module 级变量（child/sidecarAlive）全部重置，
+ * 但 process.env 保留。用 env 记当前哨兵 pid：
+ * - watch 分支 spawn 前查 env：已有存活哨兵 → 复用不重复 spawn（根治重复 apply 叠加）；
+ * - off 分支查 env：kill 遗留哨兵（关闭守卫必须真正停掉监控）。
+ * sidecar 崩溃退出后 env 里的 pid 存活检查失败 → 下次 apply 重新 spawn。
+ */
+const SIDECAR_PID_ENV = 'DSH_VET_SIDECAR_PID'
+
+function envSidecarPid(): number | undefined {
+  const raw = process.env[SIDECAR_PID_ENV]
+  if (raw === undefined || raw === '') return undefined
+  const pid = Number(raw)
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  return pid
+}
+
+/** pid 是否存活（kill(0) 探测；EPERM 也视为存活——存在但不是我们的子进程）。 */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'EPERM'
+  }
+}
+
+/** 按 env 注册表 kill 遗留哨兵（关闭守卫时调用）。 */
+function killSidecarFromEnv(logger: { warn: (m: string) => void }): void {
+  const pid = envSidecarPid()
+  if (pid === undefined) return
+  try {
+    if (pidAlive(pid)) process.kill(pid, 'SIGTERM')
+  } catch {
+    // 已退出
+  }
+  delete process.env[SIDECAR_PID_ENV]
+  logger.warn(`vet: 运行时守卫关闭，终止哨兵 (pid=${pid})`)
+}
+
 /** 官方包信任（能力授权）：T2 对官方归因的 spawn 降噪（报警留给第三方）。 */
 function isOfficial(name: string): boolean {
   return name.startsWith('@deepseek-ai/') || name === PACKAGE_NAME
@@ -34,6 +76,8 @@ interface LoaderLike {
  */
 export function installRuntimeGuard(ctx: Context, config: VetConfig, status: VetStatus): () => void {
   if (config.runtimeGuard !== 'watch') {
+    // 关闭守卫必须真正停掉监控：kill 遗留哨兵（env 注册表，跨重载有效）
+    killSidecarFromEnv(ctx.logger)
     // 蜜罐依赖 T2 钩子：guard 未开时蜜罐静默不生效——显式告警，避免用户以为开了其实没开
     if (config.honeypot?.enabled === true) {
       ctx.logger.warn('vet: honeypot.enabled=true 但 runtimeGuard 非 watch——蜜罐未生效（需先开启运行时守卫）')
@@ -61,9 +105,19 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   let respawnCount = 0
   const spawnSidecar = (): void => {
     if (stopping) return
+    // env 注册表：已有存活哨兵（热重载前的实例）→ 复用，不重复 spawn（D30 单例）
+    const existing = envSidecarPid()
+    if (existing !== undefined && pidAlive(existing)) {
+      sidecarSpawned = true
+      child = undefined
+      sidecarAlive = true
+      ctx.logger.info(`vet: 复用既有哨兵 (pid=${existing})——跳过重复 spawn`)
+      return
+    }
     child = spawn(process.execPath, [sidecarPath, '--vet-sidecar', ...watchArgs], {
       stdio: ['ignore', 'pipe', 'inherit'],
     })
+    process.env[SIDECAR_PID_ENV] = String(child.pid ?? '')
     sidecarSpawned = true
     sidecarAlive = true
     child.stdout?.setEncoding('utf8')
@@ -81,7 +135,10 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     })
     child.on('exit', (code) => {
       sidecarAlive = false
-      ctx.logger.warn(`vet: T1 哨兵退出（code=${code ?? 'null'}）`)
+      // env 注册表已被清/改指（off 分支或新实例接管后 kill）→ 不再 respawn，否则关了守卫哨兵又活回来
+      const registered = envSidecarPid()
+      if (registered === child?.pid) delete process.env[SIDECAR_PID_ENV]
+      ctx.logger.warn(`vet: T1 哨兵退出（code=${code ?? 'null'}，respawn=${registered === child?.pid}）`)
       if (stopping) return
       // 监控器失活本身是黄灯报警（vet 自己的进程挂了，用户该知道守护断了）
       status.record({
@@ -92,7 +149,8 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
         message: 'T1 哨兵意外退出，运行时内存/子进程/fd 监控中断',
         at: Date.now(),
       })
-      if (respawnCount < MAX_RESPAWN) {
+      // 仅当 env 注册表仍指向本哨兵时才 respawn（off/接管场景不复活）
+      if (respawnCount < MAX_RESPAWN && envSidecarPid() === child?.pid) {
         respawnCount++
         ctx.logger.warn(`vet: 5s 后重拉哨兵（第 ${respawnCount}/${MAX_RESPAWN} 次）`)
         setTimeout(spawnSidecar, RESPAWN_DELAY_MS).unref?.()
@@ -102,7 +160,18 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   spawnSidecar()
   disposers.push(() => {
     stopping = true
-    if (sidecarAlive && child !== undefined) child.kill()
+    const pid = envSidecarPid()
+    if (pid !== undefined && pidAlive(pid)) {
+      // 复用模式 child=undefined：走 env 注册表 kill（热重载后旧模块的 child 引用已不可靠）
+      try {
+        process.kill(pid, 'SIGTERM')
+      } catch {
+        // 已退出
+      }
+      delete process.env[SIDECAR_PID_ENV]
+    } else if (sidecarAlive && child !== undefined) {
+      child.kill()
+    }
   })
 
   // ── T2 钩子 ─────────────────────────────────────────────
