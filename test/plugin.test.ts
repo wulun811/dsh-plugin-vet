@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import * as vetPlugin from '../lib/index.js'
@@ -13,6 +13,7 @@ import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
 import { resolvePackageRoot } from '../lib/scanner/package-sources.js'
 import { VetConfigSchema } from '../lib/config.js'
 import { VetStatus } from '../lib/guard/status.js'
+import { setArchiveDirForTest } from '../lib/audit/archive.js'
 import type { VetConfig } from '../lib/config.js'
 import { explainScore, renderScorecard } from '../lib/report/render.js'
 
@@ -240,7 +241,7 @@ describe('internal/plugin guard', () => {
   })
   it('requireAudit deny：无档案 → 拦截并 dispose（D30 强制层）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-require-'))
-    process.env.DSH_PLUGIN_VET_ARCHIVE_DIR = join(dir, 'audits')
+    setArchiveDirForTest(join(dir, 'audits'))
     try {
       const ctx = new FakeCtx()
       installInternalPluginGuard(ctx as never, cfg({ mode: 'deny', requireAudit: true }))
@@ -249,13 +250,13 @@ describe('internal/plugin guard', () => {
       expect(() => h(f)).toThrow(/尚未完成审计/)
       expect(f.dispose).toHaveBeenCalled()
     } finally {
-      delete process.env.DSH_PLUGIN_VET_ARCHIVE_DIR
+      setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
     }
   })
 
   it('requireAudit：cordis builtin（cordis:group）豁免——不报警不拦截（D30 误报修复）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-require4-'))
-    process.env.DSH_PLUGIN_VET_ARCHIVE_DIR = join(dir, 'audits')
+    setArchiveDirForTest(join(dir, 'audits'))
     try {
       const ctx = new FakeCtx()
       const status = new VetStatus()
@@ -267,13 +268,13 @@ describe('internal/plugin guard', () => {
       expect(ctx.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
       expect(status.snapshot().alarmCount).toBe(0)
     } finally {
-      delete process.env.DSH_PLUGIN_VET_ARCHIVE_DIR
+      setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
     }
   })
 
   it('requireAudit report（watch）：无档案 → 只报警不拦截（alarm-only，D30）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-require3-'))
-    process.env.DSH_PLUGIN_VET_ARCHIVE_DIR = join(dir, 'audits')
+    setArchiveDirForTest(join(dir, 'audits'))
     try {
       const ctx = new FakeCtx()
       const status = new VetStatus()
@@ -288,13 +289,13 @@ describe('internal/plugin guard', () => {
       expect(snap.alarms[0].kind).toBe('audit-required')
       expect(snap.alarms[0].severity).toBe('yellow')
     } finally {
-      delete process.env.DSH_PLUGIN_VET_ARCHIVE_DIR
+      setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
     }
   })
 
   it('requireAudit 有档案 → 正常加载（不拦截）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-require2-'))
-    process.env.DSH_PLUGIN_VET_ARCHIVE_DIR = join(dir, 'audits')
+    setArchiveDirForTest(join(dir, 'audits'))
     try {
       mkdirSync(join(dir, 'audits'), { recursive: true })
       writeFileSync(join(dir, 'audits', 'vet-test-needs-audit-1.0.0-20260815-120000.md'), '# VET 健康档案')
@@ -305,7 +306,28 @@ describe('internal/plugin guard', () => {
       expect(() => h(f)).not.toThrow()
       expect(f.dispose).not.toHaveBeenCalled()
     } finally {
-      delete process.env.DSH_PLUGIN_VET_ARCHIVE_DIR
+      setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+    }
+  })
+
+  it('M1：档案前缀伪造——lodash 不能因 lodash-foo 的档案通过；自身完整档案才通过', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-m1-'))
+    setArchiveDirForTest(join(dir, 'audits'))
+    try {
+      mkdirSync(join(dir, 'audits'), { recursive: true })
+      // 只有 lodash-foo 的档案 → lodash 不应命中（旧前缀匹配会误判）
+      writeFileSync(join(dir, 'audits', 'lodash-foo-1.0.0-20260815-120000.md'), '# x')
+      const ctx = new FakeCtx()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'deny', requireAudit: true }))
+      const h = ctx.handlers.get('internal/plugin')![0]
+      const f = fiber({ entry: { options: { name: 'lodash' } } })
+      expect(() => h(f)).toThrow(/尚未完成审计/)
+      // 补上 lodash 自己的完整档案 → 通过
+      writeFileSync(join(dir, 'audits', 'lodash-4.17.21-20260815-120000.md'), '# y')
+      const f2 = fiber({ entry: { options: { name: 'lodash' } } })
+      expect(() => h(f2)).not.toThrow()
+    } finally {
+      setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
     }
   })
 })

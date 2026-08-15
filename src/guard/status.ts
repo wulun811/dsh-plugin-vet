@@ -70,7 +70,7 @@ export class VetStatus {
   snapshot(): VetStatusSnapshot {
     const level: ShieldLevel =
       this.alarms.some(a => a.severity === 'red') ? 'red'
-      : (this.alarms.some(a => a.severity === 'yellow') || this.lastScanValue?.verdict === 'suspicious') ? 'yellow'
+      : (this.alarms.some(a => a.severity === 'yellow') || (this.lastScanValue !== undefined && this.lastScanValue.verdict !== 'clean')) ? 'yellow'
       : 'green'
     return { level, alarmCount: this.alarms.length, alarms: [...this.alarms], lastScan: this.lastScanValue }
   }

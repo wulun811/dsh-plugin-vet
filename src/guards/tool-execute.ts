@@ -27,12 +27,13 @@ function codePayloads(exec: ToolExecution): Payload[] {
     }
     case 'cordis_define': {
       const out: Payload[] = []
-      if (code !== undefined && typeof code.host === 'string') out.push({ code: code.host, runtime: 'sandbox' })
+      // M6：host 半区在宿主进程内激活执行 → 'host'（R3 不降级，deny 阈值正确）
+      if (code !== undefined && typeof code.host === 'string') out.push({ code: code.host, runtime: 'host' })
       if (code !== undefined && typeof code.client === 'string') out.push({ code: code.client, runtime: 'sandbox' })
       return out
     }
     case 'cordis_run': {
-      if (code !== undefined && typeof code.host === 'string') return [{ code: code.host, runtime: 'sandbox' }]
+      // 真实 schema 是 pluginId/packageId/mode（无 code 字段）——保留空分支避免误匹配其他工具
       return []
     }
     case 'workflow': {
@@ -60,9 +61,10 @@ export function installToolExecuteGuard(ctx: Context, config: VetConfig, status?
       const request: ScanRequest = { kind: 'code', language: 'js', runtime: p.runtime, code: p.code }
       const res = await scan(request, { timeoutMs: config.scannerTimeoutMs })
       if (res.ok && res.report !== undefined) {
-        notes.push(`VET ${exec.name}: ${res.report.verdict} (${res.report.staticScore})`)
         status?.noteScan({ pluginName: exec.name, verdict: res.report.verdict, staticScore: res.report.staticScore, at: Date.now() })
         if (RANK[res.report.verdict] > RANK[worst]) worst = res.report.verdict
+        // M5：只对非 clean 结果加前缀——干净执行不污染机器可读输出（JSON 解析/管道消费方）
+        if (res.report.verdict !== 'clean') notes.push(`VET ${exec.name}: ${res.report.verdict} (${res.report.staticScore})`)
       } else {
         notes.push(`VET ${exec.name}: scan-error (${res.error ?? 'unknown'})`)
       }

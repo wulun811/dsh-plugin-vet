@@ -39,10 +39,10 @@ function writeJson(res: ServerResponse, code: number, body: unknown): void {
   res.end(JSON.stringify(body))
 }
 
-/** 同源校验：Origin 存在且与 Host 不符 → 拒绝（跨站 POST 防护）。 */
+/** 同源校验（POST 用）：Origin 缺失或与 Host 不符 → 拒绝（跨站/无浏览器上下文 POST 防护）。 */
 function sameOrigin(req: IncomingMessage): boolean {
   const origin = req.headers.origin
-  if (origin === undefined) return true
+  if (origin === undefined) return false
   const host = req.headers.host
   if (host === undefined) return false
   try {
@@ -101,6 +101,48 @@ function stripVetEntries(lines: string[]): string[] {
   return out
 }
 
+/** 提取现有 vet 条目的 config 块（缩进行，含嵌套列表），用于开启守卫时保留非 runtimeGuard 键。 */
+function extractVetConfig(content: string): string | undefined {
+  const lines = content.split('\n')
+  const start = lines.findIndex(l => VET_ENTRY_RE.test(l.trim()))
+  if (start === -1) return undefined
+  const out: string[] = []
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (/^\s*config:/.test(line)) {
+      // 收集 config 下所有缩进行（比 config: 行多缩进一级）
+      const configIndent = line.match(/^\s*/)?.[0].length ?? 0
+      for (let j = i + 1; j < lines.length; j++) {
+        const sub = lines[j]
+        const subIndent = sub.match(/^\s*/)?.[0].length ?? 0
+        if (sub.trim() === '' || sub.trim().startsWith('#')) continue
+        if (subIndent <= configIndent) break
+        out.push(sub)
+      }
+      break
+    }
+  }
+  return out.join('\n')
+}
+
+/** 读 patch 文件里 vet 条目实际配置的 runtimeGuard（'watch' | 'off'）。 */
+export function readPatchRuntimeGuard(ctx: ContextLike): 'watch' | 'off' {
+  if (ctx.baseUrl === undefined) return 'off'
+  try {
+    const content = readFileSync(join(resolveProfileDir(ctx.baseUrl), 'cordis.patch.yml'), 'utf8')
+    const lines = content.split('\n')
+    const start = lines.findIndex(l => VET_ENTRY_RE.test(l.trim()))
+    if (start === -1) return 'off'
+    for (let i = start + 1; i < lines.length; i++) {
+      const m = /^\s*runtimeGuard:\s*(\S+)/.exec(lines[i])
+      if (m !== null) return m[1] === 'watch' ? 'watch' : 'off'
+    }
+    return 'off'
+  } catch {
+    return 'off'
+  }
+}
+
 export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok: boolean; note: string } {
   if (ctx.baseUrl === undefined) {
     return { ok: false, note: '无法定位 profile 配置目录（ctx.baseUrl 缺失）' }
@@ -127,7 +169,20 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
   const stripped = stripVetEntries(content.split('\n'))
   const changed = stripped.join('\n') !== content
   if (enable) {
-    const entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
+    // H2：保留现有 vet 条目 config 里 runtimeGuard 之外的键（mode/allowlist/rules/honeypot 等），
+    // 只覆盖 runtimeGuard——避免开启守卫把用户显式配置（如 deny 模式）冲掉。
+    const existingVet = content.split('\n').map(l => l.trim()).find(l => VET_ENTRY_RE.test(l))
+    const existingBlock = existingVet !== undefined
+      ? extractVetConfig(content)
+      : undefined
+    let entry: string
+    if (existingBlock !== undefined && existingBlock.trim() !== '') {
+      // 已有 config 块：把 runtimeGuard 键写进它（保留其余键）
+      const withoutGuard = existingBlock.replace(/^\s*runtimeGuard:\s*\S+$/m, '').trimEnd()
+      entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n${withoutGuard}\n    runtimeGuard: watch\n`
+    } else {
+      entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
+    }
     try {
       writeFileSync(patchPath + '.bak.' + Date.now(), content)
       writeFileSync(patchPath, stripped.join('\n').trimEnd() + '\n' + entry)
@@ -140,8 +195,13 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
     return { ok: true, note: '当前未开启' }
   }
   try {
+    // H1：关闭守卫后若文件只剩注释/空（vet 条目是唯一内容），写 '[]'（DSH boot 契约：
+    // 空文件/纯注释文件解析失败，禁用层要写 []）——否则下次启动 profile 加载抛错。
+    const rest = stripped.join('\n')
+    const hasReal = rest.split('\n').some(l => l.trim() !== '' && !l.trim().startsWith('#'))
+    const finalContent = hasReal ? rest : '[]'
     writeFileSync(patchPath + '.bak.' + Date.now(), content)
-    writeFileSync(patchPath, stripped.join('\n'))
+    writeFileSync(patchPath, finalContent)
   } catch (error) {
     return { ok: false, note: `写入失败：${String(error)}` }
   }
@@ -191,6 +251,7 @@ export function registerStatusRouteOnce(
   config: VetConfig,
   status: VetStatus,
 ): boolean {
+  void config // 状态已改读文件级（M5）；config 保留仅为 API 兼容
   let ws: WebServerLike | undefined
   try {
     ws = ctx.get('webServer')
@@ -203,15 +264,17 @@ export function registerStatusRouteOnce(
       kind: 'prefix',
       path: '/vet',
       handler: (req, res) => {
-        if (req.method === 'POST' && (req.url ?? '').endsWith('/vet/runtime-guard')) {
+        const pathname = (req.url ?? '').split('?')[0]
+        if (req.method === 'POST' && pathname.endsWith('/vet/runtime-guard')) {
           handleToggle(req, res, ctx)
           return
         }
-        if (req.method !== 'GET' || !(req.url ?? '').endsWith('/vet/status.json')) {
+        if (req.method !== 'GET' || !pathname.endsWith('/vet/status.json')) {
           writeJson(res, 404, { ok: false, note: 'not found' })
           return
         }
-        writeJson(res, 200, { ...status.snapshot(), runtimeGuard: config.runtimeGuard, metrics: readHostMetrics() })
+        // M5：运行时配置可能在面板外被改（编辑 cordis.patch.yml），返回文件级实际状态而非内存快照
+        writeJson(res, 200, { ...status.snapshot(), runtimeGuard: readPatchRuntimeGuard(ctx), metrics: readHostMetrics() })
       },
     }),
     'vet: shield status route',

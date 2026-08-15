@@ -6,7 +6,7 @@ import {
 } from '../src/guard/runtime-hooks.js'
 import { readHostMetrics } from '../src/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../src/guard/honeypot.js'
-import { registerStatusRouteOnce, writeRuntimeGuardConfig } from '../src/guard/status-route.js'
+import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../src/guard/status-route.js'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -407,6 +407,43 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     const r = writeRuntimeGuardConfig(mkCtx(dir), true)
     expect(r.ok).toBe(true)
     expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('- id: plugin-vet')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('H1：disable 后文件只剩 vet 条目 → 写 []（DSH boot 契约，空文件会抛错）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: plugin-vet\n  config:\n    runtimeGuard: watch\n')
+
+    const r = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(r.ok).toBe(true)
+    const content = readFileSync(patch, 'utf8')
+    expect(content.trim()).toBe('[]')
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('H2：开启守卫保留已有 config 的非 runtimeGuard 键（deny/allowlist 不被冲掉）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: plugin-vet\n  config:\n    mode: deny\n    allowlist:\n      - foo\n')
+
+    const r = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(r.ok).toBe(true)
+    const content = readFileSync(patch, 'utf8')
+    expect(content).toContain('mode: deny')
+    expect(content).toContain('allowlist')
+    expect(content).toContain('runtimeGuard: watch')
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('M5：readPatchRuntimeGuard 读文件级实际状态（watch/off）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    expect(readPatchRuntimeGuard(mkCtx(dir))).toBe('off')
+    writeFileSync(patch, '- id: plugin-vet\n  config:\n    runtimeGuard: watch\n')
+    expect(readPatchRuntimeGuard(mkCtx(dir))).toBe('watch')
     rmSync(dir, { recursive: true, force: true })
   })
 

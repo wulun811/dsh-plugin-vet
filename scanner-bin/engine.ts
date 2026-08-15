@@ -76,7 +76,11 @@ function scanFiles(request: ScanRequest): ScanResponse {
     return { ok: false, error: 'files 模式需要非空 files 列表' }
   }
   const runtime = request.runtime ?? 'host'
-  const key = cacheKey(request.files.map(file => ({ path: file, content: readOrDefault(file) })), request.rules)
+  const key = cacheKey(
+    request.files.map(file => ({ path: file, content: readOrDefault(file) })),
+    request.rules,
+    { targetKind: request.targetKind, runtime },
+  )
   const cached = readCached(key)
   if (cached !== undefined) return { ok: true, report: cached }
 

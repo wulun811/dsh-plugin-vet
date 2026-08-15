@@ -74,7 +74,21 @@ interface LoaderLike {
  * 安装运行时守卫（T1 + T2）。
  * @returns disposer：恢复钩子并终止哨兵（HMR/卸载安全）。
  */
+/** 全局 guard 实例注册表（D30 修漏 H1）：dsh 配置热重载会重复 apply，
+ * 若前一个实例的 T2 钩子没被卸载就叠加包装。用模块级变量记住上一个 disposer，
+ * 每次 install 前先 dispose 旧实例（恢复 fs/child_process 原始函数 + 终止旧哨兵），再装新的。 */
+let prevGuardDisposer: (() => void) | undefined
+
 export function installRuntimeGuard(ctx: Context, config: VetConfig, status: VetStatus): () => void {
+  // 先卸载上一个实例（热重载/重复 apply 场景：旧钩子/旧哨兵必须清理，否则叠加）
+  if (prevGuardDisposer !== undefined) {
+    try {
+      prevGuardDisposer()
+    } catch {
+      // 旧实例清理失败不阻断新实例
+    }
+    prevGuardDisposer = undefined
+  }
   if (config.runtimeGuard !== 'watch') {
     // 关闭守卫必须真正停掉监控：kill 遗留哨兵（env 注册表，跨重载有效）
     killSidecarFromEnv(ctx.logger)
@@ -224,7 +238,7 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   }
   disposers.push(patchModule(cp as unknown as Record<string, unknown>, 'child_process', hookCfg, sink, rootIndex))
 
-  return () => {
+  const disposer = (): void => {
     for (const dispose of disposers) {
       try {
         dispose()
@@ -233,4 +247,6 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       }
     }
   }
+  prevGuardDisposer = disposer
+  return disposer
 }
