@@ -29,6 +29,7 @@ class FakeCtx {
   tools = { register: vi.fn() }
   logger = { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() }
   invariants?: { register: vi.fn }
+  effect = (fn: () => unknown): (() => void) => { fn(); return () => {} }
 
   on(event: string, handler: Function): void {
     const list = this.handlers.get(event) ?? []

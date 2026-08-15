@@ -21,7 +21,7 @@ export function apply(ctx: Context, config: VetConfig): void {
   ctx.tools.register(createScanPluginTool())
   ctx.tools.register(createAuditPluginTool({ ctx, config }))
   installRuntimeGuard(ctx, config, status)
-  installStatusRoute(ctx, status)
+  installStatusRoute(ctx, config, status)
   installInternalPluginGuard(ctx, config, status)
   installToolExecuteGuard(ctx, config, status)
   installInvariant(ctx, config)

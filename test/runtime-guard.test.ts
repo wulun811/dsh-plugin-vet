@@ -4,6 +4,10 @@ import { analyzeSample, type ProcSample, type WatchConfig } from '../src/guard/r
 import {
   classifyOp, isSensitivePath, patchModule, pluginFromStack, DEFAULT_HOOK_CONFIG,
 } from '../src/guard/runtime-hooks.js'
+import { readHostMetrics } from '../src/guard/metrics.js'
+import { registerStatusRouteOnce, writeRuntimeGuardConfig } from '../src/guard/status-route.js'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512 }
 
@@ -172,5 +176,82 @@ describe('patchModule（包装 + 恢复）', () => {
     // 恢复后调用不再报警
     ;(fake as unknown as { writeFile: (p: string) => void }).writeFile('/etc/x')
     expect(alarms).toEqual(['fs-write'])
+  })
+})
+
+describe('readHostMetrics（宿主实时指标）', () => {
+  it('Linux 下返回完整形状且字段在界内', () => {
+    const m = readHostMetrics()
+    expect(m.rssMb).toBeGreaterThanOrEqual(0)
+    expect(m.cpuPct).toBeGreaterThanOrEqual(0)
+    expect(m.ioReadMb).toBeGreaterThanOrEqual(0)
+    expect(m.ioWriteMb).toBeGreaterThanOrEqual(0)
+    expect(m.childCount).toBeGreaterThanOrEqual(-1)
+    expect(m.fdCount).toBeGreaterThanOrEqual(-1)
+    expect(m.at).toBeGreaterThan(0)
+  })
+})
+
+describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
+  const mkCtx = (baseUrl: string): { baseUrl: string; logger?: undefined } => ({ baseUrl })
+
+  it('enable 追加条目 + 幂等保护 + disable 移除', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: settings\n  config:\n    watch: false\n')
+
+    const ctx = mkCtx(dir)
+    const r1 = writeRuntimeGuardConfig(ctx, true)
+    expect(r1.ok).toBe(true)
+    const content1 = readFileSync(patch, 'utf8')
+    expect(content1).toContain('- id: @jieai/dsh-plugin-vet')
+    expect(content1).toContain('runtimeGuard: watch')
+
+    const r2 = writeRuntimeGuardConfig(ctx, true)
+    expect(r2.ok).toBe(false) // 幂等：已存在
+
+    const r3 = writeRuntimeGuardConfig(ctx, false)
+    expect(r3.ok).toBe(true)
+    const content3 = readFileSync(patch, 'utf8')
+    expect(content3).not.toContain('plugin-vet')
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('未配置时 disable 返回 ok', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    writeFileSync(join(dir, 'cordis.patch.yml'), '- id: settings\n')
+    const r = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(r.ok).toBe(true)
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
+  it('webServer 未就绪 → false，不注册', () => {
+    const routes: unknown[] = []
+    const ctx = {
+      baseUrl: '/tmp',
+      get: () => undefined,
+      effect: (fn: () => unknown) => { fn() },
+    } as never
+    const ok = registerStatusRouteOnce(ctx as never, { runtimeGuard: 'off' } as never, new VetStatus())
+    expect(ok).toBe(false)
+    expect(routes).toHaveLength(0)
+  })
+
+  it('webServer 就绪 → true，注册 /vet 前缀路由', () => {
+    let handler: unknown
+    const routes: unknown[] = []
+    const ws = { register: (r: unknown) => { routes.push(r); return () => {} } }
+    const ctx = {
+      baseUrl: '/tmp',
+      get: (name: string) => (name === 'webServer' ? ws : undefined),
+      effect: (fn: () => unknown) => { fn() },
+    } as never
+    const ok = registerStatusRouteOnce(ctx as never, { runtimeGuard: 'watch' } as never, new VetStatus())
+    expect(ok).toBe(true)
+    expect(routes).toHaveLength(1)
+    expect((routes[0] as { path: string }).path).toBe('/vet')
   })
 })
