@@ -568,10 +568,12 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
               <SectionLabel pal={pal}>{t('metrics.title')}</SectionLabel>
               <GroupLabel pal={pal}>{t('metrics.memory')}</GroupLabel>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
-                <Metric pal={pal} label={t('metric.total')} value={metrics.rssMb + ' MB'} hint={t('metric.totalHint')} />
-                <Metric pal={pal} label={t('metric.heap')} value={metrics.heapUsedMb + ' / ' + metrics.heapTotalMb + ' MB'} hint={t('metric.heapHint')} />
-                <Metric pal={pal} label={t('metric.native')} value={metrics.externalMb + ' MB'} hint={t('metric.nativeHint')} />
-                <Metric pal={pal} label={t('metric.mcp')} value={metrics.mcpRssMb + ' MB · ' + metrics.mcpCount + ' ' + t('metric.mcpUnit')} hint={t('metric.mcpHint')} />
+                <Metric pal={pal} label={t('metric.total')} value={Math.round(metrics.rssMb) + ' MB'} hint={t('metric.totalHint')} />
+                <Metric pal={pal} label={t('metric.heap')} value={Math.round(metrics.heapUsedMb) + ' / ' + Math.round(metrics.heapTotalMb) + ' MB'} hint={t('metric.heapHint')} />
+                <Metric pal={pal} label={t('metric.native')} value={Math.round(metrics.externalMb) + ' MB'} hint={t('metric.nativeHint')} />
+                <Metric pal={pal} label={t('metric.other')} value={Math.round(Math.max(0, metrics.rssMb - metrics.heapUsedMb - metrics.externalMb)) + ' MB'} hint={t('metric.otherHint')} />
+                <Metric pal={pal} label={t('metric.mcp')} value={Math.round(metrics.mcpRssMb) + ' MB · ' + metrics.mcpCount + ' ' + t('metric.mcpUnit')} hint={t('metric.mcpHint')} />
+                <Metric pal={pal} label={t('metric.grand')} value={Math.round(metrics.rssMb + metrics.mcpRssMb) + ' MB'} hint={t('metric.grandHint')} />
               </div>
               <GroupLabel pal={pal}>{t('metrics.runtime')}</GroupLabel>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
