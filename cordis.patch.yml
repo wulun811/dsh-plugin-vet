@@ -1,0 +1,9 @@
+# @jieai/dsh-plugin-vet 挂载补丁（bundle patch，insert 语义，最后写入者胜）
+# config 全静态字面量——verify-cordis-config 要求 metadata 静态（PLAN.md §7）
+- insert:
+    - id: plugin-vet
+      name: '@jieai/dsh-plugin-vet'
+      config:
+        mode: report
+        autoScan: true
+        autoAudit: false

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Plugin trust pipeline for deepseek-harness: deterministic static scan + LLM audit + two-score scorecard.",
   "type": "module",
+  "engines": { "node": ">=22.19" },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
   "exports": {
