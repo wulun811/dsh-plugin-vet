@@ -61,6 +61,7 @@ const LEVEL_TEXT: Record<'green' | 'yellow' | 'red', string> = {
 /** 每类报警的可执行建议（把"报警"变成"下一步做什么"）。 */
 const SUGGEST: Record<string, string> = {
   mem: '检查是否有插件无界分配内存（R9-1），或调高 runtimeMemLimitMb',
+  growth: '检查是否有插件内存泄漏（对象/缓存持续累积）；可重启 DSH 或调高 runtimeGrowthMb 降噪',
   fork: '检查是否有插件循环 spawn 子进程（R9-1 fork 炸弹）',
   fd: '检查是否有插件泄漏文件句柄',
   spawn: '检查该插件为何启动子进程（非官方归因）',

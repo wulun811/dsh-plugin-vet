@@ -16,19 +16,23 @@ export interface ProcSample {
 
 export interface WatchConfig {
   intervalMs: number
-  /** VmRSS 超限 → red（绝对阈值）。 */
+  /** VmRSS 超限 → red（绝对阈值，内存炸弹）。 */
   memLimitMb: number
   /** 单轮子进程增量超限 → red（fork 炸弹）。 */
   forkBurstN: number
   /** fd 数超限 → yellow。 */
   fdLimit: number
+  /** 窗口内 RSS 净增长超限 → yellow（持续膨胀/疑似泄漏），按倍数去重。 */
+  growthMb: number
+  /** 膨胀检测窗口（ms）。 */
+  growthWindowMs: number
 }
 
 export interface WatchAlarm {
   id: string
   severity: 'yellow' | 'red'
   source: 't1'
-  kind: 'mem' | 'fork' | 'fd'
+  kind: 'mem' | 'fork' | 'fd' | 'growth'
   message: string
   target?: string
   at: number
@@ -39,6 +43,8 @@ export const DEFAULT_WATCH_CONFIG: WatchConfig = {
   memLimitMb: 2048,
   forkBurstN: 5,
   fdLimit: 512,
+  growthMb: 256,
+  growthWindowMs: 600_000,
 }
 
 /** 读 /proc/<pid> 快照；不可用（非 Linux / 权限不足）返回 null。 */
@@ -63,6 +69,45 @@ export function readProcSample(pid: number): ProcSample | null {
     return { rssKb: Number(rss[1]), childCount, fdCount, at: Date.now() }
   } catch {
     return null
+  }
+}
+
+/** 一个 RSS 采样点（膨胀检测用）。 */
+export interface RssSample {
+  rssKb: number
+  at: number
+}
+
+/**
+ * 持续膨胀检测（纯函数，D22 补漏）：窗口内 RSS 净增长越过 growthMb 的每个整数倍
+ * 各报一次（按 prevMultiples 去重，不刷屏）；回落归零则重置倍数。
+ * @returns 本轮报警 + 新的已报警倍数。
+ */
+export function detectGrowth(
+  samples: RssSample[],
+  cfg: Pick<WatchConfig, 'growthMb' | 'growthWindowMs'>,
+  prevMultiples: number,
+): { alarms: WatchAlarm[]; multiples: number } {
+  if (samples.length < 2) return { alarms: [], multiples: prevMultiples }
+  const cutoff = samples[samples.length - 1].at - cfg.growthWindowMs
+  const start = samples.find(s => s.at >= cutoff)
+  if (start === undefined) return { alarms: [], multiples: prevMultiples }
+  const growthKb = samples[samples.length - 1].rssKb - start.rssKb
+  if (growthKb <= 0) return { alarms: [], multiples: 0 }
+  const multiples = Math.floor(growthKb / (cfg.growthMb * 1024))
+  if (multiples <= prevMultiples) return { alarms: [], multiples: prevMultiples }
+  const now = samples[samples.length - 1].at
+  return {
+    alarms: [{
+      id: `t1:growth:${cfg.growthMb}`,
+      severity: 'yellow',
+      source: 't1',
+      kind: 'growth',
+      message: `内存持续膨胀 ${Math.round(growthKb / 1024)} MB（窗口 ${cfg.growthWindowMs / 60000} 分钟，疑似泄漏）`,
+      target: `growth=${Math.round(growthKb / 1024)}MB`,
+      at: now,
+    }],
+    multiples,
   }
 }
 
@@ -114,6 +159,8 @@ export function analyzeSample(prev: ProcSample | null, curr: ProcSample, cfg: Wa
 export function sidecarMain(cfg: WatchConfig): void {
   const hostPid = process.ppid
   let prev: ProcSample | null = null
+  let samples: RssSample[] = []
+  let growthMultiples = 0
   const tick = (): void => {
     try {
       readFileSync(`/proc/${hostPid}/stat`, 'utf8')
@@ -126,10 +173,20 @@ export function sidecarMain(cfg: WatchConfig): void {
       process.stdout.write(JSON.stringify(alarm) + '\n')
     }
     prev = curr
+    // 持续膨胀检测：窗口内净增长按倍数报警
+    samples.push({ rssKb: curr.rssKb, at: curr.at })
+    const cutoff = curr.at - cfg.growthWindowMs
+    while (samples.length > 0 && samples[0].at < cutoff) samples.shift()
+    const growth = detectGrowth(samples, cfg, growthMultiples)
+    growthMultiples = growth.multiples
+    for (const alarm of growth.alarms) {
+      process.stdout.write(JSON.stringify(alarm) + '\n')
+    }
   }
   tick()
-  const timer = setInterval(tick, cfg.intervalMs)
-  if (typeof timer.unref === 'function') timer.unref()
+  // 不能 unref：哨兵进程唯一句柄就是定时器，unref 后事件循环清空 → 首轮后进程即退出，
+  // 持续膨胀检测（需要跨多轮采样）永远无法触发（D22 实测发现）
+  setInterval(tick, cfg.intervalMs)
 }
 
 // 子进程入口分发：仅当以 --vet-sidecar 启动时进入哨兵模式（vitest/宿主正常 import 不受影响）。
@@ -139,5 +196,7 @@ if (sidecarIdx !== -1) {
   const memLimitMb = Number(process.argv[sidecarIdx + 2] ?? DEFAULT_WATCH_CONFIG.memLimitMb)
   const forkBurstN = Number(process.argv[sidecarIdx + 3] ?? DEFAULT_WATCH_CONFIG.forkBurstN)
   const fdLimit = Number(process.argv[sidecarIdx + 4] ?? DEFAULT_WATCH_CONFIG.fdLimit)
-  sidecarMain({ intervalMs, memLimitMb, forkBurstN, fdLimit })
+  const growthMb = Number(process.argv[sidecarIdx + 5] ?? DEFAULT_WATCH_CONFIG.growthMb)
+  const growthWindowMs = Number(process.argv[sidecarIdx + 6] ?? DEFAULT_WATCH_CONFIG.growthWindowMs)
+  sidecarMain({ intervalMs, memLimitMb, forkBurstN, fdLimit, growthMb, growthWindowMs })
 }

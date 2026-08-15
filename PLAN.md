@@ -757,7 +757,7 @@ defineTool({
 
 | 层 | 机制 | 能抓 | 代价/局限 |
 |---|---|---|---|
-| T1 哨兵 | 子进程每 intervalMs 读 /proc/<宿主pid>：VmRSS、task children 数、fd 数 | 内存炸弹、fork 炸弹、fd 激增 | 10-30MB + 轮询 CPU；粒度=宿主全局（插件共用进程，无法归因） |
+| T1 哨兵 | 子进程每 intervalMs 读 /proc/<宿主pid>：VmRSS、task children 数、fd 数；窗口内 RSS 净增长按倍数报警（泄漏） | 内存炸弹、**内存持续膨胀（疑似泄漏）**、fork 炸弹、fd 激增 | 10-30MB + 轮询 CPU；粒度=宿主全局（插件共用进程，无法归因） |
 | T2 钩子 | 进程内包装 fs/child_process 导出；危险操作取栈→根目录→插件包名（best-effort 归因） | 敏感路径写入/删除（/etc、~/.ssh、.env…）、第三方 spawn、读密钥文件 | 每次调用包装开销（I/O 密集 <5%，热点 10-20% 级）；旁路：ESM 具名导入快照、worker_threads 独立 realm、原生插件、process.binding |
 | 盾牌 | webServer /vet/status.json + 浏览器 5s 轮询；注册进 conversation.session.header.actions | 用户可见绿/黄/红灯 + 报警计数 | 需要 dsh web 重启激活；client 半区不能编译期依赖私有 @deepseek-ai/dsh-client-*（本地最小类型 + esbuild 打包 react） |
 

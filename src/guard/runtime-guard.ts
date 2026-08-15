@@ -41,6 +41,8 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     String(config.runtimeMemLimitMb),
     String(config.runtimeForkBurstN),
     String(config.runtimeFdLimit),
+    String(config.runtimeGrowthMb),
+    String(config.runtimeGrowthWindowMs),
   ]
   const sidecarPath = fileURLToPath(new URL('../guard/runtime-watch.js', import.meta.url))
   const child = spawn(process.execPath, [sidecarPath, '--vet-sidecar', ...watchArgs], {

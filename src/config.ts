@@ -20,6 +20,9 @@ export interface VetConfig {
   runtimeMemLimitMb: number
   runtimeForkBurstN: number
   runtimeFdLimit: number
+  /** D22 补漏：窗口内 RSS 净增长超限 → yellow（持续膨胀/疑似泄漏）。 */
+  runtimeGrowthMb: number
+  runtimeGrowthWindowMs: number
 }
 
 export const VetConfigSchema: z<VetConfig> = z.object({
@@ -40,6 +43,8 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   runtimeMemLimitMb: z.natural().default(2048),
   runtimeForkBurstN: z.natural().default(5),
   runtimeFdLimit: z.natural().default(512),
+  runtimeGrowthMb: z.natural().default(256),
+  runtimeGrowthWindowMs: z.natural().default(600_000),
 })
 
 /** load 时 fail-loud：provider/model 必须成对。 */

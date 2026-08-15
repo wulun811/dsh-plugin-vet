@@ -42,6 +42,8 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | `runtimeMemLimitMb` | `2048` | T1 内存报警阈值（宿主 VmRSS，超限 → red） |
 | `runtimeForkBurstN` | `5` | T1 子进程突增报警阈值（单轮增量，→ red） |
 | `runtimeFdLimit` | `512` | T1 文件描述符报警阈值（→ yellow） |
+| `runtimeGrowthMb` | `256` | T1 内存持续膨胀报警阈值（窗口内 RSS 净增长，→ yellow 疑似泄漏） |
+| `runtimeGrowthWindowMs` | `600000` | 膨胀检测窗口（默认 10 分钟） |
 
 `@deepseek-ai/*` 官方包默认豁免（内置信任）。
 
@@ -111,7 +113,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 
 | 层 | 机制 | 能抓 | 局限 |
 |---|---|---|---|
-| T1 哨兵 | 子进程轮询宿主 /proc | 内存炸弹（>memLimit）、fork 炸弹（子进程突增）、fd 激增 | 粒度=宿主全局（插件共用进程，无法归因到插件） |
+| T1 哨兵 | 子进程轮询宿主 /proc | 内存炸弹（>memLimit）、**内存持续膨胀（泄漏，窗口净增长按倍数报警）**、fork 炸弹（子进程突增）、fd 激增 | 粒度=宿主全局（插件共用进程，无法归因到插件） |
 | T2 钩子 | 进程内包装 fs/child_process | 敏感路径写入/删除（/etc、~/.ssh、.env…）、读密钥文件、第三方 spawn | 栈归因 best-effort；每次调用包装开销（I/O 密集 <5%，热点 10-20% 级） |
 | 盾牌 | 浏览器 `conversation.session.header.actions` + /vet/status.json | 绿/黄/红灯 + 报警计数 | 需 `dsh web` 重启激活 |
 

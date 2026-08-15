@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { VetStatus } from '../src/guard/status.js'
-import { analyzeSample, type ProcSample, type WatchConfig } from '../src/guard/runtime-watch.js'
+import { analyzeSample, detectGrowth, type ProcSample, type RssSample, type WatchConfig } from '../src/guard/runtime-watch.js'
 import {
   classifyOp, isSensitivePath, patchModule, pluginFromStack, DEFAULT_HOOK_CONFIG,
 } from '../src/guard/runtime-hooks.js'
@@ -9,7 +9,7 @@ import { registerStatusRouteOnce, writeRuntimeGuardConfig } from '../src/guard/s
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512 }
+const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512, growthMb: 256, growthWindowMs: 600_000 }
 
 function sample(partial: Partial<ProcSample>): ProcSample {
   return { rssKb: 512 * 1024, childCount: 0, fdCount: 10, at: Date.now(), ...partial }
@@ -88,6 +88,45 @@ describe('analyzeSample（T1 差分判定）', () => {
 
   it('稳态无报警', () => {
     expect(analyzeSample(sample({}), sample({}), CFG)).toHaveLength(0)
+  })
+})
+
+describe('detectGrowth（持续膨胀/疑似泄漏检测）', () => {
+  const gcfg = { growthMb: 256, growthWindowMs: 600_000 }
+  const s = (rssMb: number, at: number): RssSample => ({ rssKb: rssMb * 1024, at })
+
+  it('窗口内净增长 < 阈值 → 不报警', () => {
+    const samples = [s(200, 0), s(300, 60_000), s(400, 120_000)]
+    const r = detectGrowth(samples, gcfg, 0)
+    expect(r.alarms).toHaveLength(0)
+    expect(r.multiples).toBe(0)
+  })
+
+  it('净增长越过 1 倍 → yellow growth，倍数更新', () => {
+    const samples = [s(200, 0), s(300, 60_000), s(500, 120_000)]
+    const r = detectGrowth(samples, gcfg, 0)
+    expect(r.alarms).toHaveLength(1)
+    expect(r.alarms[0]).toMatchObject({ severity: 'yellow', kind: 'growth' })
+    expect(r.alarms[0].message).toContain('持续膨胀')
+    expect(r.multiples).toBe(1)
+  })
+
+  it('同倍数不重复报警（去重）', () => {
+    const r = detectGrowth([s(200, 0), s(500, 120_000)], gcfg, 1)
+    expect(r.alarms).toHaveLength(0)
+    expect(r.multiples).toBe(1)
+  })
+
+  it('回落归零重置倍数', () => {
+    const r = detectGrowth([s(500, 0), s(200, 120_000)], gcfg, 2)
+    expect(r.alarms).toHaveLength(0)
+    expect(r.multiples).toBe(0)
+  })
+
+  it('窗口外的旧样本不参与（起点取窗口内）', () => {
+    const samples = [s(900, 0), s(300, 700_000), s(600, 720_000)]
+    const r = detectGrowth(samples, gcfg, 0)
+    expect(r.multiples).toBe(1)
   })
 })
 

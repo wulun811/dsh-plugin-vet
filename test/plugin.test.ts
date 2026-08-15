@@ -21,6 +21,8 @@ const cfg = (over: Partial<VetConfig> = {}): VetConfig => ({
   mode: 'report', autoScan: true, autoAudit: false,
   auditMaxTokens: 2048, auditTimeoutMs: 120_000, scannerTimeoutMs: 15_000,
   auditCacheTtlHours: 168, rules: {}, denyOn: 'critical', allowlist: [],
+  runtimeGuard: 'off', runtimeIntervalMs: 2000, runtimeMemLimitMb: 2048,
+  runtimeForkBurstN: 5, runtimeFdLimit: 512, runtimeGrowthMb: 256, runtimeGrowthWindowMs: 600_000,
   ...over,
 })
 
