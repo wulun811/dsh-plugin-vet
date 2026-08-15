@@ -270,13 +270,13 @@ describe('真实 cordis harness 挂载（防启动崩溃回归，B3）', () => {
     const ctx = new Context()
     const registered: string[] = []
     ctx.provide('tools', { register: (t: { name: string }) => { registered.push(t.name) } } as never)
-    ctx.provide('llm', {} as never)
-    ctx.provide('sessions', {} as never)
-    ctx.provide('sessionPersistence', { append: async () => {} } as never)
+    ctx.provide('skills', { register: (reg: { name: string }) => { registered.push(reg.name) } } as never)
     let fiber: PromiseLike<unknown> | undefined
     expect(() => { fiber = ctx.plugin(vetPlugin) as PromiseLike<unknown> }).not.toThrow()
     await fiber
     expect(registered).toContain('scan_plugin')
+    expect(registered).toContain('vet-audit-protocol')
+    expect(registered.some(n => n === 'vet-audit-protocol')).toBe(true)
 
   })
 
