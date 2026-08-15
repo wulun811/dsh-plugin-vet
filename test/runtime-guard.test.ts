@@ -2,13 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { VetStatus } from '../lib/guard/status.js'
 import { analyzeSample, detectGrowth, type ProcSample, type RssSample, type WatchConfig } from '../lib/guard/runtime-watch.js'
 import {
-  classifyOp, isSensitivePath, isTransientTempPath, patchModule, pluginFromStack, DEFAULT_HOOK_CONFIG,
+  classifyOp, isSensitivePath, isTransientTempPath, patchModule, pluginFromStack, setRootIndexing, DEFAULT_HOOK_CONFIG,
 } from '../lib/guard/runtime-hooks.js'
 import { readHostMetrics } from '../lib/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../lib/guard/status-route.js'
 import { decideRespawn, t2AlarmId, installRuntimeGuard } from '../lib/guard/runtime-guard.js'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import fsDefault from 'node:fs'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -375,6 +375,91 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(classifyOp({ module: 'fs', op: 'rename', args: ['/tmp/evil', '/etc/passwd'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
     // 普通 cp 不报
     expect(classifyOp({ module: 'fs', op: 'cpSync', args: ['/tmp/a.txt', '/tmp/b.txt'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+  })
+})
+
+describe('R31：归因阶段 fs 直通（递归护栏）', () => {
+  it('敏感包名（dsh-credentials-local）下归因不再无限递归：恰好一条报警、标志经 finally 清除', () => {
+    const tmp = mkdtempSync(join(process.cwd(), '.tmp-r31-'))
+    // 复刻真实崩溃场景：profile node_modules 里有含敏感词（credentials）的包名
+    const pkgDir = join(tmp, 'node_modules', '@deepseek-ai', 'dsh-credentials-local')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), '{}')
+    mkdirSync(join(tmp, '.ssh'), { recursive: true })
+    const alarms: HookAlarm[] = []
+    // 模拟生产 rootIndex：置标志 → 经被包装的 fs 探测敏感名包路径（会再进包装器）→ finally 清标志
+    const rootIndex = (): Map<string, string> => {
+      setRootIndexing(true)
+      try {
+        // realpathSync 在被包装的 fs 上属性访问调用（ESM 具名导入会绕过钩子）
+        try { fsDefault.realpathSync(join(pkgDir, 'package.json')) } catch { /* 存在与否都要走包装器 */ }
+        return new Map([[pkgDir, '@deepseek-ai/dsh-credentials-local']])
+      } finally {
+        setRootIndexing(false)
+      }
+    }
+    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), rootIndex)
+    try {
+      // 触发真实报警：写敏感路径 → 归因 → rootIndex 内 realpathSync 敏感名包 → 不应递归
+      // （无护栏时此处 RangeError: Maximum call stack size exceeded）
+      fsDefault.writeFileSync(join(tmp, '.ssh', 'probe'), 'x')
+      expect(alarms).toHaveLength(1)
+      expect(alarms[0].kind).toBe('fs-write')
+      // 标志已清：第二次敏感写入照常报警（护栏不吞报警）
+      fsDefault.writeFileSync(join(tmp, '.ssh', 'probe'), 'y')
+      expect(alarms).toHaveLength(2)
+    } finally {
+      dispose()
+      setRootIndexing(false)
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('置位期间敏感操作直通（不报警）；清除后恢复报警', () => {
+    const alarms: HookAlarm[] = []
+    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), () => new Map())
+    try {
+      const p = join(mkdtempSync(join(process.cwd(), '.tmp-r31b-')), '.env')
+      setRootIndexing(true)
+      fsDefault.writeFileSync(p, 'x') // 直通：不报警
+      expect(alarms).toHaveLength(0)
+      setRootIndexing(false)
+      fsDefault.writeFileSync(p, 'y') // 恢复：报警
+      expect(alarms).toHaveLength(1)
+    } finally {
+      dispose()
+      setRootIndexing(false)
+    }
+  })
+
+  it('rootIndex 抛错：标志经 finally 清除，后续报警不受影响', () => {
+    const alarms: HookAlarm[] = []
+    let throwOnce = true
+    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), () => {
+      setRootIndexing(true)
+      try {
+        if (throwOnce) {
+          throwOnce = false
+          throw new Error('rootIndex boom')
+        }
+        return new Map()
+      } finally {
+        setRootIndexing(false)
+      }
+    })
+    try {
+      const p = join(mkdtempSync(join(process.cwd(), '.tmp-r31c-')), '.env')
+      // 归因抛错 → 异常传给调用方，原始写未执行
+      expect(() => fsDefault.writeFileSync(p, 'x')).toThrow('rootIndex boom')
+      expect(alarms).toHaveLength(0)
+      // 标志已清 → 正常报警且调用成功
+      fsDefault.writeFileSync(p, 'y')
+      expect(alarms).toHaveLength(1)
+      expect(readFileSync(p, 'utf8')).toBe('y')
+    } finally {
+      dispose()
+      setRootIndexing(false)
+    }
   })
 })
 

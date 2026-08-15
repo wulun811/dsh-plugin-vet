@@ -59,9 +59,25 @@ const PROC_OPS = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 
 const DESTRUCTIVE_TOKENS = new Set(['rm', 'mv', 'cp', 'dd', 'mkfs', 'mkfs.ext4', 'mkfs.xfs', 'shred', 'truncate'])
 
 /** 关键词边界匹配：须出现在段首或 . _ - 之后（避免 'js-tokens' 这类库名误伤）。 */
+const KEYWORD_REGEX_CACHE = new Map<string, RegExp>()
 function segmentHasKeyword(part: string, keyword: string): boolean {
-  const esc = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp('(?:^|[._-])' + esc + '(?:[._-]|$)', 'i').test(part)
+  let re = KEYWORD_REGEX_CACHE.get(keyword)
+  if (re === undefined) {
+    const esc = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    re = new RegExp('(?:^|[._-])' + esc + '(?:[._-]|$)', 'i')
+    KEYWORD_REGEX_CACHE.set(keyword, re)
+  }
+  return re.test(part)
+}
+
+/**
+ * R31 归因阶段直通标志（模块私有，不挂 globalThis——挂全局等于给恶意插件一把「让 vet 失明」
+ * 的钥匙：置位后所有 T2 报警静默）。rootIndex 归因期间置位，包装器直通原始 fs，断开
+ * 「敏感包名 alarm → 归因 → fs → alarm」无限递归（实测崩溃：V8 栈溢出误报 OOM）。
+ */
+let rootIndexing = false
+export function setRootIndexing(active: boolean): void {
+  rootIndexing = active
 }
 
 /** 工具链临时产物后缀（tsc/vitest/esbuild 等）：*.tmpdir / *.tmp / *.temp / *.swp / *.bak / vim ~。 */
@@ -281,6 +297,10 @@ export function patchModule(
     if (typeof fn !== 'function') continue
     original.set(opName, fn)
     const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+      // R31：rootIndex 归因阶段自身的 fs 探测直通（断开敏感包名 alarm→归因→fs→alarm 无限递归）
+      if (rootIndexing) {
+        return (fn as (...a: unknown[]) => unknown).apply(this, args)
+      }
       const alarm = classifyOp({ module: moduleName, op: opName, args }, cfg)
       if (alarm !== null) {
         const hint = pluginFromStack(new Error().stack ?? undefined, rootIndex())

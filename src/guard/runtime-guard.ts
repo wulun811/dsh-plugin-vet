@@ -11,7 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { VetConfig } from '../config.js'
 import { VetStatus, type VetAlarm } from './status.js'
 import type { WatchAlarm } from './runtime-watch.js'
-import { DEFAULT_HOOK_CONFIG, patchModule, type HookAlarm } from './runtime-hooks.js'
+import { DEFAULT_HOOK_CONFIG, patchModule, setRootIndexing, type HookAlarm } from './runtime-hooks.js'
 import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../invariant.js'
 import { ensureHoneypot } from './honeypot.js'
@@ -249,6 +249,10 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   // ── T2 钩子 ─────────────────────────────────────────────
   const rootIndex = (): Map<string, string> => {
     const map = new Map<string, string>()
+    // R31：归因阶段自身的 fs 探测（resolvePackageRoot 的 realpathSync）会再次进入
+    // T2 包装器；敏感包名（如 dsh-credentials）会再次 alarm → 归因 → 无限递归，
+    // 栈深后任意正则编译触发 V8 栈溢出误报 OOM。置标志让包装器直通，断开递归。
+    setRootIndexing(true)
     let loader: LoaderLike | undefined
     try {
       loader = (ctx as Context & { loader?: LoaderLike }).loader
@@ -261,9 +265,13 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     }
     // vet 被符号链接安装时 realpath 解析不到 profile node_modules → 用 loader 基准（ctx.baseUrl）
     const profileDir = (ctx as { baseUrl?: string }).baseUrl
-    for (const name of names) {
-      const root = resolvePackageRoot(name, profileDir)
-      if (root !== undefined) map.set(root, name)
+    try {
+      for (const name of names) {
+        const root = resolvePackageRoot(name, profileDir)
+        if (root !== undefined) map.set(root, name)
+      }
+    } finally {
+      setRootIndexing(false)
     }
     return map
   }
