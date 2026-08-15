@@ -177,7 +177,7 @@ describe('cache', () => {
     try {
       const files = [{ path: '/a.js', content: 'const x = 1' }]
       const key = cacheKey(files, undefined)
-      const report = { engine: 'static-v1' as const, sourceCount: 1, findings: [], staticScore: 100, verdict: 'clean' as const }
+      const report = { engine: 'static-v3' as const, sourceCount: 1, findings: [], staticScore: 100, verdict: 'clean' as const }
       writeCached(key, report)
       expect(readCached(key)).toEqual(report)
       expect(readCached(cacheKey([{ path: '/a.js', content: 'const x = 2' }], undefined))).toBeUndefined()

@@ -11,7 +11,7 @@ import { installToolExecuteGuard } from '../lib/guards/tool-execute.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
 import { resolvePackageRoot } from '../lib/scanner/package-sources.js'
-import { VetConfigSchema, validateConfig } from '../lib/config.js'
+import { VetConfigSchema } from '../lib/config.js'
 import type { VetConfig } from '../lib/config.js'
 import { explainScore, renderScorecard } from '../lib/report/render.js'
 
@@ -19,9 +19,9 @@ const ESCAPE = 'TextEncoder.constructor("return process")().cwd()'
 const CLEAN = 'module.exports = { ok: true }'
 
 const cfg = (over: Partial<VetConfig> = {}): VetConfig => ({
-  mode: 'report', autoScan: true, autoAudit: false,
-  auditMaxTokens: 2048, auditTimeoutMs: 120_000, scannerTimeoutMs: 15_000,
-  auditCacheTtlHours: 168, rules: {}, denyOn: 'critical', allowlist: [],
+  mode: 'report', autoScan: true,
+  scannerTimeoutMs: 15_000,
+  rules: {}, denyOn: 'critical', allowlist: [],
   runtimeGuard: 'off', runtimeIntervalMs: 2000, runtimeMemLimitMb: 2048,
   runtimeForkBurstN: 5, runtimeFdLimit: 512, runtimeGrowthMb: 256, runtimeGrowthWindowMs: 600_000,
   ...over,
@@ -105,12 +105,6 @@ afterAll(() => {
 })
 
 describe('config', () => {
-  it('provider/model 必须成对（fail-loud）', () => {
-    expect(() => validateConfig(cfg({ provider: 'deepseek' }))).toThrow(/成对/)
-    expect(() => validateConfig(cfg({ model: 'x' }))).toThrow(/成对/)
-    expect(() => validateConfig(cfg({ provider: 'deepseek', model: 'deepseek-chat' }))).not.toThrow()
-  })
-
   it('schemastery schema 可校验并补默认值（callable）', () => {
     const parsed = VetConfigSchema({}) as unknown as VetConfig
     expect(parsed.mode).toBe('report')
@@ -264,7 +258,7 @@ describe('apply 装配', () => {
     const ctx = new FakeCtx()
     ctx.invariants = { register: vi.fn() }
     apply(ctx as never, cfg())
-    expect(ctx.tools.register).toHaveBeenCalledTimes(2)
+    expect(ctx.tools.register).toHaveBeenCalledTimes(1)
     expect(ctx.handlers.has('internal/plugin')).toBe(true)
     expect(ctx.handlers.has('tools/execute')).toBe(true)
     expect(ctx.invariants!.register).toHaveBeenCalledWith(PACKAGE_NAME, expect.any(Function))
@@ -283,7 +277,7 @@ describe('真实 cordis harness 挂载（防启动崩溃回归，B3）', () => {
     expect(() => { fiber = ctx.plugin(vetPlugin) as PromiseLike<unknown> }).not.toThrow()
     await fiber
     expect(registered).toContain('scan_plugin')
-    expect(registered).toContain('audit_plugin')
+
   })
 
   it('installInvariant：invariants 属性访问抛错（cordis proxy 未注入行为）时不崩', () => {

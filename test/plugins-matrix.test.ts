@@ -29,6 +29,8 @@ interface Sample {
   kind?: 'code' | 'files'
   verdict: 'critical' | 'suspicious' | 'clean'
   rules: string[]
+  /** 断言这些规则【不得】命中（负例强校验，防 rules:[] 形同虚设） */
+  noRules?: string[]
 }
 
 // 对抗矩阵：真实攻击形态 × 各规则 × 场景分级（PLAN.md §4.3/§9.1 扩展）
@@ -80,8 +82,10 @@ const SAMPLES: Sample[] = [
   { name: '有条件递归（三元）', code: `function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) }`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
   { name: '非嵌套量词正则', code: `const re = /ab+c/`, language: 'js', runtime: 'host', verdict: 'clean', rules: [] },
   // --- R9-3（info/medium 提示档） ---
-  { name: '循环内 Map.set（medium 不升级）', code: `for (const k of keys) { m.set(k, v) }`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
-  { name: '循环内 +=（info）', code: `for (let i = 0; i < n; i++) { s += item }`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  { name: '循环内 Map.set（medium 不升级）', code: `while (q.length) { m.set(q.pop(), v) }`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  { name: '循环内 +=（info）', code: `while (running) { s += item }`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R9'] },
+  // D30：for-of/for-in 有界遍历（增长受集合大小约束）→ 不报 R9-3
+  { name: 'for-of 遍历固定集合 map.set（有界，不报）', code: `for (const p of plugins) { m.set(p.url, p.desc) }`, language: 'js', runtime: 'host', verdict: 'clean', rules: [], noRules: ['R9'] },
   // --- 破坏性行为（R11，high/medium） ---
   { name: '删除敏感路径 /etc/passwd', code: `fs.unlinkSync('/etc/passwd')`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R11'] },
   { name: '删除敏感路径 /root/secret', code: `fs.rmSync('/root/secret')`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R11'] },
@@ -106,6 +110,9 @@ describe('对抗矩阵：不同插件形态识别', () => {
       expect(r.verdict).toBe(s.verdict)
       for (const rule of s.rules) {
         expect(r.findings.some(f => f.rule === rule)).toBe(true)
+      }
+      for (const rule of s.noRules ?? []) {
+        expect(r.findings.some(f => f.rule === rule)).toBe(false)
       }
     })
   }
@@ -194,8 +201,8 @@ describe('真实 DSH 插件误报测试（官方包，不得误杀 critical）',
 
 describe('guard 端到端：cordis_define 拦截（A4 路径）', () => {
   const cfg = (over: Partial<VetConfig> = {}): VetConfig => ({
-    mode: 'report', autoScan: true, autoAudit: false, auditMaxTokens: 2048, auditTimeoutMs: 120_000,
-    scannerTimeoutMs: 15_000, auditCacheTtlHours: 168, rules: {}, denyOn: 'critical', allowlist: [], ...over,
+    mode: 'report', autoScan: true,
+    scannerTimeoutMs: 15_000, rules: {}, denyOn: 'critical', allowlist: [], ...over,
   })
   it('deny 模式：cordis_define 的 host 半含逃逸 → isError', async () => {
     const handlers = new Map<string, Function[]>()

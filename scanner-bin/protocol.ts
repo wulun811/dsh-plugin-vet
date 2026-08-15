@@ -33,7 +33,7 @@ export interface Finding {
 }
 
 export interface ScanReport {
-  engine: 'static-v1'
+  engine: 'static-v3'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -46,7 +46,7 @@ export interface ScanResponse {
   report?: ScanReport
 }
 
-export const ENGINE_VERSION = 'static-v1' as const
+export const ENGINE_VERSION = 'static-v3' as const
 
 /** The 9 rules of v1. R8 is a meta finding emitted by the engine (scan timeout skip). */
 export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11'] as const

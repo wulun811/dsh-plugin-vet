@@ -6,3 +6,6 @@ lib/
 dsh-src/
 *.rar
 .malong/
+
+# 真实第三方插件测试素材（不入库）
+.real-plugins/

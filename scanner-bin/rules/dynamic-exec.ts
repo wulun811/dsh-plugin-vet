@@ -56,6 +56,12 @@ function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, ad
     return
   }
   if (name === 'require') {
+    // D30：factory 形参 require（window.__ModuleLoader__.load({ factory: (require) => ... })）
+    // 是 DSH 客户端插件加载器注入的同步 require（客户端 bundle 标准写法），非模块级动态加载 → info 不进 verdict
+    if (isFactoryParamRequire(n)) {
+      add(n, 'info', 'likely', 'require()（客户端加载器 factory 形参注入，DSH bundle 标准写法）')
+      return
+    }
     // files: npm 包内 require 是真实 Node 能力触达 → high；code(沙箱): 被 trap 的通道 → medium
     if (ctx.request.kind === 'files') {
       add(n, 'high', 'likely', 'require() 动态模块加载（npm 包内真实能力触达）')
@@ -97,6 +103,25 @@ function isConstructorCapture(n: ts.Node): boolean {
   if (!ts.isPropertyAccessExpression(n) || n.name.text !== 'constructor') return false
   const base = n.expression
   return ts.isArrowFunction(base) || ts.isFunctionExpression(base)
+}
+
+/**
+ * D30：require 是箭头函数/函数的形参（DSH 客户端加载器 `factory: (require) =>` 注入）→
+ * 调用点在形参绑定作用域内，非模块级 require，是客户端 bundle 标准写法，不报 high。
+ */
+function isFactoryParamRequire(call: ts.CallExpression): boolean {
+  const name = 'require'
+  let node: ts.Node | undefined = call
+  while (node !== undefined) {
+    if (ts.isFunctionLike(node)) {
+      for (const p of node.parameters) {
+        if (ts.isIdentifier(p.name) && p.name.text === name) return true
+      }
+      return false // 最近的函数没有 require 形参 → 不是加载器模式
+    }
+    node = node.parent
+  }
+  return false
 }
 
 /** 顶级 `const x = require('y')`（声明初始化即该调用）——仅 code 场景用于降噪。 */

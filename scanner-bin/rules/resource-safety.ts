@@ -238,10 +238,22 @@ function isAnyLoop(n: ts.Node): boolean {
   return ts.isForStatement(n) || ts.isWhileStatement(n) || ts.isDoStatement(n)
     || ts.isForInStatement(n) || ts.isForOfStatement(n)
 }
+/**
+ * R9-3 有界性判定（D30：真实插件误报修复）：for-of/for-in 遍历的是显式集合/对象
+ * （`for (const p of registry.plugins)`），循环次数受集合大小约束，map.set/+=/Promise.all
+ * 的增长上界 = 集合大小，不是「无界增长信号」，不报。只有 while/do/for(;;) 这类潜在
+ * 无界循环（次数不由既有集合决定）才保留信号。
+ */
+function isBoundedIteration(n: ts.Node): boolean {
+  return ts.isForInStatement(n) || ts.isForOfStatement(n)
+}
+
 
 function checkLoopBodyPatterns(sf: ts.SourceFile, found: Finding[]): void {
   walk(sf, n => {
     if (!isAnyLoop(n)) return
+    // D30：for-of/for-in 有界遍历 → 增长受集合大小约束，跳过 R9-3 全部信号
+    if (isBoundedIteration(n)) return
     const body = (n as ts.ForStatement | ts.WhileStatement | ts.DoStatement | ts.ForInStatement | ts.ForOfStatement).statement
     const visit = (node: ts.Node): void => {
       if (ts.isFunctionLike(node)) return

@@ -98,7 +98,6 @@ export function createScanPluginTool(config: { osvCheck?: boolean } = {}): Retur
               findings: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } },
             },
           },
-          llm: { type: 'object', additionalProperties: true },
         },
       },
       render: (_args, value) => [{ type: 'text', text: renderScorecard(value as unknown as PluginScorecard) }],
