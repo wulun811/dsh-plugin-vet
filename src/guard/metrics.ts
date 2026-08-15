@@ -19,6 +19,10 @@ export interface HostMetrics {
   mcpRssMb: number
   /** MCP 服务进程数量。 */
   mcpCount: number
+  /** vet 自己的子进程（T1 哨兵 + 扫描中 scanner-bin）合计内存（MB）。 */
+  vetRssMb: number
+  /** vet 子进程数量。 */
+  vetCount: number
   cpuPct: number
   ioReadMb: number
   ioWriteMb: number
@@ -71,6 +75,10 @@ export function readHostMetrics(): HostMetrics {
   const mcpChildren = children.filter(c => /mcp/i.test(c.cmdline))
   const mcpRssMb = mcpChildren.reduce((sum, c) => sum + c.rssKb, 0) / 1024
   const mcpCount = mcpChildren.length
+  // vet 自身子进程（T1 哨兵 / 扫描中 scanner-bin）：计入总账，避免"看不见的 vet 内存"
+  const vetChildren = children.filter(c => /vet-sidecar|scanner-bin/i.test(c.cmdline))
+  const vetRssMb = vetChildren.reduce((sum, c) => sum + c.rssKb, 0) / 1024
+  const vetCount = vetChildren.length
   let fdCount = -1
   let ioRead = 0
   let ioWrite = 0
@@ -115,6 +123,8 @@ export function readHostMetrics(): HostMetrics {
     externalMb: Math.round(externalMb * 10) / 10,
     mcpRssMb: Math.round(mcpRssMb * 10) / 10,
     mcpCount,
+    vetRssMb: Math.round(vetRssMb * 10) / 10,
+    vetCount,
     cpuPct,
     ioReadMb: Math.round(ioRead / 1048576),
     ioWriteMb: Math.round(ioWrite / 1048576),

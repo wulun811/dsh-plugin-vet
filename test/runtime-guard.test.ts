@@ -284,6 +284,8 @@ describe('readHostMetrics（宿主实时指标）', () => {
     expect(m.ioWriteMb).toBeGreaterThanOrEqual(0)
     expect(m.mcpRssMb).toBeGreaterThanOrEqual(0)
     expect(m.mcpCount).toBeGreaterThanOrEqual(0)
+    expect(m.vetRssMb).toBeGreaterThanOrEqual(0)
+    expect(m.vetCount).toBeGreaterThanOrEqual(0)
     expect(m.childCount).toBeGreaterThanOrEqual(-1)
     expect(m.fdCount).toBeGreaterThanOrEqual(-1)
     expect(m.at).toBeGreaterThan(0)
