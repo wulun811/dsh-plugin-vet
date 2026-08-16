@@ -31,6 +31,29 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 安装即生效链路：pnpm 安装 → `reconcilePlugins` 读 `dsh.bundle` → 下次启动 `loadProfile`
 解析 bundle 挂载插件。默认配置见下方 Config（fail-open：只报告不拦截）。
 
+**本地 tarball 安装**（离线/先验证再发版场景）：
+
+```sh
+dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.0.tgz
+# 或直接解包到 profile 的 node_modules：
+# tar -xzf jieai-dsh-plugin-vet-0.1.0.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
+// 并在 profile 的 cordis.patch.yml 里 insert 挂载条目：
+//   - insert:
+//       - id: plugin-vet
+//         name: '@jieai/dsh-plugin-vet'
+//         config:
+//           mode: report
+//           autoScan: true
+```
+
+> 路径/相对路径/URL 均可（`dsh plugin add` 走 pnpm 的 `file:` 协议兜底，本地 tgz 直接解析）。
+>
+> **首次安装耗时提示**：`dsh plugin add` 首次安装到大型 profile 可能耗时数分钟——
+> 期间 pnpm 会做全量依赖解析、更新 500+ 包的 lockfile 并对整棵依赖树做供应链策略校验
+> （vet 自身只带 2 个运行时依赖，耗时大头是 profile 已有依赖树的解析/校验，不是 vet）。
+> 校验完成后再次安装/更新只需秒级（复用校验结果）。
+
+
 > **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer 范围 `^0.1.0-rc.6`）。安装时 pnpm 可能提示
 > unmet peer dependency——这是预期的：profile 模板 `autoInstallPeers: false`，运行期从 DSH 安装闭包
 > （`$DSH_HOME/profiles/node_modules` 回退层）解析，无需也不能在 profile 里另装一份 cordis 全家桶。

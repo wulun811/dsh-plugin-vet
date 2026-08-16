@@ -5,6 +5,7 @@
 
 ## [Unreleased]
 
+- **安装文档补充（round-5 评估反馈）**：README 安装节新增本地 tarball 安装示例（dsh plugin add 本地 tgz + file: 协议兜底说明 + 手动解包挂载条目示例），并提示首次安装到大型 profile 可能耗时数分钟（pnpm 全量解析/锁文件更新/供应链校验，非 vet 自身开销）。
 - **round-5（外部 DSH 实测评估）修复**：
   - R1 元素访问形态漏检：x["constructor"]("return " + "process") 此前完全绕过（verdict=clean）——恶意代码最常用的形态之一，现点访问/元素访问双形态 + 拼接/模板/const 绑定参数静态求值全部命中 critical。
   - R3 信号处理误报：process.on/once('SIG*') 注册与信号回调内的 process.exit（优雅退出）是 MCP server 等常驻插件的正常操作面，降级 info 不进 verdict；裸 process.exit（错误路径等）保持 critical。
