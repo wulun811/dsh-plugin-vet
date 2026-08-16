@@ -12,6 +12,7 @@
   - P-4 复验：vet 自扫的 2 条 R9 medium 自伤（constructor-chain.js/dynamic-exec.js 的规则正则）在 0.1.2 引擎已不再触发（round-7 组后 ? 修复覆盖），tarball 实测无 R9 medium；static-v6 使任何旧缓存失效。
   - P-5 记录：官方包 @deepseek-ai/* 判 generic 的能力触达面降级是官方信任的一部分（与 internal/plugin 守卫同口径），供应链投毒时静态降级会掩盖 process 访问——已写入 README Known Limitations 8。
   - 全部带回归测试（+5，243 总用例）；ENGINE_VERSION static-v5 → static-v6。
+  - Known Limitations 15（评估反馈）：process.kill 保持 high 是有意设计（副作用成员），MCP/桥接器类插件 kill 自己 spawn 的子进程由 agent 审计人工排除——区分 kill(child.pid) 与任意 pid 需数据流分析，成本高收益低，维持现状。
 
 ## [0.1.2]
 
