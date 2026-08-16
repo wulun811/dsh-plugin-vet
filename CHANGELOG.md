@@ -3,7 +3,7 @@
 所有重要变更记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.1.1]
 
 - **round-6（回归测试第二轮）修复**：
   - R1 new 形态漏检：new (globalThis.constructor.constructor)('return process')() 与 const c = ...; new c(...) 此前完全绕过——补 NewExpression 分支，callee 支持属性/元素访问链与 const 别名绑定追踪，全形态命中 critical。
