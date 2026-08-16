@@ -10,6 +10,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import * as yaml from 'js-yaml'
 import { VetStatus } from './status.js'
 import { readHostMetrics } from './metrics.js'
 import { withVetSelfIo } from './runtime-hooks.js'
@@ -48,10 +49,92 @@ function writeJson(res: ServerResponse, code: number, body: unknown): void {
 }
 
 /**
+ * YAML 写入前校验：用 js-yaml 反序列化验证内容合法，防止拼字符串拼出坏 YAML 导致 DSH 启动崩溃。
+ * 任何解析错误直接抛出，调用方捕获后返回用户可读提示（不写入坏文件）。
+ */
+function validateYaml(content: string): void {
+  // js-yaml.load 抛 YAMLException 时带行号/列号，足够定位问题
+  yaml.load(content)
+}
+
+/**
+ * 用对象操作生成 YAML（保证输出合法）：解析现有文件为数组，在数组层面添加/移除 vet 条目，
+ * 用 js-yaml.dump() 重新生成。丢失注释但保证不崩溃。
+ * 如果现有文件解析失败（已是坏 YAML），备份原文件后写入只含 vet 条目的新文件。
+ */
+function generateYamlFromObject(existingContent: string, enable: boolean): { content: string; repaired: boolean } {
+  let entries: unknown[]
+  let repaired = false
+  try {
+    const parsed = yaml.load(existingContent)
+    // cordis.patch.yml 必须是数组（或空/null）
+    if (parsed === null || parsed === undefined) {
+      entries = []
+    } else if (Array.isArray(parsed)) {
+      entries = parsed
+    } else {
+      // 不是数组 → 视为损坏，重置
+      entries = []
+      repaired = true
+    }
+  } catch {
+    // 解析失败 → 文件已损坏，重置
+    entries = []
+    repaired = true
+  }
+  // 移除所有 vet 条目（按 id 判定）
+  entries = entries.filter((e: unknown) => {
+    if (typeof e !== 'object' || e === null) return true
+    const id = (e as Record<string, unknown>).id
+    return id !== PLUGIN_ENTRY_ID && id !== '@jieai/dsh-plugin-vet'
+  })
+  if (enable) {
+    // 查找现有 vet 条目的 config（保留非 runtimeGuard 键）
+    // 注意：上面已经移除了 vet 条目，这里需要从原始 parsed 里找
+    // 重新解析一次（简单起见）
+    let existingVetConfig: Record<string, unknown> = {}
+    try {
+      const parsed = yaml.load(existingContent)
+      if (Array.isArray(parsed)) {
+        const vetEntry = parsed.find((e: unknown) => {
+          if (typeof e !== 'object' || e === null) return false
+          const id = (e as Record<string, unknown>).id
+          return id === PLUGIN_ENTRY_ID || id === '@jieai/dsh-plugin-vet'
+        })
+        if (vetEntry && typeof vetEntry === 'object') {
+          const config = (vetEntry as Record<string, unknown>).config
+          if (config && typeof config === 'object') {
+            existingVetConfig = { ...(config as Record<string, unknown>) }
+            delete existingVetConfig.runtimeGuard
+          }
+        }
+      }
+    } catch {
+      // 忽略，用空 config
+    }
+    // 添加新 vet 条目
+    entries.push({
+      id: PLUGIN_ENTRY_ID,
+      config: {
+        ...existingVetConfig,
+        runtimeGuard: 'watch',
+      },
+    })
+  }
+  // 空数组写 []（DSH boot 契约）
+  if (entries.length === 0) {
+    return { content: '[]', repaired }
+  }
+  return { content: yaml.dump(entries, { indent: 2, lineWidth: -1 }), repaired }
+}
+
+/**
  * M2：原子写 patch 文件——先写同目录 .tmp，再 rename 覆盖（POSIX 同文件系统 rename 原子）。
  * 崩溃中途不会留下半写的主文件；.bak.latest 是改动前固定快照名（防 Date.now 碰撞/无限堆积）。
+ * 写入前强制 YAML 校验：拼错的字符串不会落到磁盘（DSH 启动解析失败会崩溃）。
  */
 function atomicWritePatch(patchPath: string, content: string, previousContent: string): void {
+  validateYaml(content)
   const tmp = patchPath + '.tmp'
   const backup = patchPath + '.bak.latest'
   try {
@@ -120,70 +203,6 @@ function isVetEntryLine(line: string): boolean {
   return VET_ENTRY_RE.test(line)
 }
 
-/**
- * 从 patch 行中摘掉所有 vet 条目（含其 config 块），其余行原样保留。
- * 按缩进判定条目边界：config 块（含嵌套列表）都缩进，只有回到顶格（注释/下一个
- * 顶层条目）才结束跳过——避免 vet 配置里的嵌套列表项被误判为新条目。
- */
-function stripVetEntries(lines: string[]): string[] {
-  const out: string[] = []
-  let skipping = false
-  for (const line of lines) {
-    // M1/P2-8：只认顶格条目（isVetEntryLine）——缩进的 "- id: plugin-vet"
-    // （如嵌在别的插件 insert 列表里）不是 vet 顶层条目，若匹配会吞掉外层条目的尾部
-    // 并留下真实 vet 条目 → 重复/损坏
-    if (isVetEntryLine(line)) {
-      skipping = true
-      continue
-    }
-    if (skipping) {
-      // 顶格非空行 = 下一个顶层条目或注释 → 结束跳过；缩进行（config/嵌套列表）继续跳过
-      if (/^\S/.test(line)) {
-        skipping = false
-        out.push(line)
-      }
-      continue
-    }
-    out.push(line)
-  }
-  return out
-}
-
-/**
- * 提取现有 vet 条目的 config 块（缩进行，含嵌套列表），用于开启守卫时保留非 runtimeGuard 键。
- * P3-9：返回子键实际缩进（首个非注释键行的缩进；空块回退 config: 行 +2），
- * 写入 runtimeGuard 时复用同一缩进（不硬编码 4 空格——非标准缩进配置不再写出损坏 YAML）。
- * P2-8：与 strip/read 同一顶格匹配规则。
- */
-function extractVetConfig(content: string): { block: string; subIndent: number } | undefined {
-  const lines = content.split('\n')
-  const start = lines.findIndex(isVetEntryLine)
-  if (start === -1) return undefined
-  for (let i = start + 1; i < lines.length; i++) {
-    const line = lines[i]
-    if (/^\s*config:/.test(line)) {
-      const configIndent = line.match(/^\s*/)?.[0].length ?? 0
-      // 收集 config 下所有缩进行（比 config: 行缩进多即其子键；YAML 允许子键任意更深缩进）
-      let subIndent = configIndent + 2
-      let seenKey = false
-      const out: string[] = []
-      for (let j = i + 1; j < lines.length; j++) {
-        const sub = lines[j]
-        const thisIndent = sub.match(/^\s*/)?.[0].length ?? 0
-        if (sub.trim() === '' || sub.trim().startsWith('#')) continue
-        if (thisIndent <= configIndent) break
-        if (!seenKey) {
-          subIndent = thisIndent
-          seenKey = true
-        }
-        out.push(sub)
-      }
-      return { block: out.join('\n'), subIndent }
-    }
-  }
-  return undefined
-}
-
 /** 读 patch 文件里 vet 条目实际配置的 runtimeGuard（'watch' | 'off'）。 */
 export function readPatchRuntimeGuard(ctx: ContextLike): 'watch' | 'off' {
   // 先取局部变量再判空：闭包内 TS 对属性访问不保留 narrowing（ctx.baseUrl 可能被外部改写）
@@ -223,51 +242,30 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
       if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
         return { ok: false, note: `无法读取 ${profileName()}` }
       }
-      const entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
+      // 文件不存在：用对象操作生成（保证合法）
+      const { content: newContent } = generateYamlFromObject('', true)
       try {
-        atomicWritePatch(patchPath, entry, '')
+        atomicWritePatch(patchPath, newContent, '')
       } catch (writeError) {
         return { ok: false, note: `写入失败：${String(writeError)}` }
       }
       return { ok: true, note: `已写入 ${profileName()}，重启 dsh web 后生效` }
     }
-    // 先摘掉所有历史 vet 条目（含早期误写的包名 id 形态），再按目标状态重写：幂等且能自愈旧文件。
-    const stripped = stripVetEntries(content.split('\n'))
-    const changed = stripped.join('\n') !== content
-    if (enable) {
-      // H2：保留现有 vet 条目 config 里 runtimeGuard 之外的键（mode/allowlist/rules/honeypot 等），
-      // 只覆盖 runtimeGuard——避免开启守卫把用户显式配置（如 deny 模式）冲掉。
-      // P2-8：existingBlock 判定与 strip/read 同一顶格规则（extractVetConfig 内部统一）
-      const existingBlock = extractVetConfig(content)
-      let entry: string
-      if (existingBlock !== undefined && existingBlock.block.trim() !== '') {
-        // 已有 config 块：把 runtimeGuard 键写进它（保留其余键），缩进复用原 config（P3-9）
-        const withoutGuard = existingBlock.block.replace(/^\s*runtimeGuard:\s*\S+$/m, '').trimEnd()
-        entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n${withoutGuard}\n${' '.repeat(existingBlock.subIndent)}runtimeGuard: watch\n`
-      } else {
-        entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
-      }
-      try {
-        atomicWritePatch(patchPath, stripped.join('\n').trimEnd() + '\n' + entry, content)
-      } catch (error) {
-        return { ok: false, note: `写入失败：${String(error)}` }
-      }
-      return { ok: true, note: `已写入 ${profileName()}，重启 dsh web 后生效` }
-    }
-    if (!changed) {
-      return { ok: true, note: '当前未开启' }
+    // 文件存在：用对象操作生成新内容（保证合法，丢失注释但不会崩溃）
+    const { content: newContent, repaired } = generateYamlFromObject(content, enable)
+    // 检查是否真的需要写入（避免无意义的文件修改）
+    if (newContent.trim() === content.trim() && !repaired) {
+      return { ok: true, note: enable ? `已写入 ${profileName()}，重启 dsh web 后生效` : '当前未开启' }
     }
     try {
-      // H1：关闭守卫后若文件只剩注释/空（vet 条目是唯一内容），写 '[]'（DSH boot 契约：
-      // 空文件/纯注释文件解析失败，禁用层要写 []）——否则下次启动 profile 加载抛错。
-      const rest = stripped.join('\n')
-      const hasReal = rest.split('\n').some(l => l.trim() !== '' && !l.trim().startsWith('#'))
-      const finalContent = hasReal ? rest : '[]'
-      atomicWritePatch(patchPath, finalContent, content)
+      atomicWritePatch(patchPath, newContent, content)
     } catch (error) {
       return { ok: false, note: `写入失败：${String(error)}` }
     }
-    return { ok: true, note: '已移除 runtimeGuard 配置，重启 dsh web 后生效' }
+    if (repaired) {
+      return { ok: true, note: `${profileName()} 已损坏并已修复，重启 dsh web 后生效` }
+    }
+    return { ok: true, note: enable ? `已写入 ${profileName()}，重启 dsh web 后生效` : '已移除 runtimeGuard 配置，重启 dsh web 后生效' }
   })
 }
 

@@ -215,7 +215,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 ```sh
 npm run build       # scanner-bin + src 编译到 lib/ + client bundle
 npm run typecheck   # tsc --noEmit 全量
-npm test            # 构建 + vitest（249 用例，含覆盖率阈值）
+npm test            # 构建 + vitest（250 用例，含覆盖率阈值）
 npx vitest run --coverage   # 覆盖率报告（lines/functions >= 70%，branches >= 50%）
 ```
 

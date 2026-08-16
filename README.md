@@ -326,7 +326,7 @@ and verdict are shown separately and never merged into a single total.
 ```sh
 npm run build       # scanner-bin + src compiled to lib/ + client bundle
 npm run typecheck   # full tsc --noEmit
-npm test            # build + vitest (249 cases, incl. coverage thresholds)
+npm test            # build + vitest (250 cases, incl. coverage thresholds)
 npx vitest run --coverage   # coverage report (lines/functions >= 70%, branches >= 50%)
 ```
 

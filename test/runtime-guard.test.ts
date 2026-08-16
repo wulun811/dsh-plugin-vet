@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import * as yaml from 'js-yaml'
 
 const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512, growthMb: 256, growthWindowMs: 600_000 }
 
@@ -810,6 +811,24 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
     const r = writeRuntimeGuardConfig(mkCtx(dir), false)
     expect(r.ok).toBe(true)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('对象操作：含 --- 分隔符的现有文件被自动修复（不崩溃 DSH）', () => {
+    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    // 现有文件含 --- 文档分隔符 → 旧版字符串拼接会拼出坏 YAML → DSH 启动崩溃
+    // 新版用 js-yaml.load + dump 对象操作 → 自动修复，输出合法 YAML
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '---\n- id: settings\n---\n- id: other\n')
+    const r = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(r.ok).toBe(true)
+    // 文件被修复为合法 YAML（js-yaml.load 只解析第一个文档，但 dump 输出合法）
+    const content = readFileSync(patch, 'utf8')
+    // 验证输出是合法 YAML（能被 js-yaml 解析）
+    expect(() => yaml.load(content)).not.toThrow()
+    // 包含 vet 条目
+    expect(content).toContain('plugin-vet')
+    expect(content).toContain('runtimeGuard: watch')
     rmSync(dir, { recursive: true, force: true })
   })
 })

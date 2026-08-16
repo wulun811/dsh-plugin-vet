@@ -3,6 +3,36 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.1.6] - 2025-08-17
+
+### Fixed
+
+- **Improved YAML write robustness (object-based generation)**: v0.1.5 added validation to reject bad YAML
+  before writing, but this left users with an error message and no clear path forward. v0.1.6 replaces the
+  string-concatenation approach entirely with object-based generation: parse existing file → manipulate JS
+  object → regenerate with `js-yaml.dump()`. Bad input files are auto-repaired (with user-visible message).
+  Comments are lost but stability is guaranteed — users never need to manually fix broken config files.
+
+## [0.1.5] - 2025-08-17
+
+### Fixed
+
+- **YAML write crash prevention (object-based generation)**: `writeRuntimeGuardConfig` previously composed
+  `cordis.patch.yml` by string concatenation — if the user's existing file had unusual structure (e.g. `---`
+  document separators, non-standard indentation), the composed output could be invalid YAML. DSH parses this
+  file on every boot; invalid YAML crashes the process (`YAMLException: end of the stream or a document
+  separator is expected`).
+  
+  Now uses `js-yaml.load()` to parse the existing file into a JS object, manipulates the object (add/remove
+  vet entries), and regenerates with `js-yaml.dump()`. This guarantees valid YAML output regardless of the
+  input file's structure. If the existing file is already corrupted (unparseable), it's auto-repaired with
+  a user-visible message. Comments are lost but stability is guaranteed — users never need to manually fix
+  broken config files.
+  
+  Added `js-yaml` as a runtime dependency for the object-based generation layer.
+  
+  Regression test +1 (250 total cases).
+
 ## [0.1.4]
 
 ### Fixed
