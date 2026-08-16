@@ -78,11 +78,11 @@ TypeScript compiler API（`createSourceFile`）只读解析 .js/.ts/.mjs/.cjs。
 | R1 | constructor 链逃逸 | critical | certain/likely |
 | R2 | 动态执行（eval/Function/import/require，含遮蔽检查） | high（files）/ medium（code） | certain/likely |
 | R3 | process 直接访问（按 runtime 分级） | critical（host）/ high（sandbox） | certain |
-| R4 | 宿主闭包捕获（agent/TextEncoder…） | critical | certain |
+| R4 | 宿主闭包捕获（agent/TextEncoder…）+ 宿主全局原型污染（round-7） | critical（code）/ high（files 插件）/ info（generic） | certain/likely |
 | R5 | ctx 逃逸尝试信号 | medium | 仅 code |
-| R6 | 字符串粗扫兜底 | info | heuristic |
+| R6 | 字符串粗扫兜底（混淆特征需与动态执行组合证据，round-7） | info | heuristic |
 | R7 | 硬编码密钥（占位符按段排除） | high | likely |
-| R9 | 资源安全（无界分配/死循环/循环内 spawn/ReDoS/递归） | high/medium/info | certain/likely/heuristic |
+| R9 | 资源安全（无界分配/死循环/循环内 spawn/ReDoS/递归；round-7：组后 ? 不判 ReDoS、有界遍历递归不判无终止） | high/medium/info | certain/likely/heuristic |
 | R10 | 供应链（install 钩子/依赖清单） | high/info | likely/heuristic |
 | R11 | 破坏性文件操作（fs 删除/敏感路径读写） | high/medium | likely |
 | R12 | Cordis/DSH bundle 契约（入口文件/bundle patch 声明/name/engines.node） | high/medium/info | certain/likely |
@@ -101,6 +101,7 @@ verdict（唯一权威判定）：`critical ≥ 1 → critical`；否则 `high �
 - `plugin`（DSH 插件包：依赖 @deepseek-ai/cordis 等）：严格——process 访问、危险 require 按逃逸面报。
 - `generic`（普通 npm 包/官方运行时）：能力触达面降级（info/medium），不进 verdict。
 - 自动扫描按插件语义（严格）执行；`scan_plugin` 按 package.json 依赖判定。
+- **包形态降级（round-7）**：engine 读 package.json `bin` 字段注入 RuleContext——应用型包（`appShape`：声明 bin 的 CLI/TUI/server，process 即产品功能）R3 整体降 info；bin 入口文件（`cliFiles`，永远独立运行的 CLI 脚本）R2/R3 按通用代码判定、R9 死循环降 medium。package.json 内容在缓存 hash 内，形态变化自然失效。
 
 ### 4.6 缓存
 
@@ -113,7 +114,8 @@ package.json 有 name 时按**安装版本（仅精确版本）**查询 Google O
 服务端按 affected ranges 过滤；命中追加 high finding 并重算 verdict。网络失败静默降级。
 `osvCheck: false` 可关（默认开启会外发包名，介意隐私可关）。
 核对面 = 插件自身 + 直接依赖（上限 8 个，`@deepseek-ai/*` 官方包跳过）；
-`*`/`>=`/`^` 区间与无版本主包跳过查询（P3-1/P3-3，避免陈旧全量历史误报）。
+`*`/`>=`/`^`/`~` 区间与无版本主包跳过查询（P3-1/P3-3，避免陈旧全量历史误报；
+round-7 修正：range 不再剥前缀当下界精确版查询——下界受影响但实际已装版本已修复时会误报）。
 
 ## 5. 运行时守卫（T1 + T2 + 蜜罐，alarm-only）
 

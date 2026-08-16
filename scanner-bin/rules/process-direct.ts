@@ -103,11 +103,17 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
 
     if (severity === 'critical' && ctx.runtime === 'sandbox') severity = 'high'
 
-    // targetKind='generic'（scan_plugin 扫非 DSH 插件包/信任锚工具包）：process 访问是
-    // 能力触达面而非逃逸判定 → 降级 info，不进 verdict（PLAN §14.3 边界落地）
-    if (ctx.request.targetKind === 'generic' && severity !== 'info') {
+    // 形态降级（round-7，P4a/P4c）：process 访问是能力触达面或产品功能，不是沙箱逃逸 →
+    // info 不进 verdict。三类形态：generic 包（PLAN §14.3 边界落地）、bin 入口文件
+    // （CLI 脚本永远独立运行）、应用型包（bin 声明：TUI/CLI/server 的 process 即产品功能，
+    // 外部实测 dsh-tui 4065 分扣减全部误报）
+    const cliEntry = ctx.cliFiles !== undefined && ctx.cliFiles.has(sf.fileName)
+    if (severity !== 'info' && (ctx.request.targetKind === 'generic' || cliEntry || ctx.appShape === true)) {
+      const why = ctx.request.targetKind === 'generic' ? '非 DSH 插件包'
+        : cliEntry ? 'CLI/bin 入口'
+        : '应用型包（bin 入口，process 即产品功能）'
       severity = 'info'
-      message = '能力触达面（非 DSH 插件包）：' + message
+      message = '能力触达面（' + why + '）：' + message
     }
 
     found.push({

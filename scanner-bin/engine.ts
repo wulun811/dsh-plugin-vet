@@ -36,6 +36,35 @@ function readOrDefault(file: string): string {
 const ENGINE_KILL_MARGIN_MS = 1500
 
 /**
+ * 从 package.json 内容解析包形态（round-7，P4）：bin 声明（字符串或对象）→ 应用型包
+ * （appShape，R3 按能力触达面降级）；bin 值对应文件 → CLI 入口（cliFiles，R2/R3/R9 按
+ * 通用代码判定）。engine 只见文件 basename，bin 路径统一归一为 basename 匹配。
+ */
+function packageShape(content: string): { cliFiles: Set<string>; appShape: boolean } {
+  const cliFiles = new Set<string>()
+  let appShape = false
+  try {
+    const pkg = JSON.parse(content) as Record<string, unknown>
+    const bin = pkg.bin
+    const entries: string[] = []
+    if (typeof bin === 'string' && bin !== '') entries.push(bin)
+    else if (typeof bin === 'object' && bin !== null) {
+      for (const v of Object.values(bin)) {
+        if (typeof v === 'string' && v !== '') entries.push(v)
+      }
+    }
+    appShape = entries.length > 0
+    for (const e of entries) {
+      const name = basename(e.replace(/^\.\//, ''))
+      if (name !== '' && name !== '.') cliFiles.add(name)
+    }
+  } catch {
+    // 坏 package.json：无形态证据（保守不降级）
+  }
+  return { cliFiles, appShape }
+}
+
+/**
  * Total scan budget: min(files × 2s, host-timeout − margin), floor 1s.
  * P2-1：宿主 kill 超时（report min(…,60s) / deny min(…,30s) / 工具 60s）比 files×2s 先到的话，
  * 子进程在 R8-skip 触发前被杀 → ok:false（deny fail-closed 误拦合法大包、report 误报 scan-fail）。
@@ -91,6 +120,9 @@ function scanFiles(request: ScanRequest): ScanResponse {
     return { ok: false, error: 'files 模式需要非空 files 列表' }
   }
   const runtime = request.runtime ?? 'host'
+  // round-7：package.json 内容参与缓存 hash（bin 形态变化 → 缓存自然失效），无需额外 context
+  const pkgJson = request.files.find(f => basename(f) === 'package.json')
+  const shape = pkgJson === undefined ? undefined : packageShape(readOrDefault(pkgJson))
   const key = cacheKey(
     request.files.map(file => ({ path: file, content: readOrDefault(file) })),
     request.rules,
@@ -127,7 +159,12 @@ function scanFiles(request: ScanRequest): ScanResponse {
     if (code === '') continue
     const language = ext === 'ts' ? 'ts' : 'js'
     const sf = parseSource(code, basename(file), language)
-    const fileFindings = executeRules(sf, { request, runtime })
+    const fileFindings = executeRules(sf, {
+      request,
+      runtime,
+      cliFiles: shape?.cliFiles,
+      appShape: shape?.appShape,
+    })
     for (const f of fileFindings) {
       if (f.file === undefined) f.file = basename(file)
       findings.push(f)
@@ -160,8 +197,7 @@ export interface OsvCheckOptions {
 
 /**
  * 取 package.json 的直接依赖（dependencies + peerDependencies），用于 OSV 依赖核对。
- * P3-10：跳过 @deepseek-ai/*（官方包与 vet 同一信任边界，查询是噪声）；
- * 版本去掉 ^/~ 前缀（OSV 按 affected ranges 匹配精确版本）；上限 8 个（有界网络面）。
+ * P3-10：跳过 @deepseek-ai/*（官方包与 vet 同一信任边界，查询是噪声）；上限 8 个（有界网络面）。
  */
 const OSV_MAX_DIRECT_DEPS = 8
 
@@ -195,7 +231,10 @@ function directDepsOf(pkg: Record<string, unknown>): { name: string; version?: s
       if (name.startsWith('@deepseek-ai/')) continue
       if (seen.has(name)) continue
       seen.add(name)
-      out.push({ name, version: typeof ver === 'string' ? ver.replace(/^[~^]/, '') : undefined })
+      // round-7（P2）：range（^/~/*/>= 等）原样保留，不再剥前缀——isExactVersion 只放行
+      // 精确版本，range 一律跳过查询（README 宣称行为）。此前 ^2.4.2 被剥成下界 "2.4.2"
+      // 发给 OSV：下界在受影响区间而上界已修复（实际装到 2.8.x）时会误报已知漏洞。
+      out.push({ name, version: typeof ver === 'string' ? ver : undefined })
     }
     if (out.length >= OSV_MAX_DIRECT_DEPS) break
   }

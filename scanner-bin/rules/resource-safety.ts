@@ -57,9 +57,11 @@ function isRedosPattern(pattern: string): boolean {
       }
     }
     const after = pattern[close + 1]
-    const outerQuant = after === '*' || after === '+' || after === '?'
-    if (!outerQuant) continue
-    // 组内带量词 + 组后量词：典型指数回溯
+    // round-7（P3）：组后 '?'（(https?:)? 类）至多一次额外分支——回溯有界、最坏线性，
+    // 不是 (a+)+ 类指数回溯（指数要求组后 */+ 可重复叠加）。外部实测 dsh-wechat-mp
+    // markdown.js 的 /^(https?:)?\/\//i 常规 URL 探测误报 medium。
+    if (after !== '*' && after !== '+') continue
+    // 组内带量词 + 组后 */+：典型指数回溯
     if (hasInnerQuant) return true
     // 组内 alternation：分支互斥 → 线性不报；分支重叠 → 指数回溯报
     if (hasAlternation(body) && !branchesDisjoint(body)) return true
@@ -299,7 +301,12 @@ function functionName(fn: ts.FunctionDeclaration | ts.FunctionExpression | ts.Ar
   return undefined
 }
 
-/** Rough recursion check: direct self-call with no if/switch/ternary/&&/|| in the body tree. */
+/**
+ * Rough recursion check: direct self-call with no if/switch/ternary/&&/|| in the body tree.
+ * round-7（P4d）：集合遍历形态（for-of/for-in）与带条件循环（while(cond)/do/for(;cond;)）
+ * 是常见终止机制——自调用在其内不做「无终止」粗判（外部实测 dsh-tui 的 zeroLayoutRecursive
+ * yoga-layout 树遍历误报；while(true)/for(;;) 保持判定）。
+ */
 function checkRecursion(sf: ts.SourceFile, found: Finding[]): void {
   walk(sf, n => {
     if (!ts.isFunctionDeclaration(n) && !ts.isFunctionExpression(n) && !ts.isArrowFunction(n)) return
@@ -308,19 +315,30 @@ function checkRecursion(sf: ts.SourceFile, found: Finding[]): void {
     const body = n.body
     if (body === undefined) return
     let selfCall = false
+    let selfCallBounded = false
     let hasCondition = false
-    const visit = (node: ts.Node): void => {
+    const visit = (node: ts.Node, bounded: boolean): void => {
       if (node !== n && ts.isFunctionLike(node)) return
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name) selfCall = true
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name) {
+        selfCall = true
+        if (bounded) selfCallBounded = true
+      }
       if (ts.isIfStatement(node) || ts.isSwitchStatement(node) || ts.isConditionalExpression(node)
         || (ts.isBinaryExpression(node)
           && (node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken || node.operatorToken.kind === ts.SyntaxKind.BarBarToken))) {
         hasCondition = true
       }
-      ts.forEachChild(node, visit)
+      let next = bounded
+      if (!next) {
+        if (ts.isForOfStatement(node) || ts.isForInStatement(node)) next = true
+        else if (ts.isWhileStatement(node) && node.expression.kind !== ts.SyntaxKind.TrueKeyword) next = true
+        else if (ts.isDoStatement(node)) next = true
+        else if (ts.isForStatement(node) && node.condition !== undefined) next = true
+      }
+      ts.forEachChild(node, child => visit(child, next))
     }
-    visit(body)
-    if (selfCall && !hasCondition) {
+    visit(body, false)
+    if (selfCall && !selfCallBounded && !hasCondition) {
       found.push({
         rule: 'R9',
         severity: 'medium',
@@ -446,8 +464,9 @@ export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
     }
     if (!sig.hasBreak && !sig.hasReturn && !sig.hasThrow) {
       // generic（通用/官方代码，含 minified bundle）：死循环是风险提示 → medium；
+      // bin 入口文件（round-7：CLI 脚本独立运行，忙等是应用自身问题）同样 medium；
       // DSH 插件包（plugin）保持 high（插件死循环是 DoS 逃逸面）
-      const generic = _ctx.request.targetKind === 'generic'
+      const generic = _ctx.request.targetKind === 'generic' || _ctx.cliFiles?.has(sf.fileName) === true
       found.push({
         rule: 'R9',
         severity: generic ? 'medium' : 'high',

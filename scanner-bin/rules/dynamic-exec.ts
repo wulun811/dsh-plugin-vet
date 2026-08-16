@@ -7,6 +7,13 @@ import { walk, stringyValue, lineOf, isShadowed } from '../ast.js'
 const ESCAPE_RE = /return\s+\w*(?:globalThis|global|window)?\.?\s*process\b|this\.constructor|process(?:\[|\()/
 const VM_EXEC = new Set(['runInContext', 'runInNewContext'])
 
+/** 剥掉外层括号（round-7，P1）：new (Function)('...') / (eval)('x') 此前被当普通表达式漏检。 */
+function unwrapParens(e: ts.Expression): ts.Expression {
+  let cur = e
+  while (ts.isParenthesizedExpression(cur)) cur = cur.expression
+  return cur
+}
+
 /**
  * R2 dynamic execution: eval / Function / new Function / new AsyncFunction /
  * (async()=>{}).constructor capture / vm.runInContext|runInNewContext /
@@ -17,11 +24,13 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const found: Finding[] = []
 
   const add = (n: ts.Node, severity: Severity, confidence: Confidence, message: string): void => {
-    // targetKind='generic'（非 DSH 插件包/官方运行时）：动态执行是功能（loader/bundle/worker 的
-    // require、new Function 模块包装），降级为能力触达面 medium，不进 verdict
-    if (ctx.request.targetKind === 'generic' && (severity === 'critical' || severity === 'high')) {
+    // targetKind='generic'（非 DSH 插件包/官方运行时）或 bin 入口文件（round-7，P4c：
+    // bin 脚本永远独立运行，spawnSync/require(child_process) 是标准 CLI 写法）：
+    // 动态执行是功能面，降级为能力触达面 medium，不进 verdict
+    const cliEntry = ctx.cliFiles !== undefined && ctx.cliFiles.has(sf.fileName)
+    if ((ctx.request.targetKind === 'generic' || cliEntry) && (severity === 'critical' || severity === 'high')) {
       severity = 'medium'
-      message = '能力触达面（非 DSH 插件包）：' + message
+      message = (ctx.request.targetKind === 'generic' ? '能力触达面（非 DSH 插件包）：' : 'CLI/bin 入口（按通用代码判定）：') + message
     }
     found.push({ rule: 'R2', severity, confidence, message, evidence: n.getText(sf).slice(0, 300), line: lineOf(sf, n) })
   }
@@ -43,7 +52,8 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
 }
 
 function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, add: (n: ts.Node, sev: Severity, conf: Confidence, msg: string) => void): void {
-  const callee = n.expression
+  // round-7：剥括号——(eval)('x') / (Function)('x') 是同一形态
+  const callee = unwrapParens(n.expression)
   const name = ts.isIdentifier(callee) ? callee.text : undefined
   // P2-1：eval/Function 被局部遮蔽（const Function = safe; Function(x)）时不是动态执行——
   // 与 R3/R4 一致做 shadowing 检查，避免误报 high。
@@ -97,7 +107,8 @@ function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, ad
 }
 
 function checkNew(n: ts.NewExpression, sf: ts.SourceFile, add: (n: ts.Node, sev: Severity, conf: Confidence, msg: string) => void): void {
-  const expr = n.expression
+  // round-7（P1）：new (Function)('return process')——括号包裹的 callee 此前漏检（外部实测对抗样本）
+  const expr = unwrapParens(n.expression)
   const name = ts.isIdentifier(expr) ? expr.text : undefined
   // P2-1：new Function/AsyncFunction 同样受局部遮蔽影响（const Function = safe; new Function(x)）
   if (name === 'Function' || name === 'AsyncFunction') {
@@ -121,7 +132,7 @@ function checkNew(n: ts.NewExpression, sf: ts.SourceFile, add: (n: ts.Node, sev:
 
 function isConstructorCapture(n: ts.Node): boolean {
   if (!ts.isPropertyAccessExpression(n) || n.name.text !== 'constructor') return false
-  const base = n.expression
+  const base = unwrapParens(n.expression)
   return ts.isArrowFunction(base) || ts.isFunctionExpression(base)
 }
 

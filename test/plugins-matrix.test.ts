@@ -59,9 +59,10 @@ const SAMPLES: Sample[] = [
   { name: 'ctx.plugin（withheld，真实 apply(ctx) 形态）', code: `export function apply(ctx) { ctx.plugin({}) }`, language: 'js', runtime: 'sandbox', verdict: 'clean', rules: ['R5'] },
   { name: 'ctx.fs（未声明服务，withheld）', code: `export function apply(ctx) { ctx.fs.readFile('x') }`, language: 'js', runtime: 'sandbox', verdict: 'clean', rules: ['R5'] },
   { name: 'ctx.on 白名单动词（合法，不报）', code: `export function apply(ctx) { ctx.on('ready', () => {}) }`, language: 'js', runtime: 'sandbox', verdict: 'clean', rules: [] },
-  // --- 混淆（R6，info 不升级） ---
+  // --- 混淆（R6，info 不升级；round-7 起需组合证据：独立字节处理不报） ---
   { name: '拼接逃逸', code: `const s = "return " + "process"; X.constructor(s)()`, language: 'js', runtime: 'host', verdict: 'critical', rules: ['R1', 'R6'] },
-  { name: 'fromCharCode 混淆', code: `const s = String.fromCharCode(114,101,116,117,114,110)`, language: 'js', runtime: 'host', verdict: 'clean', rules: ['R6'] },
+  { name: 'fromCharCode 独立（终端/编码常规代码，不报）', code: `const s = String.fromCharCode(114,101,116,117,114,110)`, language: 'js', runtime: 'host', verdict: 'clean', rules: [], noRules: ['R6'] },
+  { name: 'fromCharCode + eval（组合证据）', code: `const s = String.fromCharCode(114,101,116,117,114,110); eval(s)`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R2', 'R6'] },
   // --- 资源安全（R9，high/info，不升级 critical，§14.1） ---
   { name: 'new Array 无界分配', code: `const a = new Array(2 ** 31)`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R9'] },
   { name: 'Buffer.alloc 巨大缓冲', code: `Buffer.alloc(1 << 30)`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R9'] },

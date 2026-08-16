@@ -274,14 +274,16 @@ describe('OSV', () => {
     }
   })
 
-  it('P3-10：直接依赖也核对——依赖命中漏洞 → OSV high；官方包跳过、去重', async () => {
+  it('P3-10：直接依赖也核对——精确版本依赖命中漏洞 → OSV high；range 跳过、官方包跳过、去重', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-osv-dep-'))
     try {
       writeFileSync(join(dir, 'package.json'), JSON.stringify({
         name: 'host-app', version: '1.0.0',
         // dep-a 在 dependencies 与 peerDependencies 重复出现（应去重只查一次）；
+        // dep-range 是 range（round-7/P2：README 宣称只查精确版本，range 一律跳过——
+        // 此前 ^ 被剥成下界精确版，下界受影响但已装版本已修复时会误报）；
         // @deepseek-ai/skip 是官方包（P3-10 明确跳过，查询是噪声）
-        dependencies: { 'dep-a': '^1.2.0', '@deepseek-ai/skip': '^2.0.0' },
+        dependencies: { 'dep-a': '1.2.0', 'dep-range': '^2.4.2', '@deepseek-ai/skip': '^2.0.0' },
         peerDependencies: { 'dep-a': '^1.0.0' },
       }))
       const queried: string[] = []
@@ -292,7 +294,7 @@ describe('OSV', () => {
         // 带 version 查询（F15）：dep-a 只报受影响版本的漏洞
         expect(body?.package?.ecosystem).toBe('npm')
         if (name === 'dep-a') {
-          expect(body?.version).toBe('1.2.0') // ^ 前缀被剥掉
+          expect(body?.version).toBe('1.2.0') // 精确版本原样查询
           return { ok: true, status: 200, json: async () => ({ vulns: [{ id: 'GHSA-DEP-1', aliases: ['CVE-2025-1'], summary: 'dep rce' }] }) } as Response
         }
         return { ok: true, status: 200, json: async () => ({ vulns: [] }) } as Response
@@ -303,7 +305,7 @@ describe('OSV', () => {
       expect(f).toBeDefined()
       expect(f!.severity).toBe('high')
       expect(f!.message).toContain('GHSA-DEP-1')
-      // 查询面：host-app 自身 + dep-a 一次（去重）；@deepseek-ai/skip 永不查询
+      // 查询面：host-app 自身 + dep-a 一次（去重）；dep-range（^2.4.2）与 @deepseek-ai/skip 永不查询
       expect(queried.sort()).toEqual(['dep-a', 'host-app'])
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -315,7 +317,7 @@ describe('OSV', () => {
     try {
       writeFileSync(join(dir, 'package.json'), JSON.stringify({
         name: 'no-version-app', // 主包无 version → 不查全量历史（陈旧误报）
-        dependencies: { 'dep-star': '*', 'dep-gte': '>=1.0.0', 'dep-tilde': '~1.2.0', 'dep-ok': '1.0.0' },
+        dependencies: { 'dep-star': '*', 'dep-gte': '>=1.0.0', 'dep-tilde': '~1.2.0', 'dep-caret': '^2.4.2', 'dep-ok': '1.0.0' },
       }))
       const queried: string[] = []
       const fake = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -326,9 +328,10 @@ describe('OSV', () => {
       const res = await scanWithOsv({ kind: 'files', files: [join(dir, 'package.json')], osv: true }, { fetchImpl: fake })
       expect(res.ok).toBe(true)
       expect(res.report!.findings.some(x => x.rule === 'OSV')).toBe(false)
-      // 只查精确版本目标：main（无 version 跳过）；*、>= 跳过；~1.2.0 被 directDepsOf
-      // 归一为 1.2.0（F15 既有的 ^/~ 前缀剥除语义）→ 照常查询；dep-ok 1.0.0 查询
-      expect(queried.sort()).toEqual(['dep-ok', 'dep-tilde'].sort())
+      // 只查精确版本目标：main（无 version 跳过）；*、>=、~1.2.0、^2.4.2 全部跳过
+      // （round-7/P2：range 不再剥前缀当精确版本——README 宣称行为；此前 ^/~ 剥成下界
+      // 精确版会误报「下界受影响但已装版本已修复」）；dep-ok 1.0.0 照常查询
+      expect(queried.sort()).toEqual(['dep-ok'])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

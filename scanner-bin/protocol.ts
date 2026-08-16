@@ -36,7 +36,7 @@ export interface Finding {
 }
 
 export interface ScanReport {
-  engine: 'static-v4'
+  engine: 'static-v5'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -49,8 +49,8 @@ export interface ScanResponse {
   report?: ScanReport
 }
 
-/** 规则/引擎实现变更必须递增此版本——cache key 与缓存有效性校验都依赖它（round-6：R1 new 形态、R9 ReDoS 判定变更后未递增导致旧缓存中毒）。 */
-export const ENGINE_VERSION = 'static-v4' as const
+/** 规则/引擎实现变更必须递增此版本——cache key 与缓存有效性校验都依赖它（round-6：R1 new 形态、R9 ReDoS 判定变更后未递增导致旧缓存中毒；round-7：R2 括号形态/R4 原型污染/R6 组合证据/R9 判定/R3 形态降级）。 */
+export const ENGINE_VERSION = 'static-v5' as const
 
 /** The 9 rules of v1. R8 is a meta finding emitted by the engine (scan timeout skip). */
 export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12'] as const
@@ -59,6 +59,12 @@ export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 
 export interface RuleContext {
   request: ScanRequest
   runtime: Runtime
+  /** 包内 bin 入口文件的 basename 集合（engine 从 package.json bin 字段解析，round-7）——
+   * bin 脚本永远独立运行（CLI），按通用代码判定：R2/R3 降级能力触达面、R9 死循环降 medium。 */
+  cliFiles?: Set<string>
+  /** 应用型包（package.json 声明非空 bin，round-7）：process 访问是产品功能（CLI/TUI/server），
+   * R3 降级能力触达面 info——与 generic 降级同构的「应用型」降级（外部实测：dsh-tui/dsh-bridges）。 */
+  appShape?: boolean
 }
 
 export const SEVERITIES: readonly Severity[] = ['critical', 'high', 'medium', 'info']

@@ -3,7 +3,21 @@
 所有重要变更记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.1.2]
+
+- **round-7（外部第二轮实测，4 项反馈全部通用化修复）**：
+  - R2 `new (Function)('...')` 括号形态漏检：callee 括号包裹（含 `(async()=>{}).constructor` 的括号 base）此前被当普通表达式完全绕过（对抗样本 verdict=clean）——checkCall/checkNew/isConstructorCapture 统一剥括号（unwrapParens），`new (Function)('return process')` 等命中 critical。
+  - R4 宿主全局原型污染：`TextEncoder.prototype.encode = ...` 等对宿主内置（Object/Array/String/Function/TextEncoder/URL/Buffer 等 40+）prototype 成员的覆盖赋值此前不检——新增赋值/`Object.defineProperty`/整体替换三形态检测，code → critical / files 插件 → high / generic（polyfill 可能）→ info。
+  - P2 OSV range 误报：directDepsOf 在 isExactVersion 之前剥掉 `^`/`~`，`^2.4.2` 被当下界精确版查询——下界受影响而上界已修复（实际装到 2.8.x）时误报已知漏洞、抬升 verdict。现 range 一律跳过查询（与 README 宣称一致），精确版本原样查询。
+  - R9 `(https?:)?` 类误报：组后 `?`（至多一次额外分支）是线性回溯，不是 `(a+)+` 类指数回溯——组后仅 `*`/`+` 才判 ReDoS（dsh-wechat-mp markdown.js 实测修复）。
+  - R3 应用型降级：package.json 声明 bin 的包（CLI/TUI/server，process 即产品功能）process 访问整体降级能力触达面 info；bin 入口文件（永远独立运行的 CLI 脚本）按通用代码判定（R2/R3 降级、R9 死循环降 medium）——dsh-tui 4065 分、dsh-bridges 2100 分扣减全为误报。
+  - R6 混淆组合证据：charCodeAt/fromCharCode/atob 独立出现是终端协议解析/字节处理常规代码（dsh-tui 42 条全误报）——仅当同文件存在动态执行信号（eval/new Function/vm 等）才输出混淆提示。
+  - R9 有界遍历递归：for-of/for-in 集合遍历与带条件循环（while(cond)/do/for(;cond;)）内的自调用不做「递归无终止」粗判（zeroLayoutRecursive 树遍历误报修复）；while(true)/for(;;) 保持判定。
+  - 引擎包形态解析：engine 读 package.json bin 字段产出 cliFiles（bin 入口 basename 集合）+ appShape（应用型），注入 RuleContext；package.json 内容已在缓存 hash 内，形态变化自然失效。
+  - 全部带回归测试（+13，238 总用例）；ENGINE_VERSION static-v4 → static-v5（规则变更必须递增）。
+
 ## [0.1.1]
+
 
 - **round-6（回归测试第二轮）修复**：
   - R1 new 形态漏检：new (globalThis.constructor.constructor)('return process')() 与 const c = ...; new c(...) 此前完全绕过——补 NewExpression 分支，callee 支持属性/元素访问链与 const 别名绑定追踪，全形态命中 critical。
