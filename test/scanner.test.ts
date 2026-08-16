@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 import { scan, scanWithOsv } from '../lib/scanner-bin/engine.js'
 import { queryOsv } from '../lib/scanner-bin/osv.js'
 import { computeScore, computeVerdict } from '../lib/scanner-bin/score.js'
+import { ENGINE_VERSION } from '../lib/scanner-bin/protocol.js'
 import { cacheKey, readCached, writeCached } from '../lib/scanner-bin/cache.js'
 import type { Finding, ScanRequest } from '../lib/scanner-bin/protocol.js'
 
@@ -177,9 +178,12 @@ describe('cache', () => {
     try {
       const files = [{ path: '/a.js', content: 'const x = 1' }]
       const key = cacheKey(files, undefined)
-      const report = { engine: 'static-v3' as const, sourceCount: 1, findings: [], staticScore: 100, verdict: 'clean' as const }
+      const report = { engine: ENGINE_VERSION, sourceCount: 1, findings: [], staticScore: 100, verdict: 'clean' as const }
       writeCached(key, report)
       expect(readCached(key)).toEqual(report)
+      // round-6：旧版本引擎的缓存必须失效（规则变更未递增 ENGINE_VERSION 会缓存中毒——实测发现）
+      writeCached(key, { ...report, engine: 'static-v0' as const })
+      expect(readCached(key)).toBeUndefined()
       expect(readCached(cacheKey([{ path: '/a.js', content: 'const x = 2' }], undefined))).toBeUndefined()
     } finally {
       delete process.env.DSH_PLUGIN_VET_CACHE_DIR

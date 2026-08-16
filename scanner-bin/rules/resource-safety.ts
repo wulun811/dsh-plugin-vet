@@ -20,7 +20,13 @@ import { walk, numberyValue, stringyValue, lineOf } from '../ast.js'
 const ALLOC_LIMIT = 100_000_000
 const SPAWN_CALLS = new Set(['spawn', 'exec', 'execFile', 'fork'])
 const SPAWN_NEWS = new Set(['Worker'])
-/** (a+)+ style ReDoS detection — see isRedosPattern() below (round-5 rewrite). */
+/**
+ * (a+)+ style ReDoS detection. round-5/6 重写（外部实测驱动）：
+ * - 旧正则把 (?:x)? 组首 '?' 修饰符误当量词 → 所有单可选组误报（线性复杂度）
+ * - 真指数回溯 = 组内顶层带量词（组可匹配变长）+ 组后紧跟量词：(a+)+、(?:\\d+)+
+ * - round-6：alternation 分支互斥（((?:[^']|'')*)）→ 线性，不报；
+ *   分支重叠（(a|aa)+：aa 以 a 开头）→ 指数回溯，报
+ */
 function isRedosPattern(pattern: string): boolean {
   const findClose = (open: number): number => {
     let depth = 0
@@ -51,8 +57,92 @@ function isRedosPattern(pattern: string): boolean {
       }
     }
     const after = pattern[close + 1]
-    if (hasInnerQuant && (after === '*' || after === '+' || after === '?')) return true
+    const outerQuant = after === '*' || after === '+' || after === '?'
+    if (!outerQuant) continue
+    // 组内带量词 + 组后量词：典型指数回溯
+    if (hasInnerQuant) return true
+    // 组内 alternation：分支互斥 → 线性不报；分支重叠 → 指数回溯报
+    if (hasAlternation(body) && !branchesDisjoint(body)) return true
   }
+  return false
+}
+/** 组内顶层是否存在 alternation 分支（跳过嵌套括号区）。 */
+function hasAlternation(body: string): boolean {
+  let depth = 0
+  for (let j = 0; j < body.length; j++) {
+    const ch = body[j]
+    if (ch === '(') depth++
+    else if (ch === ')') depth--
+    else if (ch === '|' && depth === 0) return true
+  }
+  return false
+}
+/**
+ * alternation 顶层分支两两互斥判定：每个分支取首字符集合（近似），
+ * 集合不相交 → 互斥（线性）。首字符支持：字面量、. \\d \\w \\s、
+ * 字符类 [...]（^ 否定类无法近似 → 保守视为不互斥）。无法分析 → 不互斥（保守报）。
+ */
+function branchesDisjoint(body: string): boolean {
+  const branches: string[] = []
+  let depth = 0
+  let cur = ''
+  for (let j = 0; j < body.length; j++) {
+    const ch = body[j]
+    if (ch === '(') depth++
+    else if (ch === ')') depth--
+    if (ch === '|' && depth === 0) { branches.push(cur); cur = ''; continue }
+    cur += ch
+  }
+  branches.push(cur)
+  if (branches.length < 2) return false
+  const charSets = branches.map(firstCharSet)
+  for (let i = 0; i < charSets.length; i++) {
+    for (let j = i + 1; j < charSets.length; j++) {
+      if (charSets[i] === null || charSets[j] === null) return false
+      if (setsIntersect(charSets[i]!, charSets[j]!)) return false
+    }
+  }
+  return true
+}
+/** 分支首 token 的字符集合近似：null = 无法分析（保守不互斥）。 */
+function firstCharSet(branch: string): Set<string> | null {
+  const b = branch.trimStart()
+  if (b === '') return new Set()
+  const c = b[0]
+  if (c === '\\') {
+    const esc = b[1]
+    if (esc === 'd') return new Set(['0-9'])
+    if (esc === 'w') return new Set(['0-9', 'A-Z', 'a-z', '_'])
+    if (esc === 's') return new Set([' ', 't', 'n', 'r', 'f'])
+    if (esc === 'D' || esc === 'W' || esc === 'S') return null
+    return new Set([esc])
+  }
+  if (c === '.') return null
+  if (c === '[') {
+    const close = b.indexOf(']')
+    if (close === -1) return null
+    const cls = b.slice(1, close)
+    if (cls.startsWith('^')) {
+      const neg = cls.slice(1)
+      // 单字符否定类 [^x]：与字面量 y 相交当且仅当 y === x（round-6：((?:[^']|'')*) 分支互斥）
+      if (neg.length === 1) return { negated: true, char: neg } as unknown as Set<string>
+      return null // 多字符否定类无法近似，保守
+    }
+    return new Set(cls.split(''))
+  }
+  if (c === '(' || c === '?') return null
+  return new Set([c])
+}
+function setsIntersect(a: Set<string>, b: Set<string>): boolean {
+  const an = (a as unknown as { negated?: boolean; char?: string }).negated
+  const bn = (b as unknown as { negated?: boolean; char?: string }).negated
+  if (an === true) {
+    const ch = (a as unknown as { char: string }).char
+    // [^x] 与集合 S 相交：否定类覆盖几乎所有字符，仅当 S 恰为 {x} 时才不相交
+    return !(b.size === 1 && b.has(ch))
+  }
+  if (bn === true) return setsIntersect(b, a)
+  for (const x of a) if (b.has(x)) return true
   return false
 }
 

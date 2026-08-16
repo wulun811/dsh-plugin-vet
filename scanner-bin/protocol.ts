@@ -36,7 +36,7 @@ export interface Finding {
 }
 
 export interface ScanReport {
-  engine: 'static-v3'
+  engine: 'static-v4'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -49,7 +49,8 @@ export interface ScanResponse {
   report?: ScanReport
 }
 
-export const ENGINE_VERSION = 'static-v3' as const
+/** 规则/引擎实现变更必须递增此版本——cache key 与缓存有效性校验都依赖它（round-6：R1 new 形态、R9 ReDoS 判定变更后未递增导致旧缓存中毒）。 */
+export const ENGINE_VERSION = 'static-v4' as const
 
 /** The 9 rules of v1. R8 is a meta finding emitted by the engine (scan timeout skip). */
 export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12'] as const

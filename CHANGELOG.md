@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+- **round-6（回归测试第二轮）修复**：
+  - R1 new 形态漏检：new (globalThis.constructor.constructor)('return process')() 与 const c = ...; new c(...) 此前完全绕过——补 NewExpression 分支，callee 支持属性/元素访问链与 const 别名绑定追踪，全形态命中 critical。
+  - 缓存版本中毒：规则变更未递增 ENGINE_VERSION（static-v3 不变）→ 旧磁盘缓存被新引擎命中，返回旧规则结果（实测 247 条旧结果）；升至 static-v4，缓存 key 与 validReport 校验同步失效，加回归测试（旧版本缓存必须失效）。
+  - R9 ReDoS alternation 分支互斥判定：((?:[^']|'')*) 分支首字符不相交（非引号 vs 双引号）→ 线性不报；(a|aa)+ 分支重叠 → 仍报。
 - **安装文档补充（round-5 评估反馈）**：README 安装节新增本地 tarball 安装示例（dsh plugin add 本地 tgz + file: 协议兜底说明 + 手动解包挂载条目示例），并提示首次安装到大型 profile 可能耗时数分钟（pnpm 全量解析/锁文件更新/供应链校验，非 vet 自身开销）。
 - **round-5（外部 DSH 实测评估）修复**：
   - R1 元素访问形态漏检：x["constructor"]("return " + "process") 此前完全绕过（verdict=clean）——恶意代码最常用的形态之一，现点访问/元素访问双形态 + 拼接/模板/const 绑定参数静态求值全部命中 critical。
