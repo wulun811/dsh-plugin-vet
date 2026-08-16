@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { scan, scanWithOsv } from '../lib/scanner-bin/engine.js'
 import { queryOsv } from '../lib/scanner-bin/osv.js'
@@ -21,7 +21,7 @@ function findingOf(report: { findings: Finding[] }, rule: string, severity?: str
 }
 
 // ---------------------------------------------------------------------------
-// fixture matrix (PLAN.md §9.1)
+// fixture matrix
 // ---------------------------------------------------------------------------
 
 describe('fixture matrix', () => {
@@ -98,7 +98,7 @@ describe('fixture matrix', () => {
 })
 
 // ---------------------------------------------------------------------------
-// scoring & verdict boundaries (PLAN.md §4.4)
+// scoring & verdict boundaries
 // ---------------------------------------------------------------------------
 
 describe('score & verdict', () => {
@@ -167,7 +167,7 @@ describe('protocol', () => {
 })
 
 // ---------------------------------------------------------------------------
-// cache (PLAN.md §4.5)
+// cache
 // ---------------------------------------------------------------------------
 
 describe('cache', () => {
@@ -204,7 +204,7 @@ describe('cache', () => {
 })
 
 // ---------------------------------------------------------------------------
-// OSV 已知漏洞核对（PLAN.md §14.6）
+// OSV 已知漏洞核对
 // ---------------------------------------------------------------------------
 
 describe('OSV', () => {
@@ -268,6 +268,172 @@ describe('OSV', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('P3-10：直接依赖也核对——依赖命中漏洞 → OSV high；官方包跳过、去重', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-osv-dep-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({
+        name: 'host-app', version: '1.0.0',
+        // dep-a 在 dependencies 与 peerDependencies 重复出现（应去重只查一次）；
+        // @deepseek-ai/skip 是官方包（P3-10 明确跳过，查询是噪声）
+        dependencies: { 'dep-a': '^1.2.0', '@deepseek-ai/skip': '^2.0.0' },
+        peerDependencies: { 'dep-a': '^1.0.0' },
+      }))
+      const queried: string[] = []
+      const fake = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        const name = body?.package?.name as string
+        queried.push(name)
+        // 带 version 查询（F15）：dep-a 只报受影响版本的漏洞
+        expect(body?.package?.ecosystem).toBe('npm')
+        if (name === 'dep-a') {
+          expect(body?.version).toBe('1.2.0') // ^ 前缀被剥掉
+          return { ok: true, status: 200, json: async () => ({ vulns: [{ id: 'GHSA-DEP-1', aliases: ['CVE-2025-1'], summary: 'dep rce' }] }) } as Response
+        }
+        return { ok: true, status: 200, json: async () => ({ vulns: [] }) } as Response
+      }) as unknown as typeof fetch
+      const res = await scanWithOsv({ kind: 'files', files: [join(dir, 'package.json')], osv: true }, { fetchImpl: fake })
+      expect(res.ok).toBe(true)
+      const f = res.report!.findings.find(x => x.rule === 'OSV')
+      expect(f).toBeDefined()
+      expect(f!.severity).toBe('high')
+      expect(f!.message).toContain('GHSA-DEP-1')
+      // 查询面：host-app 自身 + dep-a 一次（去重）；@deepseek-ai/skip 永不查询
+      expect(queried.sort()).toEqual(['dep-a', 'host-app'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('P3-1/P3-3：非精确版本不查询——range 依赖与无 version 主包跳过', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-osv-v-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({
+        name: 'no-version-app', // 主包无 version → 不查全量历史（陈旧误报）
+        dependencies: { 'dep-star': '*', 'dep-gte': '>=1.0.0', 'dep-tilde': '~1.2.0', 'dep-ok': '1.0.0' },
+      }))
+      const queried: string[] = []
+      const fake = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        queried.push(body?.package?.name as string)
+        return { ok: true, status: 200, json: async () => ({ vulns: [] }) } as Response
+      }) as unknown as typeof fetch
+      const res = await scanWithOsv({ kind: 'files', files: [join(dir, 'package.json')], osv: true }, { fetchImpl: fake })
+      expect(res.ok).toBe(true)
+      expect(res.report!.findings.some(x => x.rule === 'OSV')).toBe(false)
+      // 只查精确版本目标：main（无 version 跳过）；*、>= 跳过；~1.2.0 被 directDepsOf
+      // 归一为 1.2.0（F15 既有的 ^/~ 前缀剥除语义）→ 照常查询；dep-ok 1.0.0 查询
+      expect(queried.sort()).toEqual(['dep-ok', 'dep-tilde'].sort())
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('R12：Cordis/DSH bundle 契约（P-2 计划项）', () => {
+  const scanPkg = (files: Record<string, string>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-r12-'))
+    try {
+      for (const [name, content] of Object.entries(files)) {
+        const p = join(dir, name)
+        mkdirSync(dirname(p), { recursive: true })
+        writeFileSync(p, content)
+      }
+      return scan({ kind: 'files', files: [join(dir, 'package.json')].filter(() => true), targetKind: 'plugin' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  it('dsh.bundle.patch 声明缺失 → high（挂载必失败）', () => {
+    const res = scanPkg({
+      'package.json': JSON.stringify({ name: 'x', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+      'index.js': 'export {}',
+    })
+    expect(res.ok).toBe(true)
+    expect(res.report!.verdict).toBe('suspicious')
+    const r12 = res.report!.findings.find(f => f.rule === 'R12')
+    expect(r12).toBeDefined()
+    expect(r12!.severity).toBe('high')
+  })
+  it('入口文件缺失 → high；patch 存在 + 入口完整 + name 齐 → 无 R12 high', () => {
+    const res = scanPkg({
+      'package.json': JSON.stringify({ name: 'ok-pkg', main: './lib/index.js' }),
+      'cordis.patch.yml': '- id: ok-pkg',
+      'lib/index.js': 'export const name = "ok-pkg"',
+    })
+    expect(res.ok).toBe(true)
+    const r12 = res.report!.findings.filter(f => f.rule === 'R12')
+    // dsh 声明（patch）未声明 → 无 patch finding；main 存在 → 无入口 high
+    expect(r12).toHaveLength(0)
+  })
+  it('无任何入口（无 main/exports/index.js）→ medium 不进 verdict', () => {
+    const res = scanPkg({
+      'package.json': JSON.stringify({ name: 'x', dependencies: { '@deepseek-ai/dsh-tools': '^1' } }),
+      'a.ts': 'export {}',
+    })
+    expect(res.ok).toBe(true)
+    expect(res.report!.verdict).toBe('clean')
+    const r12 = res.report!.findings.find(f => f.rule === 'R12')
+    expect(r12).toBeDefined()
+    expect(r12!.severity).toBe('medium')
+  })
+  it('非插件意图包（无 dsh 依赖/声明）→ R12 不判', () => {
+    const res = scanPkg({
+      'package.json': JSON.stringify({ name: 'tool', main: 'index.js' }),
+      'index.js': 'module.exports = {}',
+    })
+    expect(res.report!.findings.some(f => f.rule === 'R12')).toBe(false)
+  })
+  it('engines.node 低于 22 → info；>=22 不报', () => {
+    // 包需有插件意图（@deepseek-ai 依赖）R12 才判
+    const mk = (engines: unknown) => JSON.stringify({ name: 'x', main: 'index.js', dependencies: { '@deepseek-ai/cordis': '^4' }, engines: { node: engines } })
+    const low = scanPkg({ 'package.json': mk('>=21.0.0'), 'index.js': 'export {}' })
+    const ok = scanPkg({ 'package.json': mk('>=22.19'), 'index.js': 'export {}' })
+    const lowF = low.report!.findings.find(f => f.rule === 'R12' && f.severity === 'info')
+    expect(lowF).toBeDefined()
+    expect(ok.report!.findings.find(f => f.rule === 'R12' && f.severity === 'info')).toBeUndefined()
+  })
+  it('engines.node 单数字主版本（2-9）→ 也提示 info（round-4 回归）', () => {
+    const mk = (engines: unknown) => JSON.stringify({ name: 'x', main: 'index.js', dependencies: { '@deepseek-ai/cordis': '^4' }, engines: { node: engines } })
+    for (const old of ['4.0.0', '8.17.0', '2.0.0', '6.0.0', '9.0.0', '3.x', '5.5.0', 'v18.0.0', '>=16.0.0']) {
+      const res = scanPkg({ 'package.json': mk(old), 'index.js': 'export {}' })
+      const f = res.report!.findings.find(f => f.rule === 'R12' && f.severity === 'info')
+      expect(f, 'engines.node=' + old + ' 应提示 info').toBeDefined()
+    }
+    for (const ok of ['>=22.19', '22', '23.0.0', '*']) {
+      const res = scanPkg({ 'package.json': mk(ok), 'index.js': 'export {}' })
+      const f = res.report!.findings.find(f => f.rule === 'R12' && f.severity === 'info')
+      expect(f, 'engines.node=' + ok + ' 不应提示 info').toBeUndefined()
+    }
+  })
+  it('exports 字符串形态（"exports": "./index.js"）→ 识别为入口（round-4 回归）', () => {
+    const res = scanPkg({
+      'package.json': JSON.stringify({ name: 'x', exports: './lib/index.js', dependencies: { '@deepseek-ai/cordis': '^4' } }),
+      'lib/index.js': 'export {}',
+    })
+    expect(res.ok).toBe(true)
+    expect(res.report!.findings.find(f => f.rule === 'R12' && f.severity === 'medium')).toBeUndefined()
+  })
+  it('exports["."] 仅含 node 条件 → 识别为入口（round-4 回归）', () => {
+    const res = scanPkg({
+      'package.json': JSON.stringify({ name: 'x', exports: { '.': { node: './lib/index.js' } }, dependencies: { '@deepseek-ai/cordis': '^4' } }),
+      'lib/index.js': 'export {}',
+    })
+    expect(res.ok).toBe(true)
+    expect(res.report!.findings.find(f => f.rule === 'R12' && f.severity === 'medium')).toBeUndefined()
+  })
+})
+
+describe('开源自检（dogfood）：vet 扫描自己的蜜罐源码不该 R7 自命中', () => {
+  it('src/guard/honeypot.ts 无 hardcoded secrets（前缀常量化的诱饵）', () => {
+    // 回归：诱饵值若把 sk- 或 AKIA 写进模板串，R7 会把拼接文本判成 high，
+    // 发布物自扫 verdict=suspicious、deny 模式重装 vet 会自锁（开源前实测发现）
+    const src = readFileSync(join(baseDir(), 'src', 'guard', 'honeypot.ts'), 'utf8')
+    const res = scan(codeRequest({ language: 'ts', code: src }))
+    expect(res.ok).toBe(true)
+    const high = res.report!.findings.find(f => f.rule === 'R7' && f.severity === 'high')
+    expect(high).toBeUndefined()
   })
 })
 

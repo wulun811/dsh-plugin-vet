@@ -95,6 +95,11 @@ export class VetStatus {
     this.expire(now)
     const recent = this.alarms.find(a => a.id === alarm.id && now - a.at < this.dedupeWindowMs)
     if (recent !== undefined) return 'deduped'
+    // P2-4：replace 语义——窗口外的同 id 重发时先移除旧副本再入列。旧实现直接 unshift 新副本，
+    // 持续报警（每 ~62s 一次）会把 20 槽环形缓冲占满 → alarmCount 虚高、其他报警被挤出。
+    for (let i = this.alarms.length - 1; i >= 0; i--) {
+      if (this.alarms[i].id === alarm.id) this.alarms.splice(i, 1)
+    }
     this.alarms.unshift({ ...alarm })
     if (this.alarms.length > this.alarmMax) this.alarms.length = this.alarmMax
     return 'new'
@@ -106,13 +111,19 @@ export class VetStatus {
   }
 
   snapshot(): VetStatusSnapshot {
-    this.expire(Date.now())
+    const now = Date.now()
+    this.expire(now)
     const active = this.alarms.filter(a => !this.dismissedIds.has(a.id))
     const dismissed = this.alarms.filter(a => this.dismissedIds.has(a.id))
+    // P3-2：lastScan 加 TTL（复用 alarmTtlMs）——一次 suspicious 扫描不再让盾牌永久 yellow，
+    // 插件已移除/长时间未再扫描时自动恢复 green。持续扫描会不断刷新 at，天然续期。
+    const lastScan = this.lastScanValue !== undefined && now - this.lastScanValue.at < this.alarmTtlMs
+      ? this.lastScanValue
+      : undefined
     const level: ShieldLevel =
       active.some(a => a.severity === 'red') ? 'red'
-      : (active.some(a => a.severity === 'yellow') || (this.lastScanValue !== undefined && this.lastScanValue.verdict !== 'clean')) ? 'yellow'
+      : (active.some(a => a.severity === 'yellow') || (lastScan !== undefined && lastScan.verdict !== 'clean')) ? 'yellow'
       : 'green'
-    return { level, alarmCount: active.length, alarms: active, dismissed, lastScan: this.lastScanValue }
+    return { level, alarmCount: active.length, alarms: active, dismissed, lastScan }
   }
 }

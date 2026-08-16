@@ -33,7 +33,7 @@ interface Sample {
   noRules?: string[]
 }
 
-// 对抗矩阵：真实攻击形态 × 各规则 × 场景分级（PLAN.md §4.3/§9.1 扩展）
+// 对抗矩阵：真实攻击形态 × 各规则 × 场景分级
 const SAMPLES: Sample[] = [
   // --- 构造器链逃逸（R1/R4，critical） ---
   { name: '动态插件 TextEncoder 构造器', code: `TextEncoder.constructor("return process")().cwd()`, language: 'js', runtime: 'sandbox', verdict: 'critical', rules: ['R1', 'R4'] },

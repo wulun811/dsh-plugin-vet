@@ -20,6 +20,9 @@ export interface ScanRequest {
   targetKind?: 'plugin' | 'generic'
   /** OSV 已知漏洞核对（npm 生态）：仅 files 模式且存在 package.json 时生效；严格 opt-in（=== true）。 */
   osv?: boolean
+  /** 宿主侧计划超时（P2-1 对齐）：engine 以此收敛扫描预算（budget=min(files×2s, timeout-余量)），
+   * 保证 R8-skip 先于宿主 kill 触发（否则 15+/31+ 文件包被 kill 报 scan-fail，优雅降级不可达）。 */
+  timeoutMs?: number
 }
 
 export interface Finding {
@@ -49,7 +52,7 @@ export interface ScanResponse {
 export const ENGINE_VERSION = 'static-v3' as const
 
 /** The 9 rules of v1. R8 is a meta finding emitted by the engine (scan timeout skip). */
-export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11'] as const
+export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12'] as const
 
 /** Shared context handed to every rule. */
 export interface RuleContext {

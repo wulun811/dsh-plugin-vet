@@ -88,7 +88,7 @@ function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, ad
     }
     return
   }
-  // vm.runInContext / vm.runInNewContext（PLAN.md R2 命中清单；审核补漏）
+  // vm.runInContext / vm.runInNewContext（R2 命中清单；审核补漏）
   if (ts.isPropertyAccessExpression(callee)
     && ts.isIdentifier(callee.expression) && callee.expression.text === 'vm'
     && VM_EXEC.has(callee.name.text)) {

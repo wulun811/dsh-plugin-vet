@@ -23,7 +23,11 @@ export interface HookConfig {
 
 export const DEFAULT_HOOK_CONFIG: HookConfig = {
   sensitiveRoots: ['/etc', '/usr', '/var', '/boot', '/bin', '/sbin'],
-  sensitiveSegments: ['.ssh', '.aws', '.gnupg', '.npmrc', '.env', '.netrc', '.pgpass', '.gitconfig', 'credentials', 'credential', 'secrets', 'secret', 'tokens', 'token', 'passwd', 'shadow', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.git-credentials', '.kube', 'vault'],
+  // P2-6：.dsh = DSH 配置根（真实凭据 credentials.yaml、profile 配置、会话存储、蜜罐根都在其下）。
+  // 此前 readdirSync('~/.dsh') 这类凭据狩猎第一步完全不可见（M7 只覆盖 .ssh/.aws 等）。
+  // 官方包（@deepseek-ai/*）高频读写 ~/.dsh（会话/配置/存储）由 sink 的官方信任降噪吸收；
+  // vet 自身对 patch 文件的轮询读取经 withVetSelfIo 直通，不会自报警。
+  sensitiveSegments: ['.dsh', '.ssh', '.aws', '.gnupg', '.npmrc', '.env', '.netrc', '.pgpass', '.gitconfig', 'credentials', 'credential', 'secrets', 'secret', 'tokens', 'token', 'passwd', 'shadow', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.git-credentials', '.kube', 'vault'],
   sensitiveKeywords: ['secret', 'secrets', 'credential', 'credentials', 'passwd', 'shadow', 'private', 'auth', 'vault'],
   sensitiveExts: ['.pem', '.key', '.p12', '.pfx', '.keystore', '.jks', '.env'],
   shellTokens: ['sh', 'bash', 'zsh', 'cmd', 'powershell', 'pwsh', 'curl', 'wget', 'nc', 'ncat', 'telnet'],
@@ -80,8 +84,41 @@ export function setRootIndexing(active: boolean): void {
   rootIndexing = active
 }
 
+/**
+ * vet 自身 IO 直通标志（P2-6）：vet 的已知自操作（读/写自己在 ~/.dsh/profiles 下的
+ * cordis.patch.yml）在 .dsh 敏感段加入后会被自己报警（A9 归因排除 vet → 归因落空=无主
+ * → 照常报警）——盾牌 5s 轮询读 patch 会永久自报警。模块私有标志，只由 withVetSelfIo
+ * 同步设置/恢复；恶意插件无法经全局对象置位（与 R31 同款约束：即使 import 本包，也只能
+ * 影响自身调用栈内的同步执行）。
+ */
+let vetSelfIo = false
+/** 在 fn 执行期间让 T2 包装器直通 vet 自身 IO（恢复式：嵌套调用安全）。 */
+export function withVetSelfIo<T>(fn: () => T): T {
+  const prev = vetSelfIo
+  vetSelfIo = true
+  try {
+    return fn()
+  } finally {
+    vetSelfIo = prev
+  }
+}
+
 /** 工具链临时产物后缀（tsc/vitest/esbuild 等）：*.tmpdir / *.tmp / *.temp / *.swp / *.bak / vim ~。 */
 const TRANSIENT_TEMP_SUFFIX = /\.(?:tmp(?:dir)?|temp|swp|bak|orig)$/i
+
+/**
+ * 锁兄弟文件（<file>.lock，@deepseek-ai/dsh-atomic-write 写协议产物）：DSH 对
+ * credentials.yaml 等文件的原子写用「wx 创建 <file>.lock（内容仅 PID）→ 写完 finally
+ * rm 删锁」互斥；锁的创建与删除是写协议的一部分，不是凭据破坏（真实攻击删的是
+ * .credentials.yaml 本体，不删锁）。盾牌实测：宿主每次保存凭据 → unlink(.lock) →
+ * .dsh 敏感段命中 → 无主 fs-destroy red 误报。此处豁免锁文件的单路径写/删；
+ * 凭据本体与 cp/rename 双路径语义保持严格。
+ */
+export function isLockSiblingPath(p: string): boolean {
+  const norm = p.replace(/\\/g, '/')
+  const last = norm.slice(norm.lastIndexOf('/') + 1)
+  return last.endsWith('.lock')
+}
 
 /**
  * 末段是否为工具链临时产物（纯名字判定，不碰文件系统）。
@@ -230,7 +267,8 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
     }
   }
   if (module === 'fs') {
-    if (DESTROY_OPS.has(name) && isSensitivePath(target, cfg, 'mutate')) {
+    // isLockSiblingPath：atomic-write 协议锁（<file>.lock）随写随删，豁免；凭据本体照删照报
+    if (DESTROY_OPS.has(name) && isSensitivePath(target, cfg, 'mutate') && !isLockSiblingPath(target)) {
       return { severity: 'red', kind: 'fs-destroy', message: `敏感路径删除：${name}(${target.slice(0, 120)})`, target }
     }
     // cp/rename 是成对路径：src 敏感（拷贝密钥出局）或 dest 敏感（覆盖系统文件/密钥落位）都要报
@@ -250,7 +288,8 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
         return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入（open flags=${flags}）：${target.slice(0, 120)}`, target }
       }
     }
-    if (WRITE_OPS.has(name) && isSensitivePath(target, cfg, 'mutate')) {
+    // isLockSiblingPath：写入锁文件（wx 创建带 PID）也是协议操作，不再误报 fs-write
+    if (WRITE_OPS.has(name) && isSensitivePath(target, cfg, 'mutate') && !isLockSiblingPath(target)) {
       return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入：${name}(${target.slice(0, 120)})`, target }
     }
     if (READ_OPS.has(name) && isSensitivePath(target, cfg, 'read')) {
@@ -305,12 +344,20 @@ export function patchModule(
     original.set(opName, fn)
     const wrapped = function (this: unknown, ...args: unknown[]): unknown {
       // R31：rootIndex 归因阶段自身的 fs 探测直通（断开敏感包名 alarm→归因→fs→alarm 无限递归）
-      if (rootIndexing) {
+      // P2-6：vet 自身已知 IO（patch 配置读写）同样直通，不产生自报警
+      if (rootIndexing || vetSelfIo) {
         return (fn as (...a: unknown[]) => unknown).apply(this, args)
       }
       const alarm = classifyOp({ module: moduleName, op: opName, args }, cfg)
       if (alarm !== null) {
-        const hint = pluginFromStack(new Error().stack ?? undefined, rootIndex())
+        // P1-3：归因失败（loader.entries()/ctx.baseUrl 抛错）不能反噬原始调用——报警保留无主，
+        // fs/子进程操作照常执行（归因只是 best-effort 增强，不是调用链的必要环节）
+        let hint: string | undefined
+        try {
+          hint = pluginFromStack(new Error().stack ?? undefined, rootIndex())
+        } catch {
+          hint = undefined
+        }
         sink({ ...alarm, pluginHint: hint })
       }
       return (fn as (...a: unknown[]) => unknown).apply(this, args)

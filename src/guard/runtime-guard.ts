@@ -96,6 +96,50 @@ export function isAttributableEntry(name: string): boolean {
   return name !== PACKAGE_NAME
 }
 
+/**
+ * 构建 T2 栈归因映射（root→包名），结果缓存（报警风暴不重复 require.resolve）。
+ * P1-3：整个构建体（含 loader.entries() 与 ctx.baseUrl 访问）都在 try/finally 内——
+ * 任一环节抛错都必须复位 rootIndexing 标志，否则所有 T2 报警被静默 bypass（R31 的
+ * 反向失败：护栏防了递归，却可能把 vet 永久搞失明）。归因失败时返回空映射（缓存），
+ * 包装器侧另有 try/catch，fs 调用永不因归因失败而中断。
+ */
+export function createRootIndex(ctx: Context): () => Map<string, string> {
+  let rootsCache: Map<string, string> | undefined
+  return () => {
+    if (rootsCache !== undefined) return rootsCache
+    const map = new Map<string, string>()
+    // R31：归因阶段自身的 fs 探测（resolvePackageRoot 的 realpathSync）会再次进入
+    // T2 包装器；敏感包名（如 dsh-credentials）会再次 alarm → 归因 → 无限递归，
+    // 栈深后任意正则编译触发 V8 栈溢出误报 OOM。置标志让包装器直通，断开递归。
+    setRootIndexing(true)
+    try {
+      let loader: LoaderLike | undefined
+      try {
+        loader = (ctx as Context & { loader?: LoaderLike }).loader
+      } catch {
+        // cordis proxy 对未注入属性直接抛错而非返回 undefined（与 invariants 同款）
+        loader = undefined
+      }
+      const names: string[] = []
+      if (loader !== undefined) {
+        for (const entry of loader.entries()) names.push(entry.options.name)
+      }
+      // vet 被符号链接安装时 realpath 解析不到 profile node_modules → 用 loader 基准（ctx.baseUrl）
+      const profileDir = (ctx as { baseUrl?: string }).baseUrl
+      for (const name of names) {
+        // A9 归因排除 vet 自身（见 isAttributableEntry 注释）
+        if (!isAttributableEntry(name)) continue
+        const root = resolvePackageRoot(name, profileDir)
+        if (root !== undefined) map.set(root, name)
+      }
+    } finally {
+      setRootIndexing(false)
+    }
+    rootsCache = map
+    return map
+  }
+}
+
 interface LoaderLike {
   entries(): { options: { name: string } }[]
 }
@@ -106,7 +150,8 @@ interface LoaderLike {
  */
 /** 全局 guard 实例注册表（D30 修漏 H1）：dsh 配置热重载会重复 apply，
  * 若前一个实例的 T2 钩子没被卸载就叠加包装。用模块级变量记住上一个 disposer，
- * 每次 install 前先 dispose 旧实例（恢复 fs/child_process 原始函数 + 终止旧哨兵），再装新的。 */
+ * 每次 install 前先 dispose 旧实例（恢复 fs/child_process 原始函数 + 终止旧哨兵），再装新的。
+ * 与 ctx.on('dispose') 双保险：disposer 幂等（disposed 标志），先到者生效。 */
 let prevGuardDisposer: (() => void) | undefined
 
 /** H2：守卫已关闭（off/dispose）——pending 的 respawn 定时器检查此标志，禁止复活孤儿哨兵。 */
@@ -138,6 +183,9 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     }
     return () => {}
   }
+  // P1-1：off→watch 转换（同一模块实例内重复 apply，如配置热重载先关后开）必须复位——
+  // spawnSidecar 的 fresh-spawn 分支检查 guardDisabled，不复位则哨兵永不启动且无任何日志/报警
+  guardDisabled = false
   const disposers: (() => void)[] = []
 
   // ── T1 哨兵 ─────────────────────────────────────────────
@@ -161,15 +209,23 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     if (stopping) return
     // H2：守卫已关（off/dispose）→ 不复活哨兵（pending respawn 定时器触发时走到这里）
     if (guardDisabled) return
-    // env 注册表：已有存活哨兵（热重载前的实例）→ 复用，不重复 spawn（D30 单例）
+    // env 注册表：已有存活哨兵（热重载前的实例/重复安装的旧副本）
+    // P1-2：不能复用——旧哨兵的 stdout 管道属于旧模块实例的 child 句柄，新实例没有它的
+    // 监听器；复用 = 哨兵继续跑但 T1 报警全部写进已废弃的旧 VetStatus（热重载后静默丢失）。
+    // 旧管道无法接管，只能清 env（防旧实例 exit 处理器按 decideRespawn 复活）+ 终止旧哨兵，
+    // 再走下方全新 spawn（新管道 + 新监听器）。旧实例的 exit 处理器会记一条 sentinel-down
+    // 到它自己的（已废弃）status，无害。
     const existing = envSidecarPid()
     if (existing !== undefined && pidAlive(existing)) {
-      sidecarSpawned = true
-      child = undefined
-      sidecarAlive = true
-      ctx.logger.info(`vet: 复用既有哨兵 (pid=${existing})——跳过重复 spawn`)
-      guardDisabled = false
-      return
+      ctx.logger.warn(`vet: 检测到既有哨兵 (pid=${existing})——终止并以新实例接管（旧报警通道不可复用）`)
+      delete process.env[SIDECAR_PID_ENV]
+      try {
+        process.kill(existing, 'SIGTERM')
+      } catch {
+        // 已退出
+      }
+      sidecarSpawned = false
+      sidecarAlive = false
     }
     child = spawn(process.execPath, [sidecarPath, '--vet-sidecar', ...watchArgs], {
       stdio: ['ignore', 'pipe', 'inherit'],
@@ -236,6 +292,20 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
         ctx.logger.warn(`vet: 5s 后重拉哨兵（第 ${respawnCount}/${MAX_RESPAWN} 次）`)
         setTimeout(spawnSidecar, RESPAWN_DELAY_MS).unref?.()
       }
+      // P2-3：env 不再指向本实例且指向存活 pid → 哨兵已被其他实例接管/替换（跨模块重复安装
+      // + 5s respawn 窗口竞态：旧副本可能 kill 新哨兵并复活自己的）。本实例不 respawn（判定
+      // 正确），但接管是否成功不可见——这里记一条 warn + 黄灯，让「监控被换手」可观测而非静默。
+      if (!respawn && registered !== undefined && registered !== child?.pid && pidAlive(registered)) {
+        ctx.logger.warn(`vet: 哨兵已被其他实例接管（env 注册表指向存活 pid=${registered}，本实例 child=${child?.pid ?? 'none'}）——旧报警通道废弃，接管方负责监控`)
+        status.record({
+          id: 't1:sentinel-taken-over',
+          severity: 'yellow',
+          source: 't1',
+          kind: 'sentinel',
+          message: 'T1 哨兵被其他实例接管，本实例监控通道失效（如重复安装 vet，建议只保留一份）',
+          at: Date.now(),
+        })
+      }
     })
   }
   spawnSidecar()
@@ -259,42 +329,12 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   // A9 归因映射（root→包名）只建一次并缓存：每个被分类的 fs 调用都会走归因，重建=每条
   // 报警 N×require.resolve 的 CPU 空转（报警风暴时放大）；热重载会重新 apply 生成新闭包，
   // 天然重建，无需失效机制。
-  let rootsCache: Map<string, string> | undefined
-  const rootIndex = (): Map<string, string> => {
-    if (rootsCache !== undefined) return rootsCache
-    const map = new Map<string, string>()
-    // R31：归因阶段自身的 fs 探测（resolvePackageRoot 的 realpathSync）会再次进入
-    // T2 包装器；敏感包名（如 dsh-credentials）会再次 alarm → 归因 → 无限递归，
-    // 栈深后任意正则编译触发 V8 栈溢出误报 OOM。置标志让包装器直通，断开递归。
-    setRootIndexing(true)
-    let loader: LoaderLike | undefined
-    try {
-      loader = (ctx as Context & { loader?: LoaderLike }).loader
-    } catch {
-      loader = undefined
-    }
-    const names: string[] = []
-    if (loader !== undefined) {
-      for (const entry of loader.entries()) names.push(entry.options.name)
-    }
-    // vet 被符号链接安装时 realpath 解析不到 profile node_modules → 用 loader 基准（ctx.baseUrl）
-    const profileDir = (ctx as { baseUrl?: string }).baseUrl
-    try {
-      for (const name of names) {
-        // A9 归因排除 vet 自身（见 isAttributableEntry 注释）
-        if (!isAttributableEntry(name)) continue
-        const root = resolvePackageRoot(name, profileDir)
-        if (root !== undefined) map.set(root, name)
-      }
-    } finally {
-      setRootIndexing(false)
-    }
-    rootsCache = map
-    return map
-  }
+  const rootIndex = createRootIndex(ctx)
   const sink = (alarm: HookAlarm): void => {
-    // 官方归因的 spawn 降噪（官方能力授权）；第三方与无归因才报警
-    if (alarm.kind === 'spawn' && alarm.pluginHint !== undefined && isOfficial(alarm.pluginHint)) return
+    // 官方包信任（能力授权，P2-6）：官方归因的报警全部降噪——官方包是平台本体，
+    // dsh 自身高频读写 ~/.dsh（会话持久化/配置/存储），.dsh 敏感段加入后若只降噪 spawn
+    // 会刷屏成永久黄灯。报警面 = 第三方插件与无主操作；第三方无法伪造归因（按真实栈路径判定）。
+    if (alarm.pluginHint !== undefined && isOfficial(alarm.pluginHint)) return
     const entry: VetAlarm = {
       // P1-6：id 拼 pluginHint——两个插件碰同一敏感路径不再同 id 互吞（后到者报警被去重吞掉）
       id: t2AlarmId(alarm.kind, alarm.target, alarm.pluginHint),
@@ -322,7 +362,12 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   }
   disposers.push(patchModule(cp as unknown as Record<string, unknown>, 'child_process', hookCfg, sink, rootIndex))
 
+  // 幂等：ctx.on('dispose') 与 prevGuardDisposer 都可能触发同一 disposer（重载时旧 ctx
+  // 先 dispose、新 apply 再调 prevGuardDisposer）——先到者生效，重复执行是 no-op。
+  let disposed = false
   const disposer = (): void => {
+    if (disposed) return
+    disposed = true
     for (const dispose of disposers) {
       try {
         dispose()

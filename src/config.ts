@@ -1,6 +1,6 @@
 import z from '@deepseek-ai/schemastery'
 
-/** vet 插件配置（PLAN.md §6.2）。fail-open 起步：默认 report，deny 由部署者显式开启。 */
+/** vet 插件配置。fail-open 起步：默认 report，deny 由部署者显式开启。 */
 export interface VetConfig {
   mode: 'report' | 'deny'
   autoScan: boolean

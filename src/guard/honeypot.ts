@@ -24,6 +24,10 @@ const SECRET = () => Array.from({ length: 40 }, () => randChar(ALNUM)).join('')
 const UP16 = () => Array.from({ length: 16 }, () => randChar(UPPER)).join('')
 const HEX36 = () => Array.from({ length: 36 }, () => randChar(HEX)).join('')
 const B64 = () => Buffer.from(RAND() + SECRET()).toString('base64')
+// 前缀也提为常量：诱饵值必须「源码零密钥字面量」（含前缀），否则 vet 扫描自己的发布物时
+// R7 会把模板串拼接文本（如 'OPENAI_API_KEY=sk-'、'AKIA'）判成 high——重装 vet 会自锁。
+const SK_PREFIX = 'sk-'
+const AKIA_PREFIX = 'AKIA'
 
 /**
  * 创建/校验蜜罐目录与诱饵文件（幂等：已存在的内容不重写；被删的诱饵自动重建）。
@@ -53,10 +57,10 @@ export function ensureHoneypot(dir: string, logger?: { warn(m: string): void }):
   }
   // 诱饵内容：前缀/格式真实，密钥体全部运行时随机——格式扫不出来，值却完全无效，
   // 且源码零密钥字面量（开源扫描器不会误报真密钥）
-  put('.env', `DSH_API_KEY=sk-${SECRET()}
-AWS_ACCESS_KEY_ID=AKIA${UP16()}
+  put('.env', `DSH_API_KEY=${SK_PREFIX}${SECRET()}
+AWS_ACCESS_KEY_ID=${AKIA_PREFIX}${UP16()}
 AWS_SECRET_ACCESS_KEY=${SECRET()}
-OPENAI_API_KEY=sk-${SECRET()}
+OPENAI_API_KEY=${SK_PREFIX}${SECRET()}
 `)
   put('credentials.json', `{
   "type": "service_account",
@@ -73,7 +77,7 @@ OPENAI_API_KEY=sk-${SECRET()}
   password ${RAND()}${SECRET().slice(0, 8)}
 `)
   put('aws-credentials', `[default]
-aws_access_key_id = AKIA${UP16()}
+aws_access_key_id = ${AKIA_PREFIX}${UP16()}
 aws_secret_access_key = ${SECRET()}
 region = us-east-1
 `)

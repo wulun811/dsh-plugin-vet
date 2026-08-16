@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest'
 import { VetStatus } from '../lib/guard/status.js'
 import { analyzeSample, detectGrowth, type ProcSample, type RssSample, type WatchConfig } from '../lib/guard/runtime-watch.js'
 import {
@@ -8,9 +8,11 @@ import { readHostMetrics } from '../lib/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../lib/guard/status-route.js'
 import { decideRespawn, t2AlarmId, installRuntimeGuard, isAttributableEntry } from '../lib/guard/runtime-guard.js'
+import { hasAuditRecord, setArchiveDirForTest } from '../lib/audit/archive.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import fsDefault from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -44,12 +46,17 @@ describe('VetStatus（盾牌聚合器）', () => {
     expect(s.snapshot().level).toBe('red')
   })
 
-  it('窗口外的同 id 重新报警', () => {
+  it('窗口外的同 id 重新报警（P2-4 replace 语义：旧副本被顶替，不占双槽）', () => {
     const s = new VetStatus({ dedupeWindowMs: 10 })
-    const alarm = { id: 't1:fd:512', severity: 'yellow' as const, source: 't1' as const, kind: 'fd', message: 'x', at: Date.now() - 1000 }
+    const oldAt = Date.now() - 1000
+    const alarm = { id: 't1:fd:512', severity: 'yellow' as const, source: 't1' as const, kind: 'fd', message: 'x', at: oldAt }
     expect(s.record(alarm)).toBe('new')
+    // 窗口外同 id 重发：旧实现直接 push 新副本（持续报警 ~62s/次会占满 20 槽→alarmCount 虚高、
+    // 其他报警被挤出）；修复后先移除旧副本再入列（replace 语义）
     expect(s.record({ ...alarm, at: Date.now() })).toBe('new')
-    expect(s.snapshot().alarmCount).toBe(2)
+    const snap = s.snapshot()
+    expect(snap.alarmCount).toBe(1)
+    expect(snap.alarms[0].at).not.toBe(oldAt) // 新记录顶替旧记录
   })
 
   it('alarmMax 环形截断', () => {
@@ -121,6 +128,46 @@ describe('VetStatus（盾牌聚合器）', () => {
     s.record({ id: 'a', severity: 'red', source: 't1', kind: 'mem', message: 'x', at: Date.now() })
     expect(s.snapshot().alarmCount).toBe(1)
     expect(s.snapshot().level).toBe('red')
+  })
+
+  it('P3-2：lastScan 按 TTL 过期——一次 suspicious 不永久黄，过期回 green', () => {
+    const s = new VetStatus({ alarmTtlMs: 100 })
+    s.noteScan({ pluginName: 'evil', verdict: 'suspicious', staticScore: 40, at: Date.now() - 500 }) // 500ms 前（> TTL）
+    expect(s.snapshot().level).toBe('green')
+    expect(s.snapshot().lastScan).toBeUndefined()
+    // 新鲜扫描 → yellow；clean 不抬升
+    s.noteScan({ pluginName: 'e2', verdict: 'suspicious', staticScore: 40, at: Date.now() })
+    expect(s.snapshot().level).toBe('yellow')
+    s.noteScan({ pluginName: 'good', verdict: 'clean', staticScore: 100, at: Date.now() })
+    expect(s.snapshot().level).toBe('green')
+  })
+})
+
+describe('hasAuditRecord（档案门槛：M1 前缀 + P-1 版本精确）', () => {
+  const d = mkdtempSync(join(process.cwd(), '.tmp-arch-'))
+  const dir = join(d, 'audits')
+  beforeAll(() => {
+    mkdirSync(dir, { recursive: true })
+    setArchiveDirForTest(dir)
+  })
+  afterAll(() => {
+    setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+    rmSync(d, { recursive: true, force: true })
+  })
+  it('M1：前缀伪造不命中——lodash-foo 档案 ≠ lodash 档案', () => {
+    writeFileSync(join(dir, 'lodash-foo-1.0.0-20260815-120000.md'), '# x')
+    expect(hasAuditRecord('lodash')).toBe(false)
+    writeFileSync(join(dir, 'lodash-4.17.21-20260815-120000.md'), '# y')
+    expect(hasAuditRecord('lodash')).toBe(true)
+  })
+  it('P-1：版本精确匹配——旧版本档案不放行新版本', () => {
+    writeFileSync(join(dir, 'pkg-1.0.0-20260815-120000.md'), '# v1 档案')
+    expect(hasAuditRecord('pkg', '1.0.0')).toBe(true)  // 同版本 → 通过
+    expect(hasAuditRecord('pkg', '1.2.0')).toBe(false) // 升级 → 必须重新审计
+  })
+  it('P-1：不传版本（无法解析）→ 宽松匹配任意精确版本档案', () => {
+    expect(hasAuditRecord('pkg')).toBe(true) // 存在 1.0.0 档案，宽松即过
+    expect(hasAuditRecord('nope')).toBe(false)
   })
 })
 
@@ -263,6 +310,18 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(alarm).toMatchObject({ severity: 'red', kind: 'fs-destroy' })
   })
 
+  it('atomic-write 协议锁（<file>.lock）的删/写豁免（盾牌实测误报）', () => {
+    // DSH 写凭据用 dsh-atomic-write：wx 创建 <credentials>.lock（内容仅 PID），写完 finally rm 删锁——
+    // 宿主每次保存凭据都触发 unlink(.lock) → fs-destroy red 无主误报（.dsh 敏感段命中）
+    expect(classifyOp({ module: 'fs', op: 'unlink', args: ['/home/user/.dsh/.credentials.yaml.lock'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'fs', op: 'rmSync', args: ['/home/user/.dsh/.credentials.yaml.lock'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // 锁文件的写入（wx 创建带 PID）也是协议操作 → 不再误报 fs-write
+    expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/home/user/.dsh/.credentials.yaml.lock', '12345'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // 精度不丢：凭据本体删除仍报 red fs-destroy，非 lock 敏感删除仍报
+    expect(classifyOp({ module: 'fs', op: 'rmSync', args: ['/home/user/.dsh/.credentials.yaml'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ severity: 'red', kind: 'fs-destroy' })
+    expect(classifyOp({ module: 'fs', op: 'rmSync', args: ['/home/user/.ssh/id_rsa'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ severity: 'red', kind: 'fs-destroy' })
+  })
+
   it('敏感路径写入 → yellow fs-write', () => {
     const alarm = classifyOp({ module: 'fs', op: 'writeFile', args: ['/home/user/.npmrc', 'x'] }, DEFAULT_HOOK_CONFIG)
     expect(alarm).toMatchObject({ severity: 'yellow', kind: 'fs-write' })
@@ -308,16 +367,21 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
   })
 
   it('A9：node_modules 包目录豁免——敏感词包名（dsh-credentials-local 等）不再误报 fs-probe', () => {
-    // 用户实测报警：宿主模块解析 require.resolve 内部 realpathSync 包内 package.json
-    const pkg = '/home/chen/.dsh/profiles/node_modules/@deepseek-ai/dsh-credentials-local/package.json'
+    // 用户实测报警：宿主模块解析 require.resolve 内部 realpathSync 包内 package.json。
+    // 注：P2-6 后 ~/.dsh 整段敏感（配置根），这些豁免用例的 fixture 一律放非 .dsh 工作路径，
+    // 只测「node_modules 段之后不参与敏感判定」这一 A9 属性（.dsh 段之前的判定见下方 companion）。
+    const pkg = '/home/chen/work/profiles/node_modules/@deepseek-ai/dsh-credentials-local/package.json'
     expect(isSensitivePath(pkg, DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
     expect(classifyOp({ module: 'fs', op: 'realpathSync', args: [pkg] }, DEFAULT_HOOK_CONFIG)).toBeNull()
     expect(classifyOp({ module: 'fs', op: 'realpath', args: [pkg] }, DEFAULT_HOOK_CONFIG)).toBeNull()
     expect(classifyOp({ module: 'fs', op: 'statSync', args: [pkg] }, DEFAULT_HOOK_CONFIG)).toBeNull()
     // AWS SDK 凭据提供者全家桶（真实 12 个敏感词包名之一）
-    expect(isSensitivePath('/home/chen/.dsh/profiles/node_modules/@aws-sdk/credential-provider-env/package.json', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    expect(isSensitivePath('/home/chen/work/profiles/node_modules/@aws-sdk/credential-provider-env/package.json', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
     // 包内 .env 也不敏感（包文件是公开工件，凭据在用户/系统目录）
-    expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/home/chen/.dsh/profiles/web/node_modules/foo/.env'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/home/chen/work/node_modules/foo/.env'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // P2-6 companion：即使包名豁免，配置根 ~/.dsh 段之前的 .dsh 段照常敏感（readdirSync('~/.dsh') 侦察可见）
+    expect(classifyOp({ module: 'fs', op: 'readdirSync', args: ['/home/chen/.dsh'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-probe' })
+    expect(classifyOp({ module: 'fs', op: 'statSync', args: ['/home/chen/.dsh/profiles/foo/package.json'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-probe' })
     // mutate 下系统根前缀仍生效：删 /usr/lib/node_modules 下的文件照样报
     expect(isSensitivePath('/usr/lib/node_modules/foo/index.js', DEFAULT_HOOK_CONFIG, 'mutate')).toBe(true)
     expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/usr/lib/node_modules/foo/index.js', 'x'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
@@ -491,7 +555,7 @@ describe('R31：归因阶段 fs 直通（递归护栏）', () => {
     }
   })
 
-  it('rootIndex 抛错：标志经 finally 清除，后续报警不受影响', () => {
+  it('rootIndex 抛错：P1-3 归因失败不反噬原始调用——报警保留无主，写照常执行', () => {
     const alarms: HookAlarm[] = []
     let throwOnce = true
     const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), () => {
@@ -508,12 +572,16 @@ describe('R31：归因阶段 fs 直通（递归护栏）', () => {
     })
     try {
       const p = join(mkdtempSync(join(process.cwd(), '.tmp-r31c-')), '.env')
-      // 归因抛错 → 异常传给调用方，原始写未执行
-      expect(() => fsDefault.writeFileSync(p, 'x')).toThrow('rootIndex boom')
-      expect(alarms).toHaveLength(0)
-      // 标志已清 → 正常报警且调用成功
-      fsDefault.writeFileSync(p, 'y')
+      // 旧实现把归因异常传给调用方（写被吞）；P1-3 改为 catch：报警保留（pluginHint 无主）、
+      // fs 调用永不因归因失败而中断——归因只是 best-effort 增强
+      fsDefault.writeFileSync(p, 'x')
       expect(alarms).toHaveLength(1)
+      expect(alarms[0].kind).toBe('fs-write')
+      expect(alarms[0].pluginHint).toBeUndefined() // 归因失败 → 报警无主而非丢失
+      expect(readFileSync(p, 'utf8')).toBe('x')    // 原始写照常执行
+      // 标志已清 + 归因恢复 → 正常报警且调用成功
+      fsDefault.writeFileSync(p, 'y')
+      expect(alarms).toHaveLength(2)
       expect(readFileSync(p, 'utf8')).toBe('y')
     } finally {
       dispose()

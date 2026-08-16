@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VetStatus } from './status.js'
 import { readHostMetrics } from './metrics.js'
+import { withVetSelfIo } from './runtime-hooks.js'
 import type { VetConfig } from '../config.js'
 import { PLUGIN_ENTRY_ID } from '../invariant.js'
 
@@ -111,6 +112,15 @@ function resolveProfileDir(baseUrl: string): string {
 const VET_ENTRY_RE = /^-\s*id:\s*(?:["']?@?jieai\/dsh-plugin-vet["']?|plugin-vet)\s*$/
 
 /**
+ * vet 条目判定（P2-8 统一规则）：只认顶格条目——VET_ENTRY_RE 锚定行首，缩进的
+ * （如嵌在别的插件 insert/group 列表里）不是 vet 顶层条目。strip / extract / read
+ * 三处此前规则不一致（后两者用 trim 匹配）→ 缩进嵌套条目被误读/摘不掉；现全部走本函数。
+ */
+function isVetEntryLine(line: string): boolean {
+  return VET_ENTRY_RE.test(line)
+}
+
+/**
  * 从 patch 行中摘掉所有 vet 条目（含其 config 块），其余行原样保留。
  * 按缩进判定条目边界：config 块（含嵌套列表）都缩进，只有回到顶格（注释/下一个
  * 顶层条目）才结束跳过——避免 vet 配置里的嵌套列表项被误判为新条目。
@@ -119,9 +129,10 @@ function stripVetEntries(lines: string[]): string[] {
   const out: string[] = []
   let skipping = false
   for (const line of lines) {
-    // M1：只认顶格条目——缩进的 "- id: plugin-vet"（如嵌在别的插件 insert 列表里）
-    // 不是 vet 顶层条目，若匹配会吞掉外层条目的尾部并留下真实 vet 条目 → 重复/损坏
-    if (line.startsWith('-') && VET_ENTRY_RE.test(line)) {
+    // M1/P2-8：只认顶格条目（isVetEntryLine）——缩进的 "- id: plugin-vet"
+    // （如嵌在别的插件 insert 列表里）不是 vet 顶层条目，若匹配会吞掉外层条目的尾部
+    // 并留下真实 vet 条目 → 重复/损坏
+    if (isVetEntryLine(line)) {
       skipping = true
       continue
     }
@@ -138,46 +149,62 @@ function stripVetEntries(lines: string[]): string[] {
   return out
 }
 
-/** 提取现有 vet 条目的 config 块（缩进行，含嵌套列表），用于开启守卫时保留非 runtimeGuard 键。 */
-function extractVetConfig(content: string): string | undefined {
+/**
+ * 提取现有 vet 条目的 config 块（缩进行，含嵌套列表），用于开启守卫时保留非 runtimeGuard 键。
+ * P3-9：返回子键实际缩进（首个非注释键行的缩进；空块回退 config: 行 +2），
+ * 写入 runtimeGuard 时复用同一缩进（不硬编码 4 空格——非标准缩进配置不再写出损坏 YAML）。
+ * P2-8：与 strip/read 同一顶格匹配规则。
+ */
+function extractVetConfig(content: string): { block: string; subIndent: number } | undefined {
   const lines = content.split('\n')
-  const start = lines.findIndex(l => VET_ENTRY_RE.test(l.trim()))
+  const start = lines.findIndex(isVetEntryLine)
   if (start === -1) return undefined
-  const out: string[] = []
   for (let i = start + 1; i < lines.length; i++) {
     const line = lines[i]
     if (/^\s*config:/.test(line)) {
-      // 收集 config 下所有缩进行（比 config: 行多缩进一级）
       const configIndent = line.match(/^\s*/)?.[0].length ?? 0
+      // 收集 config 下所有缩进行（比 config: 行缩进多即其子键；YAML 允许子键任意更深缩进）
+      let subIndent = configIndent + 2
+      let seenKey = false
+      const out: string[] = []
       for (let j = i + 1; j < lines.length; j++) {
         const sub = lines[j]
-        const subIndent = sub.match(/^\s*/)?.[0].length ?? 0
+        const thisIndent = sub.match(/^\s*/)?.[0].length ?? 0
         if (sub.trim() === '' || sub.trim().startsWith('#')) continue
-        if (subIndent <= configIndent) break
+        if (thisIndent <= configIndent) break
+        if (!seenKey) {
+          subIndent = thisIndent
+          seenKey = true
+        }
         out.push(sub)
       }
-      break
+      return { block: out.join('\n'), subIndent }
     }
   }
-  return out.join('\n')
+  return undefined
 }
 
 /** 读 patch 文件里 vet 条目实际配置的 runtimeGuard（'watch' | 'off'）。 */
 export function readPatchRuntimeGuard(ctx: ContextLike): 'watch' | 'off' {
-  if (ctx.baseUrl === undefined) return 'off'
-  try {
-    const content = readFileSync(join(resolveProfileDir(ctx.baseUrl), 'cordis.patch.yml'), 'utf8')
-    const lines = content.split('\n')
-    const start = lines.findIndex(l => VET_ENTRY_RE.test(l.trim()))
-    if (start === -1) return 'off'
-    for (let i = start + 1; i < lines.length; i++) {
-      const m = /^\s*runtimeGuard:\s*(\S+)/.exec(lines[i])
-      if (m !== null) return m[1] === 'watch' ? 'watch' : 'off'
+  // 先取局部变量再判空：闭包内 TS 对属性访问不保留 narrowing（ctx.baseUrl 可能被外部改写）
+  const baseUrl = ctx.baseUrl
+  if (baseUrl === undefined) return 'off'
+  // P2-6：vet 自读 patch（盾牌 5s 轮询）在 .dsh 敏感段下会自报警——vetSelfIo 直通
+  return withVetSelfIo(() => {
+    try {
+      const content = readFileSync(join(resolveProfileDir(baseUrl), 'cordis.patch.yml'), 'utf8')
+      const lines = content.split('\n')
+      const start = lines.findIndex(isVetEntryLine)
+      if (start === -1) return 'off'
+      for (let i = start + 1; i < lines.length; i++) {
+        const m = /^\s*runtimeGuard:\s*(\S+)/.exec(lines[i])
+        if (m !== null) return m[1] === 'watch' ? 'watch' : 'off'
+      }
+      return 'off'
+    } catch {
+      return 'off'
     }
-    return 'off'
-  } catch {
-    return 'off'
-  }
+  })
 }
 
 export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok: boolean; note: string } {
@@ -185,62 +212,63 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
     return { ok: false, note: '无法定位 profile 配置目录（ctx.baseUrl 缺失）' }
   }
   const patchPath = join(resolveProfileDir(ctx.baseUrl), 'cordis.patch.yml')
-  let content: string
-  try {
-    content = readFileSync(patchPath, 'utf8')
-  } catch (error) {
-    if (!enable) return { ok: true, note: '当前未开启' }
-    // 首次开启时 cordis.patch.yml 可能还不存在 → 直接新建
-    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-      return { ok: false, note: `无法读取 ${profileName()}` }
-    }
-    const entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
+  // P2-6：vet 自写自己的 patch 配置（用户点按钮触发）——vetSelfIo 直通，不自报警
+  return withVetSelfIo(() => {
+    let content: string
     try {
-      atomicWritePatch(patchPath, entry, '')
-    } catch (writeError) {
-      return { ok: false, note: `写入失败：${String(writeError)}` }
+      content = readFileSync(patchPath, 'utf8')
+    } catch (error) {
+      if (!enable) return { ok: true, note: '当前未开启' }
+      // 首次开启时 cordis.patch.yml 可能还不存在 → 直接新建
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        return { ok: false, note: `无法读取 ${profileName()}` }
+      }
+      const entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
+      try {
+        atomicWritePatch(patchPath, entry, '')
+      } catch (writeError) {
+        return { ok: false, note: `写入失败：${String(writeError)}` }
+      }
+      return { ok: true, note: `已写入 ${profileName()}，重启 dsh web 后生效` }
     }
-    return { ok: true, note: `已写入 ${profileName()}，重启 dsh web 后生效` }
-  }
-  // 先摘掉所有历史 vet 条目（含早期误写的包名 id 形态），再按目标状态重写：幂等且能自愈旧文件。
-  const stripped = stripVetEntries(content.split('\n'))
-  const changed = stripped.join('\n') !== content
-  if (enable) {
-    // H2：保留现有 vet 条目 config 里 runtimeGuard 之外的键（mode/allowlist/rules/honeypot 等），
-    // 只覆盖 runtimeGuard——避免开启守卫把用户显式配置（如 deny 模式）冲掉。
-    const existingVet = content.split('\n').map(l => l.trim()).find(l => VET_ENTRY_RE.test(l))
-    const existingBlock = existingVet !== undefined
-      ? extractVetConfig(content)
-      : undefined
-    let entry: string
-    if (existingBlock !== undefined && existingBlock.trim() !== '') {
-      // 已有 config 块：把 runtimeGuard 键写进它（保留其余键）
-      const withoutGuard = existingBlock.replace(/^\s*runtimeGuard:\s*\S+$/m, '').trimEnd()
-      entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n${withoutGuard}\n    runtimeGuard: watch\n`
-    } else {
-      entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
+    // 先摘掉所有历史 vet 条目（含早期误写的包名 id 形态），再按目标状态重写：幂等且能自愈旧文件。
+    const stripped = stripVetEntries(content.split('\n'))
+    const changed = stripped.join('\n') !== content
+    if (enable) {
+      // H2：保留现有 vet 条目 config 里 runtimeGuard 之外的键（mode/allowlist/rules/honeypot 等），
+      // 只覆盖 runtimeGuard——避免开启守卫把用户显式配置（如 deny 模式）冲掉。
+      // P2-8：existingBlock 判定与 strip/read 同一顶格规则（extractVetConfig 内部统一）
+      const existingBlock = extractVetConfig(content)
+      let entry: string
+      if (existingBlock !== undefined && existingBlock.block.trim() !== '') {
+        // 已有 config 块：把 runtimeGuard 键写进它（保留其余键），缩进复用原 config（P3-9）
+        const withoutGuard = existingBlock.block.replace(/^\s*runtimeGuard:\s*\S+$/m, '').trimEnd()
+        entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n${withoutGuard}\n${' '.repeat(existingBlock.subIndent)}runtimeGuard: watch\n`
+      } else {
+        entry = `- id: ${PLUGIN_ENTRY_ID}\n  config:\n    runtimeGuard: watch\n`
+      }
+      try {
+        atomicWritePatch(patchPath, stripped.join('\n').trimEnd() + '\n' + entry, content)
+      } catch (error) {
+        return { ok: false, note: `写入失败：${String(error)}` }
+      }
+      return { ok: true, note: `已写入 ${profileName()}，重启 dsh web 后生效` }
+    }
+    if (!changed) {
+      return { ok: true, note: '当前未开启' }
     }
     try {
-      atomicWritePatch(patchPath, stripped.join('\n').trimEnd() + '\n' + entry, content)
+      // H1：关闭守卫后若文件只剩注释/空（vet 条目是唯一内容），写 '[]'（DSH boot 契约：
+      // 空文件/纯注释文件解析失败，禁用层要写 []）——否则下次启动 profile 加载抛错。
+      const rest = stripped.join('\n')
+      const hasReal = rest.split('\n').some(l => l.trim() !== '' && !l.trim().startsWith('#'))
+      const finalContent = hasReal ? rest : '[]'
+      atomicWritePatch(patchPath, finalContent, content)
     } catch (error) {
       return { ok: false, note: `写入失败：${String(error)}` }
     }
-    return { ok: true, note: `已写入 ${profileName()}，重启 dsh web 后生效` }
-  }
-  if (!changed) {
-    return { ok: true, note: '当前未开启' }
-  }
-  try {
-    // H1：关闭守卫后若文件只剩注释/空（vet 条目是唯一内容），写 '[]'（DSH boot 契约：
-    // 空文件/纯注释文件解析失败，禁用层要写 []）——否则下次启动 profile 加载抛错。
-    const rest = stripped.join('\n')
-    const hasReal = rest.split('\n').some(l => l.trim() !== '' && !l.trim().startsWith('#'))
-    const finalContent = hasReal ? rest : '[]'
-    atomicWritePatch(patchPath, finalContent, content)
-  } catch (error) {
-    return { ok: false, note: `写入失败：${String(error)}` }
-  }
-  return { ok: true, note: '已移除 runtimeGuard 配置，重启 dsh web 后生效' }
+    return { ok: true, note: '已移除 runtimeGuard 配置，重启 dsh web 后生效' }
+  })
 }
 
 function handleToggle(req: IncomingMessage, res: ServerResponse, ctx: ContextLike): void {

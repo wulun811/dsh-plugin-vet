@@ -3,7 +3,7 @@ import type { Finding, RuleContext } from '../protocol.js'
 import { walk, stringyValue, lineOf } from '../ast.js'
 
 /**
- * R11 destructive file operations (PLAN.md 14.2 R11). Cap at high (fail-open
+ * R11 destructive file operations . Cap at high (fail-open
  * caution; critical is reserved for escape classes). Signals:
  *  - fs delete ops (unlink/rm/rmdir + Sync) -> medium (cleanup is common; LLM
  *    audit reviews context); high when the path literal is sensitive.

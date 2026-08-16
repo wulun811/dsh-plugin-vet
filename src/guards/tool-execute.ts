@@ -5,7 +5,7 @@ import { scan } from '../scanner/client.js'
 import type { ScanRequest, Verdict } from '../scanner/protocol.js'
 import type { VetStatus } from '../guard/status.js'
 
-/** 拦截目标：三大模型代码执行入口 + workflow（PLAN.md §6.6 A4）。 */
+/** 拦截目标：三大模型代码执行入口 + workflow。 */
 const TARGET_TOOLS = new Set(['cordis_define', 'cordis_run', 'run_code', 'workflow'])
 
 const RANK: Record<string, number> = { critical: 3, suspicious: 2, clean: 1 }
@@ -80,7 +80,9 @@ export function installToolExecuteGuard(ctx: Context, config: VetConfig, status?
 
     const result = await next()
     const first = result.content[0]
-    if (first !== undefined && first.type === 'text') {
+    // P2-5：notes 为空（全部 clean）时原样返回——旧实现即使 notes 为空也会前置 '\n\n'，
+    // 与 M5「干净执行不污染机器可读输出」矛盾（JSON 解析/管道消费方看到脏前缀）
+    if (first !== undefined && first.type === 'text' && notes.length > 0) {
       return {
         ...result,
         content: [{ ...first, text: `${notes.join('; ')}\n\n${first.text}` }, ...result.content.slice(1)],

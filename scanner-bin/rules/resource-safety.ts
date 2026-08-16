@@ -3,7 +3,7 @@ import type { Finding, RuleContext } from '../protocol.js'
 import { walk, numberyValue, stringyValue, lineOf } from '../ast.js'
 
 /**
- * R9 resource safety (PLAN.md 14.2 R9-1/2/3). Signals, capped at high (14.1:
+ * R9 resource safety . Signals, capped at high (14.1:
  * critical would short-circuit the LLM audit, which resource-class issues need):
  *
  * R9-1 (high): unbounded allocation literal (new Array(2**31) / Array(n) /

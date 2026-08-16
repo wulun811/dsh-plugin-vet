@@ -1,6 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { withVetSelfIo } from '../guard/runtime-hooks.js'
 
 /**
  * 审计档案检查（D30 强制层）：agent 按 AUDIT_PROTOCOL 审查后落盘健康档案到
@@ -24,27 +25,52 @@ export function setArchiveDirForTest(dir: string): void {
 }
 
 /**
- * 某插件是否已有健康档案。匹配规则（D30 修漏 M1）：档案名必须严格是
- * <pluginName>-<version>-<yyyyMMdd-HHmmss>.md——只靠前缀匹配会被伪造：
- * 存在 'lodash-foo-1.0.0-ts.md' 时 'lodash' 也会命中（前缀 'lodash-' 撞上）。
- * 这里要求 pluginName 转义后紧跟 '-(version 段)-<ts>.md' 完整形态。
+ * 某插件是否已有健康档案。匹配规则（D30 修漏 M1 + P-1 版本精确绑定）：
+ * 档案名必须严格是 <pluginName>-<version>-<yyyyMMdd-HHmmss>.md——只靠前缀匹配会被伪造
+ * （存在 'lodash-foo-…' 时 'lodash' 也会命中）。P-1：传入装机版本时要求版本段 == 装机
+ * 版本——插件升级（1.0.0→1.2.0）后旧档案不再放行，新版本必须重新审计；不传 version
+ * （兼容旧调用/无法解析版本）时沿用宽松版本段。
+ * P2-2：目录在 ~/.dsh 下，readdir 属 vet 自查 IO——withVetSelfIo 直通，避免 .dsh 敏感段
+ * 下每次装插件都产生一条无主 fs-probe 自报警。
  */
-export function hasAuditRecord(pluginName: string): boolean {
-  const dir = archiveDir()
-  if (!existsSync(dir)) return false
-  const esc = pluginName.replace(/@/g, '').replace(/\//g, '-').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  // 完整形态：<esc>-<version>-<8位日期>-<6位时间>.md（version 段宽松匹配）
-  const re = new RegExp('^' + esc + '-(\\d[\\w.+-]*)-\\d{8}-\\d{6}\\.md$')
-  try {
-    return readdirSync(dir).some(name => re.test(name))
-  } catch {
-    return false
+export function hasAuditRecord(pluginName: string, version?: string): boolean {
+  const esc = escapeName(pluginName)
+  return withVetSelfIo(() => {
+    const dir = archiveDir()
+    if (!existsSync(dir)) return false
+    // 时间戳尾：-8位日期-6位时刻.md（字符类写法，避免反斜杠）
+    const tsRe = /-[0-9]{8}-[0-9]{6}[.]md$/
+    try {
+      return readdirSync(dir).some(name => {
+        if (!tsRe.test(name)) return false
+        const prefix = name.slice(0, name.length - 19) // 去掉 -yyyyMMdd-HHmmss.md
+        if (version !== undefined) return prefix === esc + '-' + version
+        // 宽松：版本段必须以数字开头（保持 M1 反前缀伪造——lodash-foo-… 不命中 lodash）
+        if (!prefix.startsWith(esc + '-')) return false
+        const rest = prefix.slice(esc.length + 1)
+        return rest.length > 0 && rest[0] >= '0' && rest[0] <= '9'
+      })
+    } catch {
+      return false
+    }
+  })
+}
+
+/** 包名/版本归一化：@ 剥掉、/ 转 -（其余原样，不引入正则元字符）。 */
+function escapeName(name: string): string {
+  let out = ''
+  for (let i = 0; i < name.length; i++) {
+    const c = name[i]
+    if (c === '@') continue
+    if (c === '/') out += '-'
+    else out += c
   }
+  return out
 }
 
 /** 提示消息（拦截/报警共用）：引用协议 skill，说明如何完成审查。 */
 export function auditRequiredMessage(pluginName: string): string {
-  return `vet: 插件 ${pluginName} 尚未完成审计（无健康档案）。` +
-    `启用 requireAudit 后，新插件应先按 vet-audit-protocol 审查并落盘档案到 ${archiveDir()}；` +
-    `未审计插件加载时触发黄色告警（deny 模式则拦截）。`
+  return 'vet: 插件 ' + pluginName + ' 尚未完成审计（无健康档案）。' +
+    '启用 requireAudit 后，新插件应先按 vet-audit-protocol 审查并落盘档案到 ' + archiveDir() + '；' +
+    '未审计插件加载时触发黄色告警（deny 模式则拦截）。'
 }

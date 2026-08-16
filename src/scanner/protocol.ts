@@ -19,6 +19,8 @@ export interface ScanRequest {
   targetKind?: 'plugin' | 'generic'
   /** OSV 已知漏洞核对（npm 生态）：仅 files 模式且存在 package.json 时生效；严格 opt-in（=== true）。 */
   osv?: boolean
+  /** 宿主侧计划超时（与 scanner-bin/protocol.ts 同步）：engine 据此对齐扫描预算（P2-1）。 */
+  timeoutMs?: number
 }
 
 export interface Finding {

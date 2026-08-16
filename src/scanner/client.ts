@@ -12,6 +12,9 @@ export interface ScanOptions {
 /** 异步扫描：spawn scanner-bin，请求-响应式，超时 kill（不伪造 verdict）。 */
 export async function scan(request: ScanRequest, options: ScanOptions = {}): Promise<ScanResponse> {
   const timeoutMs = options.timeoutMs ?? 15_000
+  // P2-1：把宿主计划超时带给 engine——它按 min(files×2s, timeout-余量) 收敛预算，
+  // R8-skip 先于本进程的 kill 触发，大包不再报 scan-fail
+  const payload: ScanRequest = { ...request, timeoutMs }
   return new Promise<ScanResponse>(resolve => {
     const child = spawn(process.execPath, [SCANNER_BIN], { stdio: ['pipe', 'pipe', 'pipe'] })
     let stdout = ''
@@ -47,7 +50,7 @@ export async function scan(request: ScanRequest, options: ScanOptions = {}): Pro
     // scanner-bin 启动失败时 stdin 流可能已销毁：write 抛错/EPIPE 必须兜住，不能崩宿主
     child.stdin.on('error', () => { /* close 事件会走失败分支 */ })
     try {
-      child.stdin.write(JSON.stringify(request))
+      child.stdin.write(JSON.stringify(payload))
     } catch (error) {
       // L3: write 抛错（EPIPE/流销毁）时子进程可能还活着——必须 kill，否则成孤儿
       try { child.kill('SIGKILL') } catch { /* 已退出 */ }
@@ -63,10 +66,12 @@ export async function scan(request: ScanRequest, options: ScanOptions = {}): Pro
  */
 export function scanSync(request: ScanRequest, options: ScanOptions = {}): ScanResponse {
   const timeoutMs = options.timeoutMs ?? 15_000
+  // P2-1：同 async 路径，把超时带给 engine（deny 同步路径同样受益于 R8-skip 先于 kill）
+  const payload: ScanRequest = { ...request, timeoutMs }
   let result
   try {
     result = spawnSync(process.execPath, [SCANNER_BIN], {
-      input: JSON.stringify(request),
+      input: JSON.stringify(payload),
       encoding: 'utf8',
       timeout: timeoutMs,
       maxBuffer: 64 * 1024 * 1024,

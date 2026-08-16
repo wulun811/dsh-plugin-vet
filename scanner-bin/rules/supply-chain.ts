@@ -1,7 +1,7 @@
 import type { Finding } from '../protocol.js'
 
 /**
- * R10 supply chain (PLAN.md §14.2 R10): package.json manifest scan.
+ * R10 supply chain : package.json manifest scan.
  * install hooks (preinstall/install/postinstall/uninstall) are real
  * arbitrary-code execution at install time -> high. The dependency manifest
  * is advisory info for the LLM audit round (known-vulnerability matching is
@@ -49,7 +49,7 @@ export function runPackageJson(content: string, file: string, targetKind?: 'plug
       rule: 'R10',
       severity: 'info',
       confidence: 'heuristic',
-      message: '依赖清单：' + names.length + ' 项（' + names.slice(0, 30).join(', ') + (names.length > 30 ? '…' : '') + '，供 LLM 审计供应链；已知漏洞匹配待数据源选型）',
+      message: '依赖清单：' + names.length + ' 项（' + names.slice(0, 30).join(', ') + (names.length > 30 ? '…' : '') + '，供 LLM 审计供应链；已知漏洞核对见后续 OSV 精确版本查询（网络失败静默降级））',
       evidence: names.slice(0, 30).join(', ').slice(0, 200),
       file,
     })

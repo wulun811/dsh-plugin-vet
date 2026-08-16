@@ -18,16 +18,22 @@
 
 - **verdict**：critical / suspicious / clean（静态层权威判定）
 - **staticScore**：0-100
-- **findings**：每条静态发现（规则号、severity、message、文件、行号）
+- **findings**：每条静态发现（规则号、severity、message、文件、行号）——含 R12（Cordis/DSH bundle 契约：入口文件、bundle patch 声明、name、engines.node）
 
 > verdict=critical 直接判定**拒绝安装**，跳过后续步骤，直接写档案（见第 5 步）。
 
 ### 第 2 步：读清单（必做）
 
-用 `read`/`glob` 通读插件包：
+先**定位插件包目录**（第 1 步 `packagePath` 的来源）：
 
-- `package.json`：name、version、dependencies（重点看高危依赖：ssh2/shelljs/child_process 等）、peerDependencies、dsh 声明
-- `cordis.patch.yml`（若有）：插件如何挂载
+- 已安装插件：`~/.dsh/profiles/<profile>/node_modules/<包名>`——用 `glob` 搜 `~/.dsh/profiles/*/node_modules/<name>/package.json`，或询问用户 profile 名
+- 待安装/离线包：拿到包目录即可（npm 缓存、本地 clone）
+- 定位失败时把 `scan_plugin` 的报错信息给用户，请其提供路径
+
+再用 `read`/`glob` 通读插件包：
+
+- `package.json`：name、version、dependencies（重点看高危依赖：ssh2/shelljs/child_process 等）、peerDependencies、exports/main 入口、dsh 声明
+- `cordis.patch.yml`（若有）：插件如何挂载——条目形态、是否有 insert 嵌套、与其他 bundle 冲突面
 - 全部源码文件（lib/、src/），按行数从大到小读
 
 ### 第 3 步：逐条核实静态发现（必做）
@@ -46,6 +52,30 @@
 - **进程/执行**：child_process/spawn/exec 的调用面，命令拼接是否注入
 - **凭据处理**：密码/密钥/token 的存储、传输、落盘（明文？权限？）
 - **库的安全语义**：如 ssh2 连接是否校验 hostVerifier（缺省 auto-accept 有 MITM 风险）、依赖是否有已知 CVE（web_search 查证）
+
+### 第 4.5 步：契约与代码质量审计（必做）
+
+> 静态扫描与安全深挖解决「**恶意**」问题；本步解决「**写得烂**」问题——**不是恶意的插件
+> 也可能因为 bug 拖垮宿主**。粗判原则：静态层面可穷举的契约项由 R12 覆盖，这里由 agent
+> 通读代码后逐项判断，缺陷写进档案并影响「建议」。
+
+**Cordis/DSH 契约核对面**（与 R12 互证，能读到的更深一层）：
+
+- 入口与声明：exports/main 指向真实存在、能导出标准插件形态（name / Config / apply(context, config)）；inject 声明的服务确实注入且使用一致
+- 配置正确性：Config schema 与代码实际读取的键一一对应（读不存在的键、类型不匹配、空值未判）
+- 生命周期卫生：事件监听/定时器/子进程有 dispose 路径；热重载（重新 apply）幂等，模块级状态不残留（vet 自己的二轮审查就修过这类：spawn error 未监听崩宿主、stdout 半行、报警永久滞留）
+
+**代码质量/健壮性清单**（逐项核，有问题记 文件:行 + 说明）：
+
+- 错误处理：未捕获的 promise（fetch/异步无 catch）、空 catch{} 吞错无日志、异常路径是否可诊断
+- 同步阻塞：事件/异步回调里做 sync fs/网络/长循环——是否卡宿主事件循环
+- 资源泄漏：timer/stream/listener 是否随用随清；worker/子进程是否可能成孤儿
+- 异步正确性：漏 await、回调里启动异步不追结果、边界条件（空输入/超长/并发重入）
+- 路径与平台：path.join 拼绝对路径、Windows 分隔符、敏感文件读写姿势
+- 依赖卫生：dependencies 声明完整（无隐式依赖）、版本合理、peer 关系正确
+
+**判定方向**：任何「能跑但会拖垮/静默失败」的缺陷 → 建议降为 **review**（即使静态 clean）；
+契约项（入口缺失/声明不一致）→ 至少 review，重则 reject。
 
 ### 第 5 步：落盘健康档案（必做）
 
@@ -71,19 +101,26 @@
 - 建议: approve | review | reject
 - 总结: <agent 的审查总结>
 
+## 质量审计（第 4.5 步）
+- 契约: 入口/inject/Config schema 核对面结论（或「通过」）
+- 缺陷清单: 文件:行 + 问题描述 + 严重度
+- 影响评估: 缺陷是否影响采纳（拖垮宿主/静默失败 → 至少 review）
+
 ## 审查记录（证据）
 - 逐条列出核实过的静态发现与深挖结果（文件:行 + 结论）
 ```
 
 ### 结论判据
 
-| 静态 verdict | 深挖发现 | 建议 |
-| --- | --- | --- |
-| critical | — | **reject**（直接拒，无需深挖） |
-| suspicious | 误报全部排除 | review 或 approve（附排除理由） |
-| suspicious | 存在真问题 | reject 或 review（附证据） |
-| clean | — | approve |
-| clean | 深挖发现隐藏问题 | review 或 reject（附证据） |
+| 静态 verdict | 深挖发现 | 质量审计（4.5 步） | 建议 |
+| --- | --- | --- | --- |
+| critical | — | — | **reject**（直接拒，无需深挖） |
+| suspicious | 误报全部排除 | 通过 | review 或 approve（附排除理由） |
+| suspicious | 误报全部排除 | 有缺陷 | **review**（先修质量问题） |
+| suspicious | 存在真问题 | — | reject 或 review（附证据） |
+| clean | — | 通过 | approve |
+| clean | — | 有「能跑但拖垮/静默失败」类缺陷 | **review**（静态干净≠值得装） |
+| clean | 深挖发现隐藏问题 | — | review 或 reject（附证据） |
 
 ## 强制机制（requireAudit）
 

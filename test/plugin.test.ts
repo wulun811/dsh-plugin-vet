@@ -486,6 +486,42 @@ describe('目标身份分级（targetKind，§14.3 边界落地）', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('P3-4：file 目标父目录有 package.json → 识别插件形态（不再恒 generic）', () => {
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: 'evil-plugin', dependencies: { '@deepseek-ai/cordis': '^4' } }),
+      'index.js': 'process.exit(0)',
+      'sub/x.js': '1+1',
+    })
+    try {
+      const r = buildRequest({ target: 'file', source: join(dir, 'sub', 'x.js') })
+      expect(r.request.targetKind).toBe('plugin')
+      expect(r.pluginVersion).toBeUndefined() // fixture 无 version 字段
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+    // 父目录无 package.json → generic（普通文件审计）
+    const plain = mkdtempSync(join(tmpdir(), 'vet-fileplain-'))
+    try {
+      writeFileSync(join(plain, 'y.js'), '1')
+      expect(buildRequest({ target: 'file', source: join(plain, 'y.js') }).request.targetKind).toBe('generic')
+    } finally {
+      rmSync(plain, { recursive: true, force: true })
+    }
+  })
+
+  it('P-2 计划：package 目标输出 pluginVersion（档案/版本核对用）', () => {
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: 'ver-pkg', version: '2.3.4', dependencies: { '@deepseek-ai/dsh-tools': '^1' } }),
+      'index.js': 'export const name = "ver-pkg"',
+    })
+    try {
+      const { pluginVersion } = buildRequest({ target: 'package', packagePath: dir })
+      expect(pluginVersion).toBe('2.3.4')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('分数构成解释（explainScore，clean+低分可读性）', () => {

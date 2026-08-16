@@ -8,7 +8,7 @@ const CONFIDENCE_COEF: Record<Exclude<Confidence, 'heuristic'>, number> = { cert
 
 /**
  * Deterministic static score: 100 - Σ(severity weight × confidence coef × hits).
- * Heuristic confidence always uses 0.5 (info floor, per PLAN.md §4.4).
+ * Heuristic confidence always uses 0.5 (info floor).
  */
 export function computeScore(findings: Finding[]): number {
   let total = 0
