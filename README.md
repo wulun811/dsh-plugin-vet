@@ -5,6 +5,7 @@ English | [中文](README.zh.md)
 [![npm version](https://img.shields.io/npm/v/@jieai/dsh-plugin-vet)](https://www.npmjs.com/package/@jieai/dsh-plugin-vet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933)](package.json)
+[![dsh.so security](https://www.dsh.so/badges/dsh-plugin-vet.svg)](https://www.dsh.so/artifact/dsh-plugin-vet/)
 
 > Before installing any plugin, run it through dsh-plugin-vet: static rules produce a verdict (deterministic,
 > unforgeable), the agent investigates sensitive points and quality issues following the `vet-audit-protocol`
