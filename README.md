@@ -205,6 +205,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 13. **盾牌激活需要 `dsh web` 重启**：client-modules 在启动时扫描 `dsh.client` 声明；重启前浏览器不会加载盾牌，但 /vet/status.json 端点与运行时守卫（宿主侧）重启即生效。
 14. **运行时守卫默认关闭**（`runtimeGuard: 'off'`）：包装 fs/child_process 有性能与稳定代价，opt-in 开启。
 15. **`process.kill` 保持 high（有意设计，round-7.1）**：kill 是副作用成员，不随只读成员降级——但 MCP/桥接器类插件 kill 自己 spawn 的子进程是正常功能面（dsh-bridges 实测：98/134 条已清，剩余 high 全为 run.js/util.js 的 process.kill）。静态区分 `process.kill(child.pid)`（pid 来自本包 spawn 返回值）与任意 pid 需要数据流分析，成本高收益低——维持现状，由 agent 按 vet-audit-protocol 审计时人工排除（结论记入健康档案）。
+16. **平台支持（Linux 优先，非 Linux 优雅降级）**：静态扫描层（scanner-bin/scan_plugin/R1-R12/OSV）、T2 运行时钩子、蜜罐、GUI 盾牌、审计协议均为纯 JS，跨平台（macOS/Windows 可跑）。**T1 哨兵是 Linux 专有**——依赖 /proc 读 VmRSS/子进程/fd，非 Linux 上哨兵自动退出、指标面板回退 -1/0（不报错不刷屏，设计如此）。T2 敏感路径按"路径段名"匹配（反斜杠已归一化，Windows 下 `.ssh`/`.env`/`credentials` 等段名同样命中），但"系统根前缀"（/etc /usr /var）是 POSIX 形态——Windows 上写删 `C:\Windows\System32` 类路径不受系统根判定（段名/密钥特征判定仍有效）；macOS 有 /etc /usr /var，T2 全功能。与 DSH 当前 Linux 优先的适配状态一致。
 
 ## 开发
 
