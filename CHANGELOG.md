@@ -1,152 +1,325 @@
 # Changelog
 
-所有重要变更记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
+All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-### 修复
+### Fixed
 
-- **Windows 测试环境**：sidecar 单例锁集成测试（D30）依赖 /proc，Windows 无此路径时首个 tick 即优雅退出（exit 0），断言必挂——按平台跳过（`skipIf(win32)`），Linux/CI 上原样执行。
+- **Windows test environment**: the sidecar singleton-lock integration test (D30) depends on /proc; on Windows
+  that path is absent, so the first tick exits gracefully (exit 0) and the assertion always fails — now skipped
+  per platform (`skipIf(win32)`); still runs as-is on Linux/CI.
 
-### 构建/发布
+### Docs
 
-- `exports["./client"]` 补 `types` 条件：build-client 顺带产出手写 `lib/client.d.ts`（与 src/client/index.ts 的 `inject`/`apply` 导出同步），浏览器半区接入方获得类型提示。
-- `files` 白名单补 `docs/ARCHITECTURE.md`：npm 包内 README 的架构链接不再断裂（此前只有 GitHub 上可访问）。
-- 新增 GitHub Actions CI（.github/workflows/ci.yml）：push/PR 触发 typecheck + 覆盖率阈值测试 + `npm pack --dry-run` 产物校验。
+- All documentation translated to English for international users: README.md (Chinese original kept as
+  README.zh.md), AUDIT_PROTOCOL.md, CONTRIBUTING.md, SECURITY.md, CHANGELOG.md, docs/ARCHITECTURE.md.
+  `README.zh.md` added to the npm `files` allowlist.
+
+### Build / release
+
+- `exports["./client"]` gains a `types` condition: build-client also emits a hand-written `lib/client.d.ts`
+  (kept in sync with `inject`/`apply` in src/client/index.ts), so browser-half integrators get type hints.
+- The `files` allowlist now includes `docs/ARCHITECTURE.md`: the architecture link in the npm package README no
+  longer breaks (it was only reachable on GitHub before).
+- Added GitHub Actions CI (.github/workflows/ci.yml): on push/PR runs typecheck + coverage-threshold tests +
+  `npm pack --dry-run` artifact verification.
 
 ## [0.1.3]
 
-- **round-7.1（0.1.2 外部验证，5 项反馈）**：
-  - R3 只读成员分类（P-1/P-2）：`cwd`/`env`/`platform`/`pid`/`argv`/`execPath`/`stdout`/`nextTick`/on 等纯只读/无副作用成员在 plugin 模式降级 info 能力触达面（读 cwd/env/pid 不是逃逸通道）——dsh-bridges 类无 bin 声明但依赖 @deepseek-ai/* 的 MCP/工具插件 134 条 cwd/env/platform 误报清零；wechat-mp 的 cacheFile + pid + .tmp 原子写临时名不再误伤。副作用成员（`kill`/`abort`/`chdir`/`umask`/setuid/dlopen/binding 等）与未知成员保持 high，`exit`/getBuiltinModule/mainModule/module/reallyExit 保持 critical——不损失逃逸检测。
-  - R4 原型污染不再按 targetKind 降级（P-3）：污染语义与插件/通用包无关（generic 包也可能被当作插件装进宿主），files 模式一律 high；core-js 类 polyfill 误报风险有限（polyfill 通常只在 node_modules 依赖里，不在扫描面）。
-  - detectTargetKind 自豁免 realpath 化（P-3 安全面）：vet 自豁免原来只比 name——本地 file: 安装无 registry 校验，恶意 tarball 把 name 写成 @jieai/dsh-plugin-vet 即可骗过 generic 降级（R3/R4 全降、deny 放行）。现必须 realpath 验证目标就是当前 vet 实例；同名冒名包按最严格 plugin 判定（身份冒充即最高嫌疑），配合 R4 不再降级，该攻击面闭合。
-  - P-4 复验：vet 自扫的 2 条 R9 medium 自伤（constructor-chain.js/dynamic-exec.js 的规则正则）在 0.1.2 引擎已不再触发（round-7 组后 ? 修复覆盖），tarball 实测无 R9 medium；static-v6 使任何旧缓存失效。
-  - P-5 记录：官方包 @deepseek-ai/* 判 generic 的能力触达面降级是官方信任的一部分（与 internal/plugin 守卫同口径），供应链投毒时静态降级会掩盖 process 访问——已写入 README Known Limitations 8。
-  - 全部带回归测试（+5，243 总用例）；ENGINE_VERSION static-v5 → static-v6。
-  - Known Limitations 15（评估反馈）：process.kill 保持 high 是有意设计（副作用成员），MCP/桥接器类插件 kill 自己 spawn 的子进程由 agent 审计人工排除——区分 kill(child.pid) 与任意 pid 需数据流分析，成本高收益低，维持现状。
+- **round-7.1 (0.1.2 external verification, 5 feedback items)**:
+  - R3 read-only member classification (P-1/P-2): `cwd`/`env`/`platform`/`pid`/`argv`/`execPath`/`stdout`/
+    `nextTick`/`on` and other pure read-only / side-effect-free members downgrade to info capability surface in
+    plugin mode (reading cwd/env/pid isn't an escape channel) — the 134 cwd/env/platform false positives on
+    dsh-bridges-class no-bin MCP/tool plugins that depend on @deepseek-ai/* are gone; wechat-mp's cacheFile +
+    pid + .tmp atomic-write temp names no longer get hurt. Side-effect members (`kill`/`abort`/`chdir`/`umask`/
+    `setuid`/`dlopen`/`binding`, etc.) and unknown members stay high; `exit`/getBuiltinModule/mainModule/module/
+    reallyExit stay critical — no loss of escape detection.
+  - R4 prototype pollution no longer downgrades by targetKind (P-3): pollution semantics are unrelated to
+    plugin/generic package (a generic package can also be installed into the host as a plugin); files mode is
+    always high; core-js-class polyfill false-positive risk is limited (polyfills usually live in node_modules
+    dependencies, outside the scan surface).
+  - detectTargetKind self-exemption via realpath (P-3 security surface): vet's self-exemption used to compare
+    names only — local file: installs have no registry validation, so a malicious tarball naming itself
+    @jieai/dsh-plugin-vet could fool the generic downgrade (R3/R4 fully downgraded, deny passes). It now must
+    realpath-verify that the target is the current vet instance; a same-name impostor is judged by the
+    strictest plugin rules (identity impersonation = highest suspicion), together with R4 no longer
+    downgrading, closing that attack surface.
+  - P-4 re-verification: vet's self-scan 2 R9 medium self-hits (constructor-chain.js/dynamic-exec.js rule
+    regexes) no longer trigger on the 0.1.2 engine (covered by the round-7 group-then-`?` fix); tarball
+    verified with no R9 medium; static-v6 invalidates any old cache.
+  - P-5 recorded: judging official @deepseek-ai/* packages as generic with capability-surface downgrade is part
+    of official trust (same policy as the internal/plugin guard); a supply-chain attack on an official package
+    would let static downgrade mask process access — recorded in README Known Limitations 8.
+  - All with regression tests (+5, 243 total cases); ENGINE_VERSION static-v5 → static-v6.
+  - Known Limitations 15 (evaluation feedback): keeping process.kill high is intentional (side-effect member);
+    MCP/bridge-class plugins killing their own spawned children are ruled out manually by the agent during
+    review — distinguishing kill(child.pid) from arbitrary pids needs dataflow analysis; high cost, low
+    benefit; kept as-is.
 
 ## [0.1.2]
 
-
-- **round-7（外部第二轮实测，4 项反馈全部通用化修复）**：
-  - R2 `new (Function)('...')` 括号形态漏检：callee 括号包裹（含 `(async()=>{}).constructor` 的括号 base）此前被当普通表达式完全绕过（对抗样本 verdict=clean）——checkCall/checkNew/isConstructorCapture 统一剥括号（unwrapParens），`new (Function)('return process')` 等命中 critical。
-  - R4 宿主全局原型污染：`TextEncoder.prototype.encode = ...` 等对宿主内置（Object/Array/String/Function/TextEncoder/URL/Buffer 等 40+）prototype 成员的覆盖赋值此前不检——新增赋值/`Object.defineProperty`/整体替换三形态检测，code → critical / files 插件 → high / generic（polyfill 可能）→ info。
-  - P2 OSV range 误报：directDepsOf 在 isExactVersion 之前剥掉 `^`/`~`，`^2.4.2` 被当下界精确版查询——下界受影响而上界已修复（实际装到 2.8.x）时误报已知漏洞、抬升 verdict。现 range 一律跳过查询（与 README 宣称一致），精确版本原样查询。
-  - R9 `(https?:)?` 类误报：组后 `?`（至多一次额外分支）是线性回溯，不是 `(a+)+` 类指数回溯——组后仅 `*`/`+` 才判 ReDoS（dsh-wechat-mp markdown.js 实测修复）。
-  - R3 应用型降级：package.json 声明 bin 的包（CLI/TUI/server，process 即产品功能）process 访问整体降级能力触达面 info；bin 入口文件（永远独立运行的 CLI 脚本）按通用代码判定（R2/R3 降级、R9 死循环降 medium）——dsh-tui 4065 分、dsh-bridges 2100 分扣减全为误报。
-  - R6 混淆组合证据：charCodeAt/fromCharCode/atob 独立出现是终端协议解析/字节处理常规代码（dsh-tui 42 条全误报）——仅当同文件存在动态执行信号（eval/new Function/vm 等）才输出混淆提示。
-  - R9 有界遍历递归：for-of/for-in 集合遍历与带条件循环（while(cond)/do/for(;cond;)）内的自调用不做「递归无终止」粗判（zeroLayoutRecursive 树遍历误报修复）；while(true)/for(;;) 保持判定。
-  - 引擎包形态解析：engine 读 package.json bin 字段产出 cliFiles（bin 入口 basename 集合）+ appShape（应用型），注入 RuleContext；package.json 内容已在缓存 hash 内，形态变化自然失效。
-  - 全部带回归测试（+13，238 总用例）；ENGINE_VERSION static-v4 → static-v5（规则变更必须递增）。
+- **round-7 (second external evaluation round, all 4 feedback items generalized-fixed)**:
+  - R2 `new (Function)('...')` parenthesized-callee bypass: a parenthesized callee (incl. the parenthesized
+    base of `(async()=>{}).constructor`) was previously treated as a plain expression and fully bypassed
+    (adversarial sample verdict=clean) — checkCall/checkNew/isConstructorCapture now uniformly strip parens
+    (unwrapParens); `new (Function)('return process')` and friends hit critical.
+  - R4 host-global prototype pollution: override assignments of prototype members on host builtins
+    (Object/Array/String/Function/TextEncoder/URL/Buffer and 40+) were previously undetected — added the three
+    forms (assignment / Object.defineProperty / whole-object replacement), code → critical / files plugin →
+    high / generic (possible polyfill) → info.
+  - P2 OSV range false positive: directDepsOf stripped `^`/`~` before isExactVersion, so `^2.4.2` was queried
+    as an exact lower bound — false-known-vulnerability when the lower bound is affected but the upper bound is
+    already fixed (actually installed 2.8.x), inflating the verdict. Ranges now always skip the query (matching
+    the README claim); exact versions query as-is.
+  - R9 `(https?:)?`-class false positive: group-then-`?` (at most one extra branch) is linear backtracking, not
+    `(a+)+`-class exponential — only group-then-`*`/`+` is judged ReDoS (dsh-wechat-mp markdown.js verified
+    fixed).
+  - R3 app-type downgrade: packages whose package.json declares bin (CLI/TUI/server, where process is the
+    product function) downgrade process access wholesale to info capability surface; bin entry files (CLI
+    scripts that always run standalone) judge as generic code (R2/R3 downgraded, R9 dead loops → medium) —
+    dsh-tui's 4065 and dsh-bridges' 2100 score deductions were all false positives.
+  - R6 obfuscation combined evidence: charCodeAt/fromCharCode/atob appearing alone is normal terminal-protocol
+    parsing / byte handling (dsh-tui's 42 were all false positives) — only when the same file has a dynamic
+    execution signal (eval/new Function/vm, etc.) is the obfuscation hint emitted.
+  - R9 bounded traversal recursion: for-of/for-in collection traversal and self-calls inside conditional loops
+    (while(cond)/do/for(;cond;)) are no longer crudely judged "non-terminating recursion" (zeroLayoutRecursive
+    tree-traversal false-positive fix); while(true)/for(;;) still judged.
+  - Engine package-shape parsing: the engine reads package.json's bin field to produce cliFiles (bin entry
+    basename set) + appShape (app-type), injected into the RuleContext; package.json content is already inside
+    the cache hash, so shape changes invalidate naturally.
+  - All with regression tests (+13, 238 total cases); ENGINE_VERSION static-v4 → static-v5 (rule changes must
+    bump it).
 
 ## [0.1.1]
 
-
-- **round-6（回归测试第二轮）修复**：
-  - R1 new 形态漏检：new (globalThis.constructor.constructor)('return process')() 与 const c = ...; new c(...) 此前完全绕过——补 NewExpression 分支，callee 支持属性/元素访问链与 const 别名绑定追踪，全形态命中 critical。
-  - 缓存版本中毒：规则变更未递增 ENGINE_VERSION（static-v3 不变）→ 旧磁盘缓存被新引擎命中，返回旧规则结果（实测 247 条旧结果）；升至 static-v4，缓存 key 与 validReport 校验同步失效，加回归测试（旧版本缓存必须失效）。
-  - R9 ReDoS alternation 分支互斥判定：((?:[^']|'')*) 分支首字符不相交（非引号 vs 双引号）→ 线性不报；(a|aa)+ 分支重叠 → 仍报。
-- **安装文档补充（round-5 评估反馈）**：README 安装节新增本地 tarball 安装示例（dsh plugin add 本地 tgz + file: 协议兜底说明 + 手动解包挂载条目示例），并提示首次安装到大型 profile 可能耗时数分钟（pnpm 全量解析/锁文件更新/供应链校验，非 vet 自身开销）。
-- **round-5（外部 DSH 实测评估）修复**：
-  - R1 元素访问形态漏检：x["constructor"]("return " + "process") 此前完全绕过（verdict=clean）——恶意代码最常用的形态之一，现点访问/元素访问双形态 + 拼接/模板/const 绑定参数静态求值全部命中 critical。
-  - R3 信号处理误报：process.on/once('SIG*') 注册与信号回调内的 process.exit（优雅退出）是 MCP server 等常驻插件的正常操作面，降级 info 不进 verdict；裸 process.exit（错误路径等）保持 critical。
-  - R5 ctx.logger 误报：cordis 官方注入服务（DSH mcp-client 等大量使用）加入白名单，不再报 medium。
-  - R9 ReDoS 误报重写：旧正则把 (?:x)? 组首 '?' 修饰符误当量词，所有单可选组误报 medium——改为函数式判定（组内顶层量词 + 组后量词叠加才算），(a+)+ 类真 ReDoS 仍报。
-  - 以上全部带回归测试（+7，225 总用例）。
-- **构建卫生：lib/ 旧残留清理**：
-  - build 前加 clean 步骤（rm -rf lib 再编译）——已删除源文件的旧编译产物此前残留 lib/ 并随 tgz 发布（session-events.js、tools/audit-plugin.js、audit/ 下 6 个废弃模块 js + 对应 d.ts，均为旧 LLM 审计工具的兼容壳）；清理后 tarball 从 83 文件降到 66 文件，vitest.config.ts 同步移除两条指向废弃文件的 coverage exclude。
-- **round-4 审查修复（开源准备）**：
-  - R12 nodeMajorBelow22 单数字主版本漏检：旧实现假定主版本两位数（two=s[0]+s[1]），4.0.0 / 8.17.0 / 2.0.0 / 6.0.0 / 9.0.0 / 3.x / 5.5.0 全部漏提示——改为解析数字前缀主版本与 22 比较，并顺带支持 v 前缀（v18.0.0）。
-  - R12 pickEntry 补两种合法形态：exports 字符串形态（Node 合法）此前被跳过 → 无 main 且根无 index.js 时产生 medium 误报；exports 条件对象新增 node 条件（DSH 运行在 Node，node 条件最常见）——旧列表只有 import/require/default/types。
-  - P2-2 修复缺口：nearestPackageRoot 的 existsSync 探测未包 withVetSelfIo——扫描 ~/.dsh 下非 node_modules 文件时产生无主 fs-probe 自报警；已包直通（与 detectTargetKind/listSourceFiles/readPackageVersion 对齐）。
-  - budgetMs 移除 DSH_PLUGIN_VET_SCAN_BUDGET_MS env 覆盖：设大值会绕过宿主超时对齐，再次让 R8-skip 不可达（子进程被杀 → deny fail-closed 误拦）；测试用 timeoutMs 参数控制预算。
-  - 锁文件切换 npmjs 官方源：package-lock.json 全部 resolved 从 registry.npmmirror.com 重生成到 registry.npmjs.org（含完整 integrity），npm ci 冒烟验证 137 包干净安装。
-- **开源发布前自检（dogfood 实测）**：
-  - 蜜罐诱饵 R7 自命中修复：诱饵前缀（sk-/AKIA）改常量拼接，模板串拼接文本不再被自己的 R7 判 high——发布物自扫从 suspicious 转 clean，deny 模式重装 vet 不再自锁；加回归测试。
-  - esbuild 声明为直接 devDependency（此前靠 vitest 传递依赖，脆弱）。
-  - README 数字/表述同步：用例数 189→214；Known Limitations #8 改为 OSV 现状（精确版本查询、网络失败静默降级、可关闭）。
-  - 清理仓库内不存在的 PLAN.md 注释引用（19 处）；.gitignore 补 *.tgz（npm pack 产物）。
-- **三轮审查修复 + 审计协议扩展（P-2 计划项落地）**：
-  - P2-1 扫描预算与宿主超时失配：engine 预算原来 files×2s 无界，deny 15+/report 31+ 文件包在 R8-skip 触发前就被宿主 kill → 误报 scan-fail（deny fail-closed 会误拦合法大包）。现在请求携带宿主计划超时（protocol.timeoutMs），engine 预算=min(files×2s, 超时-1.5s)——R8-skip 恒先于 kill，优雅降级结构上可达；scan_plugin 工具超时改与 internal/plugin 同公式（按文件数放大、60s 封顶）。
-  - P2-2 vet 自查 IO 未纳入 vetSelfIo：archive.hasAuditRecord 的 ~/.dsh 目录 readdir 与 scan_plugin 的 listSourceFiles/detectTargetKind 读用户路径，在 .dsh 敏感段下产生无主 fs-probe 自报警——全部 withVetSelfIo 直通（盾牌轮询同款）。
-  - P2-3 跨模块重复安装 + 5s respawn 窗口竞态监控静默死亡：exit handler 在 decideRespawn=false 且 env 指向存活 pid 时记 warn + 黄灯 t1:sentinel-taken-over——接管换手可观测而非静默。
-  - P3-1/P3-3 OSV 只查精确版本：*、>=、^ 与无 version 主包跳过查询（isExactVersion 字符判定），消除按 range/全量历史查询的陈旧误报。
-  - P3-2 lastScan 加 TTL（24h，复用 alarmTtlMs）：一次 suspicious 扫描不再让盾牌永久黄；持续扫描自然续期。
-  - P3-4 file 目标身份识别：父目录有 package.json 时 detectTargetKind（插件文件逃逸判定不再恒 generic）。
-  - P-1 档案版本精确绑定：requireAudit 门槛按装机版本匹配档案（internal/plugin 提前解析根目录读版本）——插件升级后旧档案不放行新版本，必须重新审计。
-  - 新规则 R12（Cordis/DSH bundle 契约）：dsh.bundle.patch 声明缺失/入口文件缺失 → high（suspicious）；无入口（无 main/exports 且无 index.js）→ medium；插件意图包缺 name → medium；engines.node 主版本低于 22 → info。确定性清单检查，非插件意图包不判。
-  - scan_plugin 输出补 pluginVersion（档案/版本核对用）；AUDIT_PROTOCOL 新增 4.5 步「契约与代码质量审计」（错误处理/同步阻塞/资源泄漏/异步正确性/生命周期卫生与热重载幂等）+ 档案模板质量小节 + 结论判据加入质量维度（静态 clean 但有拖垮宿主类缺陷 → review）。
-  - P3-5 记录（非问题）：readHostMetrics 每次 5s 轮询全量扫 /proc 子进程——子进程多时开销随规模线性放大，当前量级可接受，留待后续按需缓存/降频。
-  - 误报修复（盾牌实测）：atomic-write 协议锁（`<file>.lock`）的删/写豁免——DSH 写 `~/.dsh/.credentials.yaml` 用 dsh-atomic-write（wx 创建仅含 PID 的锁兄弟文件、写完 finally 删锁），宿主每次保存凭据都触发无主 fs-destroy red 误报；锁文件非凭据本体，单路径写/删不再归敏感（凭据本体与 cp/rename 双路径语义不变）。
-- **二轮审查修复（全部 14 项核实并处理）**：
-  - P1-1 `guardDisabled` 不对称重置：off→watch 转换后哨兵永不启动——watch 分支开头复位（原 fresh-spawn 分支检查后直接 return，无任何日志）。
-  - P1-2 T1 复用模式报警丢失：复用旧哨兵 = 新实例没有其 stdout 管道，T1 报警全写进已废弃 VetStatus——改为清 env + 终止旧哨兵 + 全新 spawn（新管道新监听器）。
-  - P1-3 `rootIndexing` 标志泄漏：归因构建（loader.entries()/ctx.baseUrl）抛错时标志永久滞留 → 所有 T2 报警静默 bypass——整个构建体纳入 try/finally，包装器对归因失败 try/catch（报警保留无主，fs 调用永不中断）。
-  - P2-4 环形缓冲 replace 语义：窗口外同 id 重发先移除旧副本再入列——持续报警不再占满 20 槽（alarmCount 虚高、挤掉其他报警）。
-  - P2-5 M5 半实现：clean 结果不再前置 `\n\n`（此前 notes 为空也污染机器可读输出）。
-  - P2-6 `~/.dsh` 敏感段：配置根侦察（readdir/stat/读配置）此前完全不可见——加入敏感段；配套官方包归因全类降噪（平台本体高频 IO 不刷屏）+ vet 自 IO 直通（withVetSelfIo，盾牌轮询不自报警）。
-  - P2-7 deny 同步冻结：同步路径剔除 OSV 网络查询 + 超时封顶 30s（此前按文件数放大到 60s + OSV 4s；超时仍 fail-closed 反扫描规避）。
-  - P2-8 vet 条目匹配规则统一：strip/extract/read 三处此前 trim 与顶格不一致——缩进嵌套条目被误读/摘不掉；统一为只认顶格。
-  - P3-9 enable 分支缩进复用：写 runtimeGuard 不再硬编码 4 空格，复用原 config 缩进（非 4 空格配置不再写出损坏 YAML）。
-  - P3-10 OSV 依赖树：核对面从插件自身扩展到直接依赖（上限 8 个，官方包跳过，独立超时静默降级）。
-  - P3-11 README 同步：cordis_run 无 code 载荷不生效（保留守卫位），移除拦截宣称；M5 行为同步。
-  - P3-12 鉴权边界记录：dismiss/restore 同源校验（alarm-only 展示层，README 记录）。
-  - P3-13 判定：保留 deny 扫描失败 fail-closed（M9 反扫描规避），OSV 已移出 deny 同步路径（网络抖动不再影响）；README/CHANGELOG 记录取舍。
-  - P3-14 清理：osv.ts 过期注释同步、data/code-index.sock 工作残留删除、render.ts 文件尾补换行。
-- **生命周期补漏（Cordis 规范）**：T2 钩子与 T1 哨兵是全局资源（fs/child_process 猴子补丁 + 哨兵子进程），此前只在重新 apply 时清理——条目被彻底移除会遗留到进程退出。现在 apply 用 `ctx.effect` 注册 disposer（cordis fiber 卸载时运行；核验时发现 `ctx.on('dispose')` 不在 cordis 类型化事件面内、编译报错，改用 effect 挂载）；disposer 幂等（与 prevGuardDisposer 双保险）。
-- 开源发布准备：MIT 许可证、CONTRIBUTING/SECURITY/CODE_OF_CONDUCT、公开架构文档、npm 元数据。
-- 误报修复（实测两条）：
-  - T2 fs-destroy：工具链临时产物豁免——tsc 增量编译在源文件旁建的 `<源名>.<pid>.<uuid>.tmpdir`（`*.tmp`/`*.temp`/`*.swp` 等）随用随删，名字里的 secrets 只是被编译的源文件名；末段临时后缀不参与敏感词判定，父段照常判定（`~/.ssh/config.bak` 仍报警）。
-  - T1 growth：测量跨度必须覆盖完整窗口——起窗初期 20 秒内涨 274MB 的瞬时尖峰不再被标成"10 分钟持续膨胀疑似泄漏"。
-- 新功能：报警单条忽略/恢复——面板每条报警可「忽略」（不再计入盾牌等级与计数，记录保留、可「恢复」；报警停止后忽略自动失效，复发重新可见；与报警存储同生命周期，重启重置）。
-- **R31 崩溃修复（watch 模式实测崩溃，实为递归爆栈）**：T2 报警归因阶段（rootIndex 遍历 100+ 插件根）自身的 fs 探测再次进入被包装的 fs → 敏感包名（dsh-credentials / dsh-token-meter 等，实测递归 4041 层）再次 alarm → 归因 → 无限递归 → 每层重建正则 → V8 RegExpCompiler 栈耗尽，误报 OOM 进程崩溃。修复：归因期间置直通标志，包装器直通原始 fs 断开递归；segmentHasKeyword 正则按关键词缓存。护栏标志模块私有（不挂 globalThis——挂在全局等于给恶意插件一把让 vet 全体失明的钥匙）。
-- **A9 自伤修复（用户实测）**：T2 把 vet 自己误报成警报源的两条根因一并修掉：
-  - 归因排除 vet 自身：包装器帧（runtime-hooks.js）永远是报警栈栈顶，vet 根在归因映射里时一切宿主/无主报警都会栽到 vet 头上（实测 fs-probe realpathSync(...@deepseek-ai/dsh-credentials-local/package.json) 被归因为 @jieai/dsh-plugin-vet）。现在归因映射排除 vet，报警照发但归因到真实调用方（官方包/无主）。
-  - node_modules 包目录豁免：包名/包内文件是公开工件，含 credential/secret 等词的包名是正常生态（本机实测 12 个：@aws-sdk/credential-provider-*、@deepseek-ai/dsh-credentials(-local) 等）——宿主模块解析（require.resolve 内部 realpathSync/stat 包内 package.json）与 vet 扫描读取都会高频触碰，既往全部误报成 fs-probe。node_modules 段之后的路径段不再做敏感匹配；node_modules 之前的段照常判定（~/.ssh/node_modules/x 仍命中）；mutate 下系统根前缀（/usr 等）仍生效。
-  - rootIndex 归因映射只建一次并缓存：原来每次被分类的 fs 调用都重建（N×require.resolve），报警风暴时放大为 CPU 空转。
-- 安装可用性对照 DSH 官方 bundle 契约验证并修正：
-  - peerDependencies 对齐 DSH 0.1.0-rc.6 版本族（原 `^0.0.1-rc.1` 与真实安装版本不符，纯属侥幸可用）。
-  - 新增 `prepublishOnly`：发布前强制构建，防止 lib/（含 client bundle）缺失或过期。
-  - 清理 cordis.patch.yml 中指向已删除 PLAN.md 的内部注释。
-  - 端到端模拟全新用户安装全链路通过：`dsh plugin --profile <name> add <tarball>` → reconcilePlugins 识别 `dsh.bundle` → loadProfile 解析 bundle 层 → composeEntries 挂载 vet 条目 → client-registry 条件（`dsh.client`/exports["./client"]/inject 边）全部满足。
+- **round-6 (second regression-test round) fixes**:
+  - R1 new-form bypass: `new (globalThis.constructor.constructor)('return process')()` and `const c = ...; new c(...)`
+    were fully bypassed — added a NewExpression branch; the callee supports property/bracket-access chains and
+    const-alias binding tracking; all forms hit critical.
+  - Cache-version poisoning: rule changes didn't bump ENGINE_VERSION (static-v3 unchanged) → the old disk cache
+    was hit by the new engine and returned old-rule results (247 stale results in practice); bumped to
+    static-v4, cache key and validReport validation invalidate together, added a regression test (old-version
+    caches must invalidate).
+  - R9 ReDoS disjoint-alternation judgment: `((?:[^']|'')*)` branches' first characters are disjoint (non-quote
+    vs. double-quote) → linear, not reported; `(a|aa)+` branches overlap → still reported.
+- **Install docs added (round-5 evaluation feedback)**: README install section adds a local tarball install
+  example (`dsh plugin add` with a local tgz + file: protocol fallback note + manual unpack mount-entry
+  example), and notes the first install into a large profile may take several minutes (pnpm full resolution /
+  lockfile update / supply-chain validation — not vet's own overhead).
+- **round-5 (external DSH evaluation) fixes**:
+  - R1 bracket-access-form bypass: `x["constructor"]("return " + "process")` was previously fully bypassed
+    (verdict=clean) — one of the most common malicious forms; now both dot-access and bracket-access forms plus
+    concatenation/template/const-bound static arg evaluation all hit critical.
+  - R3 signal-handling false positive: process.on/once('SIG*') registration and process.exit inside signal
+    callbacks (graceful shutdown) are normal for resident MCP servers, downgraded to info (not into verdict);
+    bare process.exit (error paths, etc.) stays critical.
+  - R5 ctx.logger false positive: officially injected cordis services (heavily used by dsh-mcp-client, etc.)
+    added to the allowlist, no longer reported as medium.
+  - R9 ReDoS false-positive rewrite: the old regex treated a leading `?` modifier on a group `(?:x)?` as a
+    quantifier, misreporting all single-optional groups as medium — switched to a functional judgment (top-level
+    quantifier inside the group + quantifier after the group both count); real `(a+)+` ReDoS still reported.
+  - All with regression tests (+7, 225 total cases).
+- **Build hygiene: stale lib/ residue cleanup**:
+  - Added a clean step before build (rm -rf lib, then compile) — previously, compiled artifacts of deleted
+    sources lingered in lib/ and shipped in the tgz (session-events.js, tools/audit-plugin.js, 6 abandoned
+    modules under audit/ as js + matching d.ts, old LLM-audit-tool compat shells); after the cleanup the
+    tarball dropped from 83 to 66 files, and vitest.config.ts removed two coverage excludes pointing at the
+    abandoned files.
+- **round-4 review fixes (open-source prep)**:
+  - R12 nodeMajorBelow22 single-digit-major bypass: the old implementation assumed a two-digit major
+    (two=s[0]+s[1]), so 4.0.0 / 8.17.0 / 2.0.0 / 6.0.0 / 9.0.0 / 3.x / 5.5.0 all missed the hint — now parses
+    the numeric-prefix major and compares to 22, and supports a `v` prefix (v18.0.0).
+  - R12 pickEntry adds two legal forms: the exports string form (legal in Node) was previously skipped → no
+    main + no root index.js produced a medium false positive; the exports conditional object now includes the
+    `node` condition (DSH runs on Node; the node condition is the most common) — the old list only had
+    import/require/default/types.
+  - P2-2 fix gap: nearestPackageRoot's existsSync probe wasn't wrapped in withVetSelfIo — scanning
+    non-node_modules files under ~/.dsh produced unowned fs-probe self-alarms; now wrapped straight through
+    (aligned with detectTargetKind/listSourceFiles/readPackageVersion).
+  - budgetMs removed the DSH_PLUGIN_VET_SCAN_BUDGET_MS env override: a large value bypasses host-timeout
+    alignment and makes R8-skip unreachable again (subprocess killed → deny fail-closed false block); tests
+    control the budget via a timeoutMs parameter.
+  - Lockfile switched to the official npmjs source: all package-lock.json resolved URLs regenerated from
+    registry.npmmirror.com to registry.npmjs.org (with full integrity), npm ci smoke-verified clean install of
+    137 packages.
+- **Pre-open-source self-check (dogfood, verified)**:
+  - Honeypot-lure R7 self-hit fix: lure prefixes (sk-/AKIA) switched to constant concatenation, so template
+    concatenation text is no longer judged high by its own R7 — the shipped artifact self-scans clean (was
+    suspicious); reinstalling vet in deny mode no longer locks itself; regression test added.
+  - esbuild declared as a direct devDependency (previously a fragile transitive of vitest).
+  - README numbers/wording synced: case count 189→214; Known Limitations #8 rewritten to the OSV status quo
+    (exact-version queries, silent network-failure downgrade, can be disabled).
+  - Removed 19 references to a PLAN.md that no longer exists in the repo; .gitignore gains *.tgz (npm pack
+    output).
+- **Three-round review fixes + audit-protocol extension (P-2 plan items landed)**:
+  - P2-1 scan budget vs host timeout mismatch: the engine budget used to be unbounded files×2s, so 15+/31+ file
+    packages in deny/report got killed by the host before R8-skip triggered → false scan-fail (deny fail-closed
+    would block legitimate large packages). The request now carries the host's planned timeout
+    (protocol.timeoutMs); engine budget = min(files×2s, timeout-1.5s) — R8-skip always precedes the kill, so
+    graceful degradation is structurally reachable; scan_plugin's tool timeout uses the same formula as
+    internal/plugin (scaled by file count, capped at 60s).
+  - P2-2 vet self-check IO not covered by vetSelfIo: archive.hasAuditRecord's readdir of ~/.dsh and
+    scan_plugin's listSourceFiles/detectTargetKind reading user paths produced unowned fs-probe self-alarms
+    under the .dsh sensitive segment — all pass through withVetSelfIo (same as the shield polling).
+  - P2-3 cross-module duplicate install + 5s respawn-window race silently killed monitoring: the exit handler
+    now logs a warn + yellow t1:sentinel-taken-over when decideRespawn=false and env points at a live pid —
+    handover is observable, not silent.
+  - P3-1/P3-3 OSV exact-version only: `*`, `>=`, `^` and version-less main packages skip the query
+    (isExactVersion character judgment), eliminating stale range/full-history false positives.
+  - P3-2 lastScan gains a TTL (24h, reuses alarmTtlMs): one suspicious scan no longer turns the shield
+    permanently yellow; sustained scanning renews naturally.
+  - P3-4 file target-identity: when the parent directory has a package.json, detectTargetKind runs (plugin-file
+    escape judgment is no longer always generic).
+  - P-1 record exact-version binding: the requireAudit gate matches records against the installed version
+    (internal/plugin resolves the root package version early) — after a plugin upgrade the old record no longer
+    authorizes the new version; re-audit required.
+  - New rule R12 (Cordis/DSH bundle contract): missing declared dsh.bundle.patch / missing entry file → high
+    (suspicious); no entry (no main/exports and no index.js) → medium; plugin-intent package missing name →
+    medium; engines.node major < 22 → info. Deterministic manifest checks; non-plugin-intent packages aren't
+    judged.
+  - scan_plugin output adds pluginVersion (for record/version checks); AUDIT_PROTOCOL adds step 4.5 "contract
+    & code-quality audit" (error handling/synchronous blocking/resource leaks/async correctness/lifecycle
+    hygiene and hot-reload idempotence) + a quality section in the record template + the conclusion matrix gains
+    the quality dimension (statically clean but host-dragging defects → review).
+  - P3-5 recorded (not a problem): readHostMetrics fully scans /proc children every 5s poll — overhead scales
+    linearly with the number of children; acceptable at current magnitudes, left for later on-demand
+    caching/de-bursting.
+  - False-positive fix (shield-tested): atomic-write protocol-lock (`<file>.lock`) delete/write exemption —
+    DSH writes `~/.dsh/.credentials.yaml` via dsh-atomic-write (wx-creates a sibling lock file holding only the
+    PID, finally deletes the lock after writing), so every credential save triggered an unowned fs-destroy red
+    false positive; the lock file isn't the credential itself, so single-path write/delete is no longer
+    sensitive (credential body and cp/rename dual-path semantics unchanged).
+- **Second-round review fixes (all 14 items verified and handled)**:
+  - P1-1 `guardDisabled` asymmetric reset: off→watch transition never started the sentinel — the watch branch
+    now resets it at the start (the fresh-spawn branch used to return directly after the check, with no log).
+  - P1-2 T1 reuse-mode alarm loss: reusing the old sentinel = the new instance had no stdout pipe, so all T1
+    alarms went into the abandoned VetStatus — now clears env + terminates the old sentinel + spawns fresh (new
+    pipe, new listeners).
+  - P1-3 `rootIndexing` flag leak: when attribution construction (loader.entries()/ctx.baseUrl) threw, the flag
+    stuck forever → all T2 alarms silently bypassed — the whole construction is now in try/finally, and the
+    wrapper try/catches attribution failures (alarms stay, unowned; fs calls never interrupted).
+  - P2-4 ring-buffer replace semantics: an out-of-window resend of the same id first removes the old copy then
+    enqueues — sustained alarms no longer fill all 20 slots (inflated alarmCount, crowding out other alarms).
+  - P2-5 M5 half-implementation: clean results no longer get a `\n\n` prefix (previously polluted
+    machine-readable output even with empty notes).
+  - P2-6 `~/.dsh` sensitive segment: config-root reconnaissance (readdir/stat/config reads) was fully
+    invisible — added to the sensitive segment; paired with full-class official-attribution noise reduction
+    (platform-body high-frequency IO doesn't spam) + vet self-IO pass-through (withVetSelfIo, shield polling
+    doesn't self-alarm).
+  - P2-7 deny synchronous freeze: OSV network query removed from the synchronous path + timeout capped at 30s
+    (previously scaled by file count to 60s + OSV 4s; timeout still fails closed against scan-avoidance).
+  - P2-8 vet entry-match rule unified: strip/extract/read used inconsistent trim vs. top-level alignment —
+    indented nested entries were misread / not stripped; now only top-level matches.
+  - P3-9 enable-branch indentation reuse: writing runtimeGuard no longer hardcodes 4 spaces; reuses the
+    original config indentation (non-4-space configs no longer produce corrupt YAML).
+  - P3-10 OSV dependency tree: check surface extended from the plugin itself to direct dependencies (cap 8,
+    official packages skipped, independent timeout, silent downgrade).
+  - P3-11 README sync: cordis_run carries no code payload, so the guard slot is dormant (kept as a placeholder
+    slot); the interception claim was removed; M5 behavior synced.
+  - P3-12 auth boundary recorded: dismiss/restore do same-origin validation (alarm-only display layer; recorded
+    in the README).
+  - P3-13 judgment: keep deny scan-failure fail-closed (M9 scan-avoidance), OSV moved off the deny synchronous
+    path (network jitter no longer affects it); trade-off recorded in README/CHANGELOG.
+  - P3-14 cleanup: osv.ts stale comments synced, data/code-index.sock working residue deleted, render.ts
+    trailing newline added.
+- **Lifecycle gap-fill (Cordis convention)**: T2 hooks and the T1 sentinel are global resources (fs/
+  child_process monkey patches + sentinel subprocess) that were only cleaned up on re-apply — fully removing the
+  entry leaked them until process exit. apply now registers a disposer via `ctx.effect` (runs on cordis fiber
+  unmount; verification found `ctx.on('dispose')` isn't in cordis's typed event surface and failed to compile,
+  so effect mounting is used); the disposer is idempotent (belt-and-braces with prevGuardDisposer).
+- Open-source release prep: MIT license, CONTRIBUTING/SECURITY/CODE_OF_CONDUCT, public architecture document,
+  npm metadata.
+- False-positive fixes (two, empirically verified):
+  - T2 fs-destroy: toolchain temp-artifact exemption — tsc incremental compilation builds `<src>.<pid>.<uuid>.tmpdir`
+    next to sources (`*.tmp`/`*.temp`/`*.swp`, etc.) and deletes them as it goes; the secrets in their names are
+    just source filenames being compiled; the trailing temp suffix doesn't participate in sensitive-word
+    judgment, parent segments still judged (`~/.ssh/config.bak` still alarms).
+  - T1 growth: the measurement span must cover the full window — an early-window transient spike (274MB in the
+    first 20s) is no longer labeled "10-minute sustained growth, suspected leak".
+- New feature: per-alarm dismiss/restore — each alarm in the panel can be "dismissed" (no longer counts toward
+  shield level or count; the record stays and can be "restored"; a dismissed alarm auto-expires once the alarm
+  stops, so a recurrence is visible again; shares the alarm store's lifecycle, resets on restart).
+- **R31 crash fix (watch-mode crash, actually recursive stack overflow)**: T2 alarm attribution (rootIndex
+  traversing 100+ plugin roots) ran its own fs probes through the wrapped fs → sensitive package names
+  (dsh-credentials / dsh-token-meter, etc., 4041 recursion levels in practice) alarmed again → attribution →
+  infinite recursion → per-level regex rebuild → V8 RegExpCompiler stack exhaustion, a false OOM process crash.
+  Fix: set a pass-through flag during attribution; the wrapper passes through the original fs to break the
+  recursion; segmentHasKeyword regexes cached per keyword. The guard flag is module-private (hanging it on
+  globalThis would hand a malicious plugin the key to blind all of vet).
+- **A9 self-harm fix (user-reported)**: both root causes of T2 mis-attributing vet itself as the alarm source:
+  - Attribution excludes vet: the wrapper frame (runtime-hooks.js) is always the top of the alarm stack, so when
+    vet's root was in the attribution map, every host/unowned alarm got pinned on @jieai/dsh-plugin-vet
+    (in practice: fs-probe realpathSync(...@deepseek-ai/dsh-credentials-local/package.json) attributed to
+    @jieai/dsh-plugin-vet). Now the attribution map excludes vet — alarms still fire but attribute to the real
+    caller (official package / unowned).
+  - node_modules package-directory exemption: package names/inner files are public artifacts; names containing
+    credential/secret words are normal ecosystem (12 installed in practice: @aws-sdk/credential-provider-*,
+    @deepseek-ai/dsh-credentials(-local), etc.) — host module resolution (require.resolve's internal
+    realpathSync/stat of inner package.json) and vet's own scan reads both touch them at high frequency, and
+    they all previously false-positived as fs-probe. Path segments after node_modules no longer do sensitive
+    matching; segments before node_modules still judged (~/.ssh/node_modules/x still hits); under mutate,
+    system-root prefixes (/usr, etc.) still apply.
+  - rootIndex attribution map built once and cached: previously rebuilt per classified fs call (N×require.resolve),
+    amplifying to CPU spin during alarm storms.
+- Installability verified and corrected against the DSH official bundle contract:
+  - peerDependencies aligned to the DSH 0.1.0-rc.6 version family (the old `^0.0.1-rc.1` didn't match the
+    actually installed versions — pure luck that it worked).
+  - Added `prepublishOnly`: forces a build before publish, so lib/ (incl. the client bundle) can't be missing
+    or stale.
+  - Cleaned internal comments in cordis.patch.yml pointing at the deleted PLAN.md.
+  - End-to-end simulated a fresh-user install through the full chain: `dsh plugin --profile <name> add <tarball>`
+    → reconcilePlugins recognizes `dsh.bundle` → loadProfile resolves the bundle layer → composeEntries mounts
+    the vet entry → client-registry conditions (`dsh.client`/exports["./client"]/inject edges) all satisfied.
 
 ## [0.1.0] - 2026-08-16
 
-首个可发布版本。
+First releasable version.
 
 ### Added
 
-- 静态扫描引擎（scanner-bin）：R1-R11 规则集、确定性 verdict、评分模型、内容哈希缓存、OSV 已知漏洞核对（按版本过滤）。
-- 目标身份分级（targetKind）：DSH 插件包严格判定，普通 npm 包降级能力触达面——195 官方包 0 误报。
-- `scan_plugin` 工具：dynamic-code / package / file 三种扫描目标，verdict 只来自静态层。
-- `vet-audit-protocol` 技能：agent 引导的插件审查协议（AUDIT_PROTOCOL.md），健康档案落盘约定。
-- `requireAudit` 审计门槛：无档案的第三方插件加载 → report 报警 / deny 拦截（档案前缀防伪造）。
-- `tools/execute` 守卫：cordis_define / cordis_run / run_code / workflow 执行前代码扫描。
-- 运行时守卫（runtimeGuard: watch，alarm-only）：
-  - T1 哨兵：旁路 /proc 监视（内存/子进程/fd/膨胀窗口），单例锁防热重载叠加，意外退出自动重拉。
-  - T2 钩子：包装 fs / fs.promises / child_process，敏感路径操作/侦察/破坏性命令/蜜罐触碰报警，栈归因到插件包名。
-  - 蜜罐诱饵：隐蔽位置放假密钥，反蜜罐设计（无关键词），0700/0600 权限，幂等自愈。
-- GUI 盾牌：会话头部状态灯（绿/黄/红 + 计数徽标），报警面板、实时指标、守卫一键开关（重启生效），莫兰迪双主题。
-- 报警聚合：环形缓冲 + 同 id 去重 + TTL 过期（24h），一次误报不会永久黄/红。
+- Static scan engine (scanner-bin): R1-R11 rule set, deterministic verdict, scoring model, content-hash cache,
+  OSV known-vulnerability check (version-filtered).
+- Target-identity grading (targetKind): DSH plugin packages judged strictly; ordinary npm packages downgraded to
+  capability surface — 195 official packages, zero false positives.
+- `scan_plugin` tool: dynamic-code / package / file scan targets; the verdict comes only from the static layer.
+- `vet-audit-protocol` skill: agent-guided plugin review protocol (AUDIT_PROTOCOL.md), health-record on-disk
+  convention.
+- `requireAudit` audit gate: loading a third-party plugin without a record → report alarms / deny blocks
+  (record-prefix anti-forgery).
+- `tools/execute` guard: pre-execution code scan of cordis_define / cordis_run / run_code / workflow.
+- Runtime guard (`runtimeGuard: watch`, alarm-only):
+  - T1 sentinel: sidecar /proc monitor (memory/children/fd/growth window), singleton lock against hot-reload
+    stacking, auto-restart on unexpected exit.
+  - T2 hooks: wrap fs / fs.promises / child_process; sensitive-path operations/reconnaissance/destructive
+    commands/honeypot touches alarm; stack attribution to the plugin package name.
+  - Honeypot lures: fake keys in an unobtrusive location, anti-honeypot design (no keywords), 0700/0600
+    permissions, idempotent self-heal.
+- GUI shield: session-header status light (green/yellow/red + count badge), alarm panel, live metrics,
+  one-click guard toggle (takes effect on restart), Morandi dual theme.
+- Alarm aggregation: ring buffer + per-id dedup + TTL expiry (24h) — one false positive never turns the shield
+  permanently yellow/red.
 
 ### Fixed
 
-- 哨兵 respawn 死代码（env 先删后比恒 false）——监控崩溃后现在会自动恢复。
-- report 模式扫描同步阻塞事件循环——改异步子进程，大包不再冻结宿主。
-- T2 报警 id 缺 pluginHint 导致跨插件报警互吞。
-- fs.open 把首参路径误当 flags（open('auth.txt','r') 误报写入）。
-- exec 破坏性命令（rm -rf ~/.ssh 等）与敏感路径重定向漏检。
-- 扫描缓存键缺 targetKind/runtime 导致的跨上下文串味。
-- OSV 查询不带版本导致的已修复版本误报。
-- R7 硬编码密钥整段占位符误杀（真实 key 混 example 漏报）。
-- R11 fsBase 用 startsWith('fs') 误伤 fsmap 等自定义对象。
-- R2 eval/Function 缺遮蔽检查、factory 注入 require 嵌套函数误报。
-- 蜜罐文件权限 0644 同机可读（收紧 0600/0700）。
+- Sentinel respawn dead code (env was deleted before the comparison, always false) — monitoring now recovers
+  after a crash.
+- Report-mode scan synchronously blocked the event loop — switched to an async subprocess; large packages no
+  longer freeze the host.
+- T2 alarm id lacked pluginHint, letting alarms across plugins swallow each other.
+- fs.open treated the first-arg path as flags (open('auth.txt','r') false-positived as a write).
+- exec destructive commands (rm -rf ~/.ssh, etc.) and sensitive-path redirection missed.
+- Scan cache key lacked targetKind/runtime, cross-context contamination.
+- OSV query without a version false-positived already-fixed versions.
+- R7 hardcoded-secret whole-segment placeholder false kill (real key mixed with example missed).
+- R11 fsBase used startsWith('fs'), hurting custom objects like fsmap.
+- R2 eval/Function lacked a shadowing check; factory-injected require in nested functions false-positived.
+- Honeypot file permission 0644 readable on the same machine (tightened to 0600/0700).
 
 ### Security
 
-- scanner 独立子进程，AST 只读、从不 eval，恶意输入不影响宿主。
-- 扫描失败 deny 模式 fail-closed（拦截 + 告警，不静默放行）。
-- 缓存严格形状校验防本地伪造。
-- 档案命名严格正则防前缀伪造。
+- Scanner is a separate subprocess; AST read-only, never eval'd; malicious input can't affect the host.
+- Scan failure in deny mode fails closed (block + alarm, no silent pass).
+- Cache strict-shape validation against local forgery.
+- Strict record-naming regex against prefix forgery.

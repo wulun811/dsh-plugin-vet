@@ -1,43 +1,48 @@
-# @jieai/dsh-plugin-vet — DSH 插件信任流水线
+# @jieai/dsh-plugin-vet — Trust pipeline for DSH plugins
 
 [![npm version](https://img.shields.io/npm/v/@jieai/dsh-plugin-vet)](https://www.npmjs.com/package/@jieai/dsh-plugin-vet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933)](package.json)
 
-> 安装任何插件前，先让 dsh-plugin-vet 走一遍：静态规则给出 verdict（确定性、不可伪造），
-> agent 按 vet-audit-protocol 技能排查敏感点与质量问题（谁也无法替代），最终一张评分卡交给人/模型决定。
+> Before installing any plugin, run it through dsh-plugin-vet: static rules produce a verdict (deterministic,
+> unforgeable), the agent investigates sensitive points and quality issues following the `vet-audit-protocol`
+> skill (no one can substitute for that), and a final scorecard is handed to a human/model to decide.
 >
-> **定位：监控报警器，不是打手。** vet 只做「检查 → 报警 → 给建议」：写时查（静态扫描）、
-> 跑时盯（运行时守卫）、报警面（评分卡 + GUI 盾牌状态灯）。**vet 永不替用户动手**——不自动卸载、
-> 不自动杀进程、不自动改配置；deny 模式是部署者显式开启的 opt-in，不构成产品身份。最终怎么处置，
-> 由用户在自己的 DSH 上操作决定。
+> **Positioning: a monitoring alarm, not an enforcer.** vet only does "check → alarm → advise": checks at
+> write time (static scan), watches at run time (runtime guard), and surfaces alarms (scorecard + GUI shield
+> status light). **vet never acts on your behalf** — it never auto-uninstalls, never kills processes, never
+> rewrites configs; deny mode is an explicit opt-in by the deployer and is not part of the product identity.
+> The final disposition is always decided by the user on their own DSH.
 
-@jieai/dsh-plugin-vet 是 deepseek-harness 生态的**信任层插件**：占据
-**下载 → 扫描 → 审计 → 评分 → 决定 → 运行时盯梢** 这一整套信任流水线。运行时盯梢内置**蜜罐诱饵**：谁偷偷翻找密钥文件，当场现形（opt-in，`honeypot.enabled`）。**不做**插件市场本体（目录/分发）。
+@jieai/dsh-plugin-vet is the **trust-layer plugin** in the deepseek-harness ecosystem: it occupies the whole
+**download → scan → audit → score → decide → runtime watch** trust pipeline. The runtime watch ships built-in
+**honeypot lures**: anyone quietly rifling through key files gets caught red-handed (opt-in, `honeypot.enabled`).
+It does **not** provide a plugin marketplace itself (catalog/distribution).
 
-- 📚 架构设计：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- 🧾 审查协议：[AUDIT_PROTOCOL.md](AUDIT_PROTOCOL.md)
-- 🛡️ 安全政策：[SECURITY.md](SECURITY.md)
-- 🤝 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
+- 📚 Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 🧾 Audit protocol: [AUDIT_PROTOCOL.md](AUDIT_PROTOCOL.md)
+- 🛡️ Security policy: [SECURITY.md](SECURITY.md)
+- 🤝 Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
 
-## 安装
+## Installation
 
 ```sh
 dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 ```
 
-安装即生效链路：pnpm 安装 → `reconcilePlugins` 读 `dsh.bundle` → 下次启动 `loadProfile`
-解析 bundle 挂载插件。默认配置见下方 Config（fail-open：只报告不拦截）。
+Install-and-activate chain: pnpm install → `reconcilePlugins` reads `dsh.bundle` → on next start `loadProfile`
+resolves the bundle and mounts the plugin. Default configuration is in the Config section below
+(fail-open: reports only, never blocks).
 
-**本地 tarball 安装**（离线/先验证再发版场景）：
+**Local tarball install** (offline or verify-before-release scenario):
 
 ```sh
 dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.3.tgz
-# 或直接解包到 profile 的 node_modules：
+# or unpack directly into the profile's node_modules:
 # tar -xzf jieai-dsh-plugin-vet-0.1.3.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
-// 并在 profile 的 cordis.patch.yml 里 insert 挂载条目：
+// and add an insert mount entry in the profile's cordis.patch.yml:
 //   - insert:
 //       - id: plugin-vet
 //         name: '@jieai/dsh-plugin-vet'
@@ -46,179 +51,277 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.3.tgz
 //           autoScan: true
 ```
 
-> 路径/相对路径/URL 均可（`dsh plugin add` 走 pnpm 的 `file:` 协议兜底，本地 tgz 直接解析）。
+> Paths / relative paths / URLs all work (`dsh plugin add` falls back to pnpm's `file:` protocol; a local tgz is
+> resolved directly).
 >
-> **首次安装耗时提示**：`dsh plugin add` 首次安装到大型 profile 可能耗时数分钟——
-> 期间 pnpm 会做全量依赖解析、更新 500+ 包的 lockfile 并对整棵依赖树做供应链策略校验
-> （vet 自身只带 2 个运行时依赖，耗时大头是 profile 已有依赖树的解析/校验，不是 vet）。
-> 校验完成后再次安装/更新只需秒级（复用校验结果）。
+> **First-install time note**: the first `dsh plugin add` into a large profile can take several minutes — during
+> that time pnpm does a full dependency resolution, updates the lockfile for 500+ packages and runs supply-chain
+> policy validation over the whole dependency tree (vet itself carries only 2 runtime dependencies; the bulk of
+> the time is parsing/validating the profile's existing tree, not vet). Subsequent installs/updates take seconds
+> (validation results are reused).
 
+> **Compatibility**: vet targets DSH 0.1.0-rc.6+ (peer range `^0.1.0-rc.6`). pnpm may warn about unmet peer
+> dependencies — this is expected: profile templates set `autoInstallPeers: false`, and at runtime the packages
+> resolve from the DSH install closure (`$DSH_HOME/profiles/node_modules` fallback layer); you neither need nor
+> should install another copy of the cordis family in the profile.
 
-> **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer 范围 `^0.1.0-rc.6`）。安装时 pnpm 可能提示
-> unmet peer dependency——这是预期的：profile 模板 `autoInstallPeers: false`，运行期从 DSH 安装闭包
-> （`$DSH_HOME/profiles/node_modules` 回退层）解析，无需也不能在 profile 里另装一份 cordis 全家桶。
+> **Watch scope = the profile vet is installed into.** vet's guards are in-process events
+> (`internal/plugin`) — whichever profile vet is installed into is the one whose loaded plugins it guards.
+> For multi-profile deployments, install vet into every profile you want guarded
+> (`dsh plugin --profile <name> add @jieai/dsh-plugin-vet`) and point `requireAudit` at the matching profile's
+> cordis.patch.yml.
 
-> **监控范围 = 安装 vet 的 profile。** vet 的守卫是进程内事件（`internal/plugin`）——
-> vet 装进哪个 profile，就只守那个 profile 实例加载的插件。多 profile 部署时，
-> 每个要守的 profile 都要装一份 vet（`dsh plugin --profile <name> add @jieai/dsh-plugin-vet`），
-> 并把 requireAudit 配到对应 profile 的 cordis.patch.yml。
+## Config (cordis.yml)
 
-## Config（cordis.yml）
-
-| 键 | 默认 | 说明 |
+| Key | Default | Description |
 |---|---|---|
-| `mode` | `report` | `report` 只报告不拦截；`deny` 显式开启拦截 |
-| `autoScan` | `true` | 新插件（`internal/plugin`）自动静态扫描 |
-| `scannerTimeoutMs` | `15000` | 静态扫描子进程超时 |
-| `requireAudit` | `false` | 审计门槛（opt-in）：开启后新插件加载时检查 `~/.dsh/vet/audits/` 健康档案——无档案则 `report` 模式记录黄色 `audit-required` 告警、`deny` 模式拦截。档案由 agent 按 `vet-audit-protocol` 技能审查后手写落盘 |
-| `rules` | `{}`（全开） | 规则开关（R1-R12） |
-| `denyOn` | `critical` | `mode: deny` 时的拦截阈值 |
-| `allowlist` | `[]` | 包名/插件 id 白名单（跳过扫描） |
-| `runtimeGuard` | `off` | 运行时守卫（性能/稳定代价 opt-in）：`off` 关；`watch` 启用 T1 哨兵 + T2 钩子，**只报警不动作** |
-| `runtimeIntervalMs` | `2000` | T1 哨兵 /proc 采样间隔 |
-| `runtimeMemLimitMb` | `2048` | T1 内存报警阈值（宿主 VmRSS，超限 → red） |
-| `runtimeForkBurstN` | `5` | T1 子进程突增报警阈值（单轮增量，→ red） |
-| `runtimeFdLimit` | `512` | T1 文件描述符报警阈值（→ yellow） |
-| `runtimeGrowthMb` | `256` | T1 内存持续膨胀报警阈值（**完整窗口**内 RSS 净增长，→ yellow 疑似泄漏；起窗初期的瞬时尖峰不构成窗口级持续膨胀，不会误报） |
-| `runtimeGrowthWindowMs` | `600000` | 膨胀检测窗口（默认 10 分钟） |
-| `honeypot.enabled` | `false` | 蜜罐诱饵（需 `runtimeGuard: watch`）：往 `honeypot.dir` 放假密钥诱饵，T2 对诱饵路径的触碰（读/写/删）单独报 `honeypot` 类报警。目录/文件名/内容均无蜜罐关键词（反蜜罐），默认位置 `~/.dsh/.local`，诱饵值全是格式正确但无效的假凭据 |
-| `honeypot.dir` | `''` | 诱饵目录；空 = `$HOME/.dsh/.local` |
-| `osvCheck` | `true` | 扫描 package.json 时向 Google OSV 查询已知漏洞（**仅精确版本**查询：range（*、>=、^、~）与无 version 的主包跳过，P3-1/P3-3——避免陈旧全量历史误报；round-7 起 range 不再剥前缀当下界精确版查询）；核对面 = 插件自身 + 直接依赖（上限 8 个，`@deepseek-ai/*` 官方包跳过，P3-10）；间接传递树超出 OSV v1 范围与扫描预算。默认开启会外发包名到 api.osv.dev，网络失败静默降级。介意隐私可设 false |
+| `mode` | `report` | `report` reports only, never blocks; `deny` explicitly enables blocking |
+| `autoScan` | `true` | Automatically static-scan new plugins (`internal/plugin`) |
+| `scannerTimeoutMs` | `15000` | Static-scan subprocess timeout |
+| `requireAudit` | `false` | Audit gate (opt-in): when enabled, loading a new plugin checks `~/.dsh/vet/audits/` for a health record — without one, `report` mode logs a yellow `audit-required` alarm, `deny` mode blocks. Records are written to disk by hand by the agent following the `vet-audit-protocol` skill |
+| `rules` | `{}` (all on) | Per-rule switches (R1-R12) |
+| `denyOn` | `critical` | Blocking threshold in `mode: deny` |
+| `allowlist` | `[]` | Package/plugin-id allowlist (skip scanning) |
+| `runtimeGuard` | `off` | Runtime guard (performance/stability cost, opt-in): `off` = disabled; `watch` enables the T1 sentinel + T2 hooks, **alarm-only** |
+| `runtimeIntervalMs` | `2000` | T1 sentinel /proc sampling interval |
+| `runtimeMemLimitMb` | `2048` | T1 memory alarm threshold (host VmRSS, over limit → red) |
+| `runtimeForkBurstN` | `5` | T1 child-process burst alarm threshold (single-round delta → red) |
+| `runtimeFdLimit` | `512` | T1 file-descriptor alarm threshold (→ yellow) |
+| `runtimeGrowthMb` | `256` | T1 sustained memory-growth alarm threshold (**net RSS growth over the full window** → yellow, suspected leak; an early-window spike does not count as window-level sustained growth, so no false positive) |
+| `runtimeGrowthWindowMs` | `600000` | Growth-detection window (default 10 minutes) |
+| `honeypot.enabled` | `false` | Honeypot lures (needs `runtimeGuard: watch`): plants fake key lures in `honeypot.dir`; T2 reports touches (read/write/delete) of lure paths as a separate `honeypot` alarm class. Directory/file names and contents carry no honeypot keywords (anti-honeypot), default location `~/.dsh/.local`, lure values are well-formed but invalid fake credentials |
+| `honeypot.dir` | `''` | Lure directory; empty = `$HOME/.dsh/.local` |
+| `osvCheck` | `true` | Query Google OSV for known vulnerabilities when scanning package.json (**exact-version queries only**: ranges (`*`/`>=`/`^`/`~`) and version-less main packages are skipped, P3-1/P3-3 — avoids stale full-history false positives; since round-7 ranges are no longer stripped to query as exact lower bounds). Verified targets = the plugin itself + direct dependencies (cap 8, official `@deepseek-ai/*` packages skipped, P3-10); transitive trees exceed the OSV v1 scope and the scan budget. Default on sends package names to api.osv.dev; network failure degrades silently. Set false if privacy-sensitive |
 
-`@deepseek-ai/*` 官方包默认豁免（内置信任）。
+Official `@deepseek-ai/*` packages are exempt by default (built-in trust).
 
-## 工具
+## Tools
 
-- **`scan_plugin`** — 确定性静态扫描：`target` = `dynamic-code`（源码字符串）/ `package`（包目录）/ `file`（单文件）。返回评分卡（verdict + staticScore + findings）。verdict 只由静态规则产出。
-- **`vet-audit-protocol`（技能）** — 审查流程协议（`AUDIT_PROTOCOL.md`）：agent 按预设步骤审查新插件——scan_plugin 静态判据（含 R12 Cordis/DSH 契约）→ 读清单/源码 → 逐条核实发现 → 主动深挖（网络/文件/进程/凭据/库语义）→ **契约与代码质量审计**（4.5 步：入口/Config schema 一致性、错误处理/同步阻塞/资源泄漏/异步正确性等「写得烂」问题——静态干净≠值得装）→ 用系统写入能力手写健康档案到 `~/.dsh/vet/audits/<plugin>-<version>-<ts>.md`。vet 不内置审计工具、不替 agent 调查，只给判据与落盘约定。
+- **`scan_plugin`** — deterministic static scan: `target` = `dynamic-code` (source string) / `package` (package
+  directory) / `file` (single file). Returns a scorecard (verdict + staticScore + findings). The verdict is
+  produced only by static rules.
+- **`vet-audit-protocol` (skill)** — audit-process protocol (`AUDIT_PROTOCOL.md`): the agent audits a new plugin
+  in preset steps — scan_plugin static criteria (incl. R12 Cordis/DSH contract) → read manifest/source →
+  verify each finding → proactively dig deeper (network/files/processes/credentials/library semantics) →
+  **contract & code-quality audit** (step 4.5: entry/Config-schema consistency, error handling/synchronous
+  blocking/resource leaks/async correctness and other "badly written" issues — statically clean ≠ worth
+  installing) → hand-write a health record to `~/.dsh/vet/audits/<plugin>-<version>-<ts>.md` using the system
+  write capability. vet ships no audit tooling and does not investigate for the agent — it only provides the
+  criteria and the on-disk convention.
 
-## 自动行为
+## Automatic behavior
 
-- **`internal/plugin` 自动扫描**（`autoScan: true`）：新装第三方 npm 包加载时自动静态扫描；`deny` 模式 + verdict ≥ `denyOn` → 回滚加载。
-- **审计门槛**（`requireAudit: true`）：无健康档案的第三方插件加载时——`report` 模式记录黄色 `audit-required` 告警（进 /vet/status.json 告警列表，插件照常加载）；`deny` 模式回滚加载（引用 `vet-audit-protocol` 提示先审查）。**档案按版本精确匹配**（P-1）：插件升级后旧版本档案不放行新版本——重新审查才能消除告警/拦截。
-- **`tools/execute` 拦截**：`cordis_define` / `run_code` / `workflow` 执行前扫描代码字符串（`cordis_run` 的真实 schema 无 code 载荷，保留守卫位不生效，P3-11 同步）；`report` 模式仅在非 clean 结果时加 `VET:` 前缀（干净执行不污染机器可读输出），`deny` 模式直接拦截（isError）。
-- **运行时守卫（`runtimeGuard: watch`）**——alarm-only：
-  - **T1 哨兵**：旁路子进程每 `runtimeIntervalMs` 读宿主 /proc（VmRSS / 子进程数 / fd 数），报警 JSON 行回传宿主 → 盾牌变黄/红。
-  - **T2 钩子**：进程内包装 fs / child_process（含 fs.promises），危险操作（敏感路径写入/删除、读密钥文件、含 shell/下载外联关键词的子进程、蜜罐诱饵触碰、`~/.dsh` 配置根侦察）取栈归因到插件包名后报警；官方包归因全类降噪（能力授权——官方包是平台本体，高频读写 `~/.dsh` 会话/配置/存储不刷屏；第三方无法伪造归因）。**从不阻断调用**。自伤豁免（实测误报后修复）：
-    - **node_modules 包目录豁免**：包名/包内文件是公开工件——含 credential/secret 等词的包名是正常生态（`@aws-sdk/credential-provider-*`、`@deepseek-ai/dsh-credentials-local` 等），宿主模块解析（require.resolve 内部 realpathSync/stat 包内 package.json）与 vet 扫描读取都会高频触碰，不再误报 fs-probe；node_modules 之前的段照常判定（`~/.ssh/node_modules/x` 仍命中 .ssh），写删系统根（/usr 等）仍报警。
-    - **归因排除 vet 自身**：包装器帧永远是报警栈栈顶，vet 根不参与归因映射——宿主/无主报警不再栽到 vet 头上（报警照发，归因到真实调用方）。
-    - 工具链临时产物（tsc `<源名>.<pid>.<uuid>.tmpdir`、`*.tmp`、`*.temp`、`*.swp` 等）自动豁免——名字里的 secrets/credentials 只是被编译的源文件名，删它是清理不是破坏；父段照常判定（`~/.ssh/config.bak` 仍报警）。
-- **GUI 盾牌**：浏览器半区注册进 `conversation.session.header.actions`，轮询 /vet/status.json 显示绿/黄/红灯 + 报警计数。激活需 `dsh web` 重启（重启后 client-modules 才扫描到 `dsh.client` 声明）。
-  - 交互：**可点击**——点击展开报警面板（**实时指标**：内存/CPU/I-O/子进程/fd；**守卫状态**：未开启时可一键写入 runtimeGuard: watch 配置（重启生效）；**报警列表**含严重度/归因/**逐条建议**；最近扫描回显、刷新、更新时刻），外部点击自动关闭；有报警时盾牌旁显示计数徽标（绿/黄/红主题色，明暗自适应）。
-  - **单条忽略**：每条报警可点「忽略」——只影响展示（不再计入盾牌等级与计数），记录保留可随时「恢复」；报警停止后忽略自动失效，将来复发会重新可见（可再忽略）。忽略状态与报警存储同生命周期（重启即重置）。鉴权边界（P3-12 记录）：dismiss/restore 仅做同源校验（alarm-only 展示层风险——同源页面脚本可隐藏报警，但记录不删、不影响其他能力，体系内可接受）。
-  - **展示上限**：面板展示最近 8 条报警；存储为环形缓冲上限 20 条，同 id 60 秒内去重，24 小时 TTL 过期（持续触发会自然续期）——100 条不会全量展示，也无需展示（新报警会顶掉最旧的）。最近扫描回显（suspicious → 黄灯）同样按 24h TTL 过期（P3-2：一次可疑扫描不再永久黄，持续扫描自然续期）。
+- **`internal/plugin` auto-scan** (`autoScan: true`): newly installed third-party npm packages are
+  static-scanned on load; `deny` mode + verdict ≥ `denyOn` → load rolled back.
+- **Audit gate** (`requireAudit: true`): loading a third-party plugin without a health record — `report` mode
+  logs a yellow `audit-required` alarm (enters the /vet/status.json alarm list, plugin loads normally); `deny`
+  mode rolls back the load (references `vet-audit-protocol` as a prompt to audit first). **Records match by
+  exact version** (P-1): after a plugin upgrade the old version's record no longer authorizes the new version —
+  re-audit is required to clear the alarm/block.
+- **`tools/execute` interception**: `cordis_define` / `run_code` / `workflow` are scanned before execution
+  (`cordis_run`'s real schema carries no code payload, so the guard slot stays dormant — P3-11 synced);
+  `report` mode prefixes non-clean results with `VET:` (clean executions don't pollute machine-readable
+  output), `deny` mode blocks outright (isError).
+- **Runtime guard (`runtimeGuard: watch`)** — alarm-only:
+  - **T1 sentinel**: a sidecar subprocess reads the host /proc every `runtimeIntervalMs`
+    (VmRSS / child-process count / fd count) and streams alarm JSON lines back to the host → shield turns
+    yellow/red.
+  - **T2 hooks**: in-process wrappers around fs / child_process (incl. fs.promises); dangerous operations
+    (sensitive-path writes/deletes, key-file reads, subprocesses with shell/download/exfiltration keywords,
+    honeypot-lure touches, `~/.dsh` config-root reconnaissance) are attributed via the stack to the plugin
+    package name before alarming; official packages get full-class noise reduction via attribution (capability
+    grant — official packages are the platform itself; their high-frequency `~/.dsh` session/config/storage
+    reads don't spam; third parties can't forge attribution). **Never blocks a call.** Self-harm exemptions
+    (fixed after real-world false positives):
+    - **node_modules package-directory exemption**: package names/inner files are public artifacts — package
+      names containing credential/secret words are normal ecosystem (`@aws-sdk/credential-provider-*`,
+      `@deepseek-ai/dsh-credentials-local`, etc.), and both host module resolution (require.resolve's internal
+      realpathSync/stat of inner package.json) and vet's own scan reads touch them at high frequency, so they
+      no longer false-positive as fs-probe; path segments before node_modules still judged normally
+      (`~/.ssh/node_modules/x` still hits .ssh), and write/delete of system roots (/usr etc.) still alarms.
+    - **Attribution excludes vet itself**: the wrapper frame is always the top of the alarm stack, and the vet
+      root never participates in attribution mapping — host/unowned alarms are no longer pinned on vet (the
+      alarm still fires, attributed to the real caller).
+    - Toolchain temp artifacts (tsc `<src>.<pid>.<uuid>.tmpdir`, `*.tmp`, `*.temp`, `*.swp`, etc.) are
+      auto-exempt — the secrets/credentials in their names are just source filenames being compiled; deleting
+      them is cleanup, not destruction; parent segments still judged normally (`~/.ssh/config.bak` still
+      alarms).
+- **GUI shield**: a browser half registers into `conversation.session.header.actions` and polls
+  /vet/status.json to show a green/yellow/red light + alarm count. Activation requires a `dsh web` restart
+  (client-modules only scans the `dsh.client` declaration at startup).
+  - Interaction: **clickable** — clicking expands the alarm panel (**live metrics**: memory/CPU/I-O/
+    child-process/fd; **guard status**: when off, one click writes a `runtimeGuard: watch` config (takes
+    effect on restart); **alarm list** with severity/attribution/**per-item advice**; recent-scan echo,
+    refresh, updated time), outside clicks close it; when alarms exist a count badge appears next to the
+    shield (green/yellow/red theme color, light/dark adaptive).
+  - **Per-item dismiss**: each alarm can be "dismissed" — display-only (no longer counts toward shield level
+    or count), the record is kept and can be "restored"; a dismissed alarm auto-expires once the alarm stops,
+    so a recurrence is visible again (and can be dismissed again). Dismiss state shares the alarm store's
+    lifecycle (resets on restart). Auth boundary (P3-12 recorded): dismiss/restore only do same-origin
+    validation (alarm-only display-layer risk — a same-origin page script could hide alarms, but records
+    aren't deleted and nothing else is affected; acceptable within the system).
+  - **Display caps**: the panel shows the latest 8 alarms; the store is a ring buffer capped at 20, deduped
+    per id within 60s, 24h TTL (sustained triggers naturally renew) — 100 alarms are not displayed in full,
+    and needn't be (new alarms push out the oldest). Recent-scan echo (suspicious → yellow) also expires on
+    the 24h TTL (P3-2: one suspicious scan no longer turns the shield permanently yellow; sustained scanning
+    renews naturally).
 
-## 静态规则表（R1-R12）
+## Static rule table (R1-R12)
 
-| ID | 名称 | 默认级别 | 适用场景 | 确定性 |
+| ID | Name | Default level | Scope | Determinism |
 |---|---|---|---|---|
-| R1 | constructor 链逃逸 | critical | code + files | certain/likely |
-| R2 | 动态执行（eval/Function/import/require） | high（files）/ medium（code；bin 入口降 medium） | both | certain/likely |
-| R3 | process 直接访问（按 runtime 分级；只读成员/generic/bin 入口/应用型包 → info） | critical（host）/ high（sandbox） | both | certain |
-| R4 | 宿主闭包捕获（agent/TextEncoder…）+ 宿主全局原型污染 | critical（code）/ high（files，与 targetKind 无关） | both | certain/likely |
-| R5 | ctx 逃逸尝试信号（withheld 成员/未声明服务；`ctx.logger` 等官方注入服务白名单放行） | medium | 仅 code | likely |
-| R6 | 字符串粗扫兜底（混淆特征需与动态执行组合证据） | info | both | heuristic |
-| R7 | 硬编码密钥 | high | both | likely |
-| R9 | 资源安全（无界分配/无出口同步循环/循环内 spawn/ReDoS/递归无终止/循环内增长模式） | high（分配/死循环/fork）/ medium（ReDoS/递归/Map.set）/ info（常驻循环/+=/Promise.all） | both | certain/likely/heuristic |
-| R10 | 供应链（package.json install 钩子/依赖清单） | high（install 钩子）/ info（依赖清单） | files | likely/heuristic |
-| R11 | 破坏性文件操作（fs 删除/敏感路径读写） | high（敏感路径）/ medium（删除） | both | likely |
-| R12 | Cordis/DSH 契约（入口文件/bundle patch 声明/name/engines.node） | high（patch 缺失/入口缺失）/ medium（无入口/缺 name）/ info（node 版本低） | files | certain/likely |
+| R1 | constructor-chain escape | critical | code + files | certain/likely |
+| R2 | Dynamic execution (eval/Function/import/require) | high (files) / medium (code; bin entries drop to medium) | both | certain/likely |
+| R3 | Direct process access (runtime-graded; read-only members/generic/bin entries/app-type packages → info) | critical (host) / high (sandbox) | both | certain |
+| R4 | Host closure capture (agent/TextEncoder…) + host-global prototype pollution | critical (code) / high (files, independent of targetKind) | both | certain/likely |
+| R5 | ctx-escape attempt signal (withheld members/undeclared services; `ctx.logger` and other officially injected services are allowlisted) | medium | code only | likely |
+| R6 | String coarse-scan fallback (obfuscation signals need combined evidence with dynamic execution) | info | both | heuristic |
+| R7 | Hardcoded secrets | high | both | likely |
+| R9 | Resource safety (unbounded allocation / exit-less synchronous loops / spawn-in-loop / ReDoS / non-terminating recursion / growth patterns in loops) | high (allocation/dead-loop/fork) / medium (ReDoS/recursion/Map.set) / info (resident loops/+=/Promise.all) | both | certain/likely/heuristic |
+| R10 | Supply chain (package.json install hooks / dependency manifest) | high (install hooks) / info (dependency manifest) | files | likely/heuristic |
+| R11 | Destructive file operations (fs deletes / sensitive-path reads-writes) | high (sensitive paths) / medium (deletes) | both | likely |
+| R12 | Cordis/DSH contract (entry file / bundle-patch declaration / name / engines.node) | high (missing patch / missing entry) / medium (no entry / missing name) / info (low node version) | files | certain/likely |
 
-## 评分模型
+## Scoring model
 
-`staticScore = max(0, 100 - Σ(severity 权重 × 命中数 × confidence 系数))`
+`staticScore = max(0, 100 - Σ(severity weight × hits × confidence coefficient))`
 
-verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `critical`；否则 high ≥ 1 → `suspicious`；其余 → `clean`。**verdict 只由静态层产出**：staticScore 与 verdict 分开呈现，不合成单一总分。
+verdict (the single authoritative judgment; heuristics never upgrade): critical ≥ 1 → `critical`; otherwise
+high ≥ 1 → `suspicious`; otherwise → `clean`. **The verdict is produced only by the static layer**: staticScore
+and verdict are shown separately and never merged into a single total.
 
-## 能力边界（诚实清单）
+## Capability boundary (honest list)
 
-> 静态扫描是"减速带 + 取证层"，不是安全边界。以下按**判定影响**分两档，
-> 并如实列出**明确不检测**的形态（均已实测验证）。
+> Static scanning is a "speed bump + forensics layer", not a security boundary. The following is split by
+> **impact on the verdict**, and the forms it **explicitly does not detect** are listed truthfully (all
+> empirically verified).
 
-### 能检测 —— 判定级（会改变 verdict）
+### Detected — verdict-level (changes the verdict)
 
-| 规则 | 检测的问题类 | 命中 → verdict | 验证 |
+| Rule | Problem class | Hit → verdict | Verified |
 |---|---|---|---|
-| R1 | 构造器链逃逸：`x.constructor("return process")` / `x["constructor"]("return " + "process")` / `new (globalThis.constructor.constructor)("return process")()`（点/元素访问 + new 形态；字符串参数静态可求值：字面量/模板/拼接/const 绑定；new 支持 const 别名追踪） | critical | 矩阵 + 多文件 ✓ |
-| R2 | 动态执行：`eval()` / `Function()` / `new Function`/\`new AsyncFunction\`（含括号形态 `new (Function)(...)`；参数含逃逸串 → critical）/ `(async)=>{}.constructor` 捕获 / `vm.runInContext`/\`runInNewContext\` / 动态 `import()` / `require()` | high（files）/ medium（code，逃逸串 critical）；bin 入口文件按通用代码判定降 medium | 矩阵 + round-7 回归 ✓ |
-| R3 | process 直访：`getBuiltinModule`/\`mainModule\`/\`module\`/\`exit\`（含 `reallyExit`）→ critical；副作用成员（`kill`/`abort`/`chdir`/`umask`/`setuid`/`dlopen`/`binding` 等）与未知成员 → high；**只读成员（round-7.1）**：`env`/`cwd`/`platform`/`pid`/`argv`/`execPath`/`stdin`/`stdout`/`stderr`/`nextTick`/`on` 等 → info 能力触达面（读 cwd/env/pid 不是逃逸通道，bridges 类无 bin 的 MCP/工具插件不再误伤）；`runtime='sandbox'` 封顶 high；形态降级：generic 包 / bin 入口文件 / 应用型包 → info | critical / high / info | 矩阵 + round-7.1 回归 ✓ |
-| R4 | 宿主闭包捕获：agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob 的 `.constructor` 读取或 `Object.getPrototypeOf` 投喂（code 场景）；宿主全局原型污染：`<内置>.prototype.<成员> = ...` 覆盖赋值与 `Object.defineProperty(<内置>.prototype, ...)`（Object/Array/String/Function/TextEncoder/URL/Buffer 等 40+ 内置，round-7） | critical（code）/ high（files，round-7.1 起与 targetKind 无关——污染语义不分插件/通用包，generic 不再降 info） | 矩阵 + round-7 回归 ✓ |
-| R7 | 硬编码密钥：`sk-` / `AKIA` / `AIza` / `gh[pousr]_` / `xox[baprs]-` / 环境变量赋值 / URL 内嵌 key（占位符排除） | high → suspicious | 矩阵 ✓ |
-| R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；ReDoS 嵌套量词 `(a+)+` 类与 alternation 分支重叠 `(a|aa)+` → medium（分支首字符互斥的 `(?:[^']|'')*` 类、组后 `?` 的 `(https?:)?` 类线性回溯不报，round-7）、递归无终止（for-of/for-in 集合遍历与带条件循环内的自调用不报，round-7）、循环内 `Map.set` → medium（不进 verdict）；含 `await` 常驻循环仅 info（§14.1 不短路审查） | 矩阵 + round-7 回归 ✓ |
-| R10 | 供应链：`package.json` scripts 的 preinstall/install/postinstall/uninstall 钩子（安装期任意代码执行）→ high；依赖清单 → info（已知漏洞核对：OSV 精确版本查询，osvCheck 可关） | high → suspicious（install 钩子） | 矩阵 ✓ |
-| R11 | 破坏性文件操作：`fs.unlink/rm/rmdir(+Sync)` 删除敏感路径（/etc/root/.ssh 等）→ high，普通删除 → medium；`fs.writeFile` 等写入敏感路径 → high；`fs.readdir` 遍历敏感目录 → medium | high → suspicious（敏感路径）；medium 不进 verdict | 矩阵 ✓ |
-| R12 | Cordis/DSH 契约：`dsh.bundle.patch` 声明的文件缺失 → high；无 入口（无 main/exports["."] 且根无 index.js）→ medium；声明的入口文件缺失 → high；插件意图包缺 name → medium；`engines.node` 主版本低于 22 → info | high → suspicious（声明即挂载点/入口，缺失必失败）；medium/info 不进 verdict | 矩阵 ✓ |
+| R1 | Constructor-chain escape: `x.constructor("return process")` / `x["constructor"]("return " + "process")` / `new (globalThis.constructor.constructor)("return process")()` (dot/bracket-access + new forms; string args statically evaluable: literals/templates/concatenation/const bindings; new supports const-alias tracking) | critical | matrix + multi-file ✓ |
+| R2 | Dynamic execution: `eval()` / `Function()` / `new Function` / `new AsyncFunction` (incl. parenthesized `new (Function)(...)`; escape-string args → critical) / `(async)=>{}.constructor` capture / `vm.runInContext`/`runInNewContext` / dynamic `import()` / `require()` | high (files) / medium (code, escape-string → critical); bin entries judged as generic code, drop to medium | matrix + round-7 regression ✓ |
+| R3 | Direct process access: `getBuiltinModule`/`mainModule`/`module`/`exit` (incl. `reallyExit`) → critical; side-effect members (`kill`/`abort`/`chdir`/`umask`/`setuid`/`dlopen`/`binding`, etc.) and unknown members → high; **read-only members (round-7.1)**: `env`/`cwd`/`platform`/`pid`/`argv`/`execPath`/`stdin`/`stdout`/`stderr`/`nextTick`/`on`, etc. → info capability surface (reading cwd/env/pid isn't an escape channel; no-bin MCP/tool plugins like bridges no longer get hurt); `runtime='sandbox'` caps at high; shape degradation: generic packages / bin entry files / app-type packages → info | critical / high / info | matrix + round-7.1 regression ✓ |
+| R4 | Host-closure capture: reading `.constructor` of agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob or feeding `Object.getPrototypeOf` (code scenario); host-global prototype pollution: `<builtin>.prototype.<member> = ...` override assignments and `Object.defineProperty(<builtin>.prototype, ...)` (Object/Array/String/Function/TextEncoder/URL/Buffer and 40+ builtins, round-7) | critical (code) / high (files, since round-7.1 independent of targetKind — pollution semantics don't distinguish plugins from generic packages, generic no longer drops to info) | matrix + round-7 regression ✓ |
+| R7 | Hardcoded secrets: `sk-` / `AKIA` / `AIza` / `gh[pousr]_` / `xox[baprs]-` / env-var assignment / URL-embedded keys (placeholders excluded) | high → suspicious | matrix ✓ |
+| R9 | Resource safety: `new Array(2**31)` / `Buffer.alloc(1GB)` unbounded allocation (≥1e8), `while(true)`/`for(;;)` exit-less **synchronous** loops (freezes the host), `spawn`/`exec`/`fork`/`new Worker` in exit-less loops (fork bomb) | high → suspicious; ReDoS nested quantifiers `(a+)+`-class and overlapping alternation branches `(a|aa)+` → medium (first-char-disjoint branches like `(?:[^']|'')*` and group-then-`?` like `(https?:)?` are linear and not reported, round-7), non-terminating recursion (for-of/for-in collection traversal and self-calls inside conditional loops not reported, round-7), `Map.set` in loops → medium (not into verdict); resident `await` loops only info (§14.1 doesn't shortcut review) | matrix + round-7 regression ✓ |
+| R10 | Supply chain: `preinstall`/`install`/`postinstall`/`uninstall` hooks in package.json scripts (arbitrary code execution at install time) → high; dependency manifest → info (known-vulnerability check: OSV exact-version query, osvCheck can be disabled) | high → suspicious (install hooks) | matrix ✓ |
+| R11 | Destructive file operations: `fs.unlink/rm/rmdir(+Sync)` deleting sensitive paths (/etc/root/.ssh etc.) → high, plain deletes → medium; `fs.writeFile` etc. writing sensitive paths → high; `fs.readdir` traversing sensitive directories → medium | high → suspicious (sensitive paths); medium not into verdict | matrix ✓ |
+| R12 | Cordis/DSH contract: missing declared `dsh.bundle.patch` file → high; no entry (no main/exports["."] and no root index.js) → medium; declared entry file missing → high; plugin-intent package missing name → medium; `engines.node` major < 22 → info | high → suspicious (declared mount point/entry missing means guaranteed failure); medium/info not into verdict | matrix ✓ |
 
-### 能检测 —— 提示级（只降分，永不改变 verdict）
+### Detected — advisory level (downgrades score only, never changes the verdict)
 
-| 规则 | 检测的问题类 | 说明 |
+| Rule | Problem class | Note |
 |---|---|---|
-| R5 | ctx 逃逸尝试信号：访问沙箱 withheld 框架成员/未声明服务（`ctx.plugin` 等） | 仅 code 场景；medium |
-| R6 | 字符串粗扫：拼接逃逸特征、`getBuiltinModule`/\`child_process\`/危险 require 模块引用、混淆特征（`String.fromCharCode`/\`Buffer.from(base64)\`/\`atob(\`/\`charCodeAt\`——round-7 起需与同文件动态执行信号（eval/new Function/vm 等）组合才报，终端协议/编码类常规字节处理不再误报） | info/heuristic |
-| R8 | 扫描超时/文件过大跳过 | info 元规则 |
+| R5 | ctx-escape attempt signal: accessing sandbox-withheld framework members / undeclared services (`ctx.plugin`, etc.) | code scenario only; medium |
+| R6 | String coarse scan: concatenated escape features, `getBuiltinModule`/`child_process`/dangerous-require module references, obfuscation features (`String.fromCharCode`/`Buffer.from(base64)`/`atob(`/`charCodeAt` — since round-7 reported only when combined with an in-file dynamic-execution signal (eval/new Function/vm etc.); routine byte handling for terminal protocols/encoding no longer false-positives) | info/heuristic |
+| R8 | Scan timeout / file-too-large skip | info meta-rule |
 
-### 运行时监控（`runtimeGuard: watch` 时启用）——只报警
+### Runtime monitoring (when `runtimeGuard: watch`) — alarm only
 
-| 层 | 机制 | 能抓 | 局限 |
+| Layer | Mechanism | Catches | Limits |
 |---|---|---|---|
-| T1 哨兵 | 子进程轮询宿主 /proc | 内存炸弹（>memLimit）、**内存持续膨胀（泄漏，窗口净增长按倍数报警）**、fork 炸弹（子进程突增）、fd 激增 | 粒度=宿主全局（插件共用进程，无法归因到插件） |
-| T2 钩子 | 进程内包装 fs/child_process（含 fs.promises） | 敏感路径写入/删除（/etc、~/.ssh、.env…）、读密钥文件、含 shell/下载外联关键词的 spawn | 栈归因 best-effort；每次调用包装开销（I/O 密集 <5%，热点 10-20% 级） |
-| 盾牌 | 浏览器 `conversation.session.header.actions` + /vet/status.json | 绿/黄/红灯 + 报警计数 | 需 `dsh web` 重启激活 |
+| T1 sentinel | Subprocess polling host /proc | Memory bomb (>memLimit), **sustained memory growth (leak; net window growth alarms by multiple)**, fork bomb (child-process burst), fd surge | Granularity = host-global (plugins share the process; can't attribute to a plugin) |
+| T2 hooks | In-process wrapping of fs/child_process (incl. fs.promises) | Sensitive-path writes/deletes (/etc, ~/.ssh, .env…), key-file reads, spawn with shell/download-exfiltration keywords | Stack attribution best-effort; per-call wrapper overhead (I/O-heavy <5%, hot paths 10-20% range) |
+| Shield | Browser `conversation.session.header.actions` + /vet/status.json | Green/yellow/red light + alarm count | Requires `dsh web` restart to activate |
 
-### 明确不检测（实测验证）
+### Explicitly not detected (empirically verified)
 
-| 形态 | 实测结果 |
+| Form | Empirical result |
 |---|---|
-| 间接引用：别名函数 `const f = Function; f(...)`、`process["getBuiltinModule"]`、`globalThis.process`、间接 eval `(0, eval)` | 仅 R6 info 或零 finding，verdict=clean |
-| 运行时/外部构造载荷：base64 串、hex/charCode 拼装、网络/环境变量/参数读码、自修改代码 | base64 构造器串实测**零 finding** |
-| 非源码文件：`.jsx`/\`.tsx\`/\`.vue\`/\`.json\`/二进制/wasm/shell 脚本 | 不在扫描面（仅 .js/.ts/.mjs/.cjs） |
-| 依赖链/供应链：import/require 图、依赖版本漏洞、`package.json` scripts/install 钩子、许可证、作者信誉 | 不解析 |
-| 运行时行为：网络外传、动态原型污染链、死循环/资源耗尽、时序、权限滥用 | 无数据流/行为分析；静态的 `<内置>.prototype` 覆盖赋值已由 R4 检出（round-7） |
-| 语义知识：插件实际注入的服务、bundler polyfill 中的 `process`、遮蔽判定边界 | R5 只认 4 个变量名；遮蔽检查是 v1 启发式（偏少报） |
-| 宿主工具包的合法 `process` 使用（`process.env` 读配置、`process.stdin/stdout` 协议、`process.execPath` spawn） | 已解决：targetKind 分级——非 DSH 插件包/官方包（generic）下 R3/R2/R10/R9 死循环降级为能力触达面/提示（info/medium），不进 verdict；DSH 插件包保持严格。round-7 新增形态降级：应用型包（package.json 声明 bin）与 bin 入口文件同样按能力触达面降级；round-7.1 只读成员分类：`cwd`/`env`/`platform`/`pid` 等纯只读成员在 plugin 模式也降 info（bridges 类无 bin 的 MCP/工具插件不再误伤），`kill`/`exit` 等副作用/逃逸成员保持 high/critical。实测 195 官方包全 clean |
+| Indirect references: alias function `const f = Function; f(...)`, `process["getBuiltinModule"]`, `globalThis.process`, indirect eval `(0, eval)` | R6 info or zero findings, verdict=clean |
+| Runtime/externally constructed payloads: base64 strings, hex/charCode assembly, reading code from network/env/args, self-modifying code | base64 constructor string tested → **zero findings** |
+| Non-source files: `.jsx`/`.tsx`/`.vue`/`.json`/binaries/wasm/shell scripts | Not in the scan surface (only .js/.ts/.mjs/.cjs) |
+| Dependency chain/supply chain: import/require graph, dependency-version vulnerabilities, package.json scripts/install hooks, licenses, author reputation | Not parsed |
+| Runtime behavior: network exfiltration, dynamic prototype-pollution chains, dead loops/resource exhaustion, timing, permission abuse | No dataflow/behavior analysis; static `<builtin>.prototype` override assignments are caught by R4 (round-7) |
+| Semantic knowledge: the actual services a plugin injects, `process` in bundler polyfills, shadowing boundary | R5 only recognizes 4 variable names; shadowing check is a v1 heuristic (undercounts) |
+| Legitimate `process` use by host tool packages (`process.env` config reads, `process.stdin/stdout` protocol, `process.execPath` spawn) | Resolved: targetKind grading — non-DSH plugin packages/official packages (generic) downgrade R3/R2/R10/R9 dead-loop to capability-surface/advice (info/medium), not into verdict; DSH plugin packages stay strict. round-7 adds shape downgrades: app-type packages (package.json declares bin) and bin entry files are likewise downgraded to capability surface; round-7.1 read-only member classification: pure read-only members (`cwd`/`env`/`platform`/`pid`, etc.) drop to info even in plugin mode (no-bin MCP/tool plugins like bridges no longer hurt); side-effect/escape members (`kill`/`exit`, etc.) stay high/critical. 195 official packages tested all clean |
 
-## 信任边界
+## Trust boundaries
 
-1. **verdict 只由确定性静态层产出**——规则是正则/AST 判定，不可被提示注入欺骗。
-2. **静态层与插件代码物理隔离**——scanner 是独立进程，AST 只读、从不 eval。
-3. **审查走 agent 协议**——agent 按 vet-audit-protocol 技能步骤复核（静态判据先行，敏感点逐条深挖），verdict 不受审查环节影响。
-4. **不合成单一总分**——禁止把 verdict 与主观评估合并，防止污染 verdict 边界。
-5. **本产品不是安全边界**——定位是"减速带+取证层"（具体可绕过形态见下方 Known Limitations 1，与 DSH 官方立场对齐）。
-6. **fail-open 起步**——默认 `mode: report`，`deny` 由部署者显式开启。
-7. **alarm-only**——运行时守卫只 watch 不 kill；vet 的自动行为（deny 拦截）仅存在于部署者显式开启的 opt-in 模式。报警只附建议，处置永远留给用户在 DSH 上操作。
+1. **The verdict is produced only by the deterministic static layer** — rules are regex/AST judgments, not
+   spoofable by prompt injection.
+2. **The static layer is physically isolated from plugin code** — the scanner is a separate process; the AST is
+   read-only and never eval'd.
+3. **Review goes through the agent protocol** — the agent follows the vet-audit-protocol skill steps (static
+   criteria first, sensitive points dug into one by one); the verdict is unaffected by the review step.
+4. **No single merged score** — merging the verdict with subjective assessment is forbidden, to avoid polluting
+   the verdict boundary.
+5. **This product is not a security boundary** — positioned as a "speed bump + forensics layer" (bypassable
+   forms in Known Limitations 1 below, aligned with DSH's official stance).
+6. **Fail-open by default** — default `mode: report`; `deny` is explicitly enabled by the deployer.
+7. **Alarm-only** — the runtime guard only watches, never kills; vet's automatic behavior (deny interception)
+   exists only in the explicitly enabled opt-in mode. Alarms only carry advice; disposition is always left to
+   the user on their DSH.
 
 ## Known Limitations
 
-1. **静态扫描不是安全边界**：混淆/编码/动态生成代码可绕过 AST 规则；R6 只提供"疑似"信号。
-1b. **源码枚举限制**：internal/plugin 自动扫描只递归收集 ≤6 层深、非隐藏（非 `.` 开头）的 .js/.ts/.mjs/.cjs 文件——深层或隐藏目录里的源码静默不扫（无提示）；需要全量时可手动用 scan_plugin(target=package) 扫整个目录。
-2. **agent 审查可被提示注入**：verdict 永不来自审查环节，但 agent 可能漏报——置信度字段让用户知晓。
-3. **`internal/plugin` 守卫不覆盖运行时动态挂载逃逸**：vm 路径由 `tools/execute` 守卫在调用层拦截。
-4. **R5 仅 code 场景**：files 场景的 ctx 访问默认不报（误报率高）。
-5. **扫描耗时**：大插件包可能超时跳过（R8 info）；agent 审查按 vet-audit-protocol 步骤进行。
-6. **verdict 是静态层确定性判定**；agent 的主观判断记录在健康档案里，不构成安全保证。
-7. **/vet/status.json 无鉴权**：盾牌轮询需要匿名 GET，路由本身不鉴权——若 dsh web 绑定非回环地址，局域网内可读扫描结论/报警目标。vet 是 alarm-only 观测器，不做越权的访问控制；介意就保持回环绑定或信任网络（POST 开关守卫已有同源校验，无 Origin 拒绝）。
-8. **`@deepseek-ai/*` 默认信任**：未来若官方生态被攻破需收紧（v1 留开关）。scan_plugin 对官方包判 generic（能力触达面降级）——官方包供应链投毒时静态降级会掩盖 process 访问（已记录，P-5；官方包是平台本体，与 internal/plugin 守卫的官方豁免同口径）。vet 自身豁免同样收窄（P-3）：只按 name 匹配可被本地伪造（file: 安装无 registry 校验），现必须 realpath 验证目标就是当前 vet 实例，同名冒名包按最严格 plugin 判定。
-9. **R10 已知漏洞核对依赖 OSV 网络查询**：默认开启会把「包名+精确版本」发到 api.osv.dev（README 配置节有披露，介意可设 `osvCheck: false`）；网络失败/超时静默降级为跳过（不误拦）；仅对精确版本查询——`*`/`>=`/`^`/`~` 区间与无版本主包跳过（P3-1/P3-3；round-7 修正：`^`/`~` 不再剥前缀当下界精确版查询——下界受影响但实际已装版本已修复时会误报）；间接传递依赖不在核对面。
-10. **R11 只认 `fs.*` 形态**：解构/别名调用（`const { unlinkSync } = require('fs')`）与运行时路径漏检（已实测记录，属静态边界）。
-11. **T1/T2 是"防盗摄像头"不是"保险柜"**：抓明显搞事（内存/fork 炸弹、敏感路径操作、第三方 spawn），抓不了 worker 线程/原生插件/低流量慢外联；T2 对 ESM 具名导入快照、`process.binding` 等旁路不覆盖。
-12. **T2 归因与降噪**：栈归因是 best-effort（共享服务/定时器跨插件会误归因）；官方包 spawn 默认不报警（能力授权）。
-13. **盾牌激活需要 `dsh web` 重启**：client-modules 在启动时扫描 `dsh.client` 声明；重启前浏览器不会加载盾牌，但 /vet/status.json 端点与运行时守卫（宿主侧）重启即生效。
-14. **运行时守卫默认关闭**（`runtimeGuard: 'off'`）：包装 fs/child_process 有性能与稳定代价，opt-in 开启。
-15. **`process.kill` 保持 high（有意设计，round-7.1）**：kill 是副作用成员，不随只读成员降级——但 MCP/桥接器类插件 kill 自己 spawn 的子进程是正常功能面（dsh-bridges 实测：98/134 条已清，剩余 high 全为 run.js/util.js 的 process.kill）。静态区分 `process.kill(child.pid)`（pid 来自本包 spawn 返回值）与任意 pid 需要数据流分析，成本高收益低——维持现状，由 agent 按 vet-audit-protocol 审计时人工排除（结论记入健康档案）。
-16. **平台支持（Linux 优先，非 Linux 优雅降级）**：静态扫描层（scanner-bin/scan_plugin/R1-R12/OSV）、T2 运行时钩子、蜜罐、GUI 盾牌、审计协议均为纯 JS，跨平台（macOS/Windows 可跑）。**T1 哨兵是 Linux 专有**——依赖 /proc 读 VmRSS/子进程/fd，非 Linux 上哨兵自动退出、指标面板回退 -1/0（不报错不刷屏，设计如此）。T2 敏感路径按"路径段名"匹配（反斜杠已归一化，Windows 下 `.ssh`/`.env`/`credentials` 等段名同样命中），但"系统根前缀"（/etc /usr /var）是 POSIX 形态——Windows 上写删 `C:\Windows\System32` 类路径不受系统根判定（段名/密钥特征判定仍有效）；macOS 有 /etc /usr /var，T2 全功能。与 DSH 当前 Linux 优先的适配状态一致。
+1. **Static scanning is not a security boundary**: obfuscated/encoded/dynamically generated code can bypass the
+   AST rules; R6 only provides a "suspicious" signal.
+1b. **Source enumeration limits**: `internal/plugin` auto-scan only recursively collects ≤6 levels deep,
+   non-hidden (non-dot-prefixed) .js/.ts/.mjs/.cjs files — deep or hidden directories are silently unscanned
+   (no warning); use scan_plugin(target=package) manually for a full directory scan.
+2. **Agent review can be prompt-injected**: the verdict never comes from the review step, but the agent may
+   miss things — the confidence field lets users know.
+3. **`internal/plugin` guard doesn't cover runtime dynamic-mount escapes**: the vm path is intercepted at the
+   call layer by the `tools/execute` guard.
+4. **R5 is code-only**: ctx access in files scenarios isn't reported by default (high false-positive rate).
+5. **Scan duration**: large plugin packages may time out and skip (R8 info); agent review proceeds per the
+   vet-audit-protocol steps.
+6. **The verdict is the static layer's deterministic judgment**; the agent's subjective assessment is recorded
+   in the health record and doesn't constitute a security guarantee.
+7. **/vet/status.json has no auth**: the shield's polling needs anonymous GET, and the route itself isn't
+   authenticated — if dsh web binds to a non-loopback address, LAN clients can read scan conclusions/alarm
+   targets. vet is an alarm-only observer and won't overreach into access control; if you care, keep loopback
+   binding or trust your network (the POST guard toggle already has same-origin validation; no-Origin requests
+   are rejected).
+8. **`@deepseek-ai/*` is trusted by default**: if the official ecosystem is ever compromised, tighten this
+   (v1 keeps the switch). scan_plugin judges official packages as generic (capability-surface downgrade) —
+   an official-package supply-chain attack would let static downgrade mask process access (recorded, P-5;
+   official packages are the platform itself, same policy as the internal/plugin official exemption). vet's own
+   exemption is likewise narrowed (P-3): it now matches by name AND verifies via realpath that the target is
+   the current vet instance — a same-name impostor package (file: install has no registry validation) is judged
+   by the strictest plugin rules.
+9. **R10's known-vulnerability check depends on an OSV network query**: on by default, sending "package
+   name + exact version" to api.osv.dev (disclosed in the README config section; set `osvCheck: false` if you
+   care); network failure/timeout degrades silently to skip (never false-blocks); only exact versions are
+   queried — `*`/`>=`/`^`/`~` ranges and version-less main packages are skipped (P3-1/P3-3; round-7 fix:
+   `^`/`~` no longer strip their prefix to query as exact lower bounds — the lower bound being affected while
+   the actually installed version is already fixed would false-positive). Indirect transitive dependencies are
+   not in the check surface.
+10. **R11 only recognizes `fs.*` forms**: destructured/aliased calls (`const { unlinkSync } = require('fs')`)
+    and runtime paths are missed (empirically recorded; a static boundary).
+11. **T1/T2 are "security cameras", not "vaults"**: they catch obvious mischief (memory/fork bombs,
+    sensitive-path operations, third-party spawn) but not worker threads/native plugins/low-traffic slow
+    exfiltration; T2 doesn't cover ESM named-import snapshots, `process.binding`, and other side channels.
+12. **T2 attribution & noise reduction**: stack attribution is best-effort (shared services/timers across
+    plugins can mis-attribute); official-package spawn is not alarmed by default (capability grant).
+13. **Shield activation requires a `dsh web` restart**: client-modules scans the `dsh.client` declaration at
+    startup; the browser won't load the shield before the restart, but the /vet/status.json endpoint and the
+    runtime guard (host side) take effect on restart.
+14. **Runtime guard is off by default** (`runtimeGuard: 'off'`): wrapping fs/child_process carries performance
+    and stability costs; opt-in.
+15. **`process.kill` stays high (intentional, round-7.1)**: kill is a side-effect member and doesn't degrade
+    with the read-only members — but a plugin killing its own spawned child (MCP/bridge-style) is a normal
+    capability surface (dsh-bridges tested: 98/134 cleared; the remaining highs are all process.kill in
+    run.js/util.js). Statically distinguishing `process.kill(child.pid)` (pid from this package's own spawn
+    return) from arbitrary pids needs dataflow analysis — high cost, low benefit; kept as-is, to be ruled out
+    manually by the agent during vet-audit-protocol review (conclusion recorded in the health record).
 
-## 开发
+## Development
 
 ```sh
-npm run build       # scanner-bin + src 编译到 lib/ + client bundle
-npm run typecheck   # tsc --noEmit 全量
-npm test            # 构建 + vitest（243 用例，含覆盖率阈值）
-npx vitest run --coverage   # 覆盖率报告（lines/functions >= 70%，branches >= 50%）
+npm run build       # scanner-bin + src compiled to lib/ + client bundle
+npm run typecheck   # full tsc --noEmit
+npm test            # build + vitest (243 cases, incl. coverage thresholds)
+npx vitest run --coverage   # coverage report (lines/functions >= 70%, branches >= 50%)
 ```
 
-目录：`scanner-bin/` 静态引擎（独立进程）；`src/` 插件本体（tools/guards/audit/report/guard）；
-`src/client/` GUI 盾牌；`test/` fixtures + 单测 + 对抗矩阵。架构见 `docs/ARCHITECTURE.md`。
+Layout: `scanner-bin/` static engine (separate process); `src/` plugin body (tools/guards/audit/report/guard);
+`src/client/` GUI shield; `test/` fixtures + unit tests + adversarial matrix. Architecture in
+`docs/ARCHITECTURE.md`.
 
-## 许可证
+## License
 
-[MIT](LICENSE)。
+[MIT](LICENSE).

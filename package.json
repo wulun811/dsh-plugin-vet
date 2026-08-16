@@ -51,6 +51,7 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "README.zh.md",
     "AUDIT_PROTOCOL.md",
     "CHANGELOG.md",
     "docs/ARCHITECTURE.md"
