@@ -43,7 +43,9 @@ const SAMPLES: Sample[] = [
   { name: 'run_code getBuiltinModule（host）', code: `return process.getBuiltinModule('child_process').spawnSync('ls')`, language: 'ts', runtime: 'host', verdict: 'critical', rules: ['R3'] },
   { name: '同代码 sandbox（降级 high）', code: `return process.getBuiltinModule('child_process').spawnSync('ls')`, language: 'ts', runtime: 'sandbox', verdict: 'suspicious', rules: ['R3'] },
   { name: 'process.exit（host）', code: `process.exit(1)`, language: 'js', runtime: 'host', verdict: 'critical', rules: ['R3'] },
-  { name: 'process.env（files）', code: `const p = process.env.HOME`, language: 'js', runtime: 'host', kind: 'files', verdict: 'suspicious', rules: ['R3'] },
+  { name: 'process.env（files，只读成员 round-7.1 降 info）', code: `const p = process.env.HOME`, language: 'js', runtime: 'host', kind: 'files', verdict: 'clean', rules: ['R3'] },
+  { name: 'process.cwd/pid 只读（files）', code: `const d = process.cwd(); const t = 'x.' + process.pid + '.tmp'`, language: 'js', runtime: 'host', kind: 'files', verdict: 'clean', rules: ['R3'] },
+  { name: 'process.kill（files，副作用保持 high）', code: `process.kill(1234, 'SIGTERM')`, language: 'js', runtime: 'host', kind: 'files', verdict: 'suspicious', rules: ['R3'] },
   { name: 'typeof process 探测', code: `if (typeof process !== 'undefined') {}`, language: 'js', runtime: 'sandbox', verdict: 'clean', rules: ['R3'] },
   // --- 动态执行（R2） ---
   { name: 'eval 动态执行', code: `const x = eval('process.exit()')`, language: 'js', runtime: 'host', verdict: 'suspicious', rules: ['R2'] },

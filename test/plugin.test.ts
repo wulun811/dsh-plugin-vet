@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import * as vetPlugin from '../lib/index.js'
 import { apply } from '../lib/index.js'
 import { scan } from '../lib/scanner-bin/engine.js'
-import { buildRequest, createScanPluginTool } from '../lib/tools/scan-plugin.js'
+import { buildRequest, createScanPluginTool, detectTargetKind } from '../lib/tools/scan-plugin.js'
 import { installToolExecuteGuard } from '../lib/guards/tool-execute.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
@@ -408,29 +408,52 @@ describe('目标身份分级（targetKind，§14.3 边界落地）', () => {
     }
   })
 
-  it('DSH 插件包（依赖 @deepseek-ai/cordis）：严格，process high → suspicious', () => {
+  it('DSH 插件包（依赖 @deepseek-ai/cordis）：严格，process.kill → high → suspicious（round-7.1：env/cwd 等只读成员已降 info）', () => {
     const dir = tmpPkg({
       'package.json': JSON.stringify({ name: 'evil-plugin', dependencies: { '@deepseek-ai/cordis': '^4.0.1' } }),
-      'index.js': 'process.env.HOME',
+      'index.js': "process.kill(1234, 'SIGTERM')",
     })
     try {
       const { request } = buildRequest({ target: 'package', packagePath: dir })
       expect(request.targetKind).toBe('plugin')
       const res = scan(request)
       expect(res.report!.verdict).toBe('suspicious')
+      const r3 = res.report!.findings.find(f => f.rule === 'R3' && f.severity === 'high')
+      expect(r3).toBeDefined()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('vet 自身（PACKAGE_NAME）→ generic（信任锚豁免）', () => {
+  it('vet 自豁免按 realpath 验证（round-7.1 P-3）：自身目录 → generic；冒名包（同名不同目录）→ 最严格 plugin', () => {
+    // 真实 vet 实例：当前运行代码所在包根 → 信任锚豁免 generic
+    const selfRoot = join(import.meta.dirname, '..')
+    expect(detectTargetKind(selfRoot)).toBe('generic')
+    // 冒名包：本地 file: 安装无 registry 校验，tmp 目录里 name 写 PACKAGE_NAME → plugin 严格判定
     const dir = tmpPkg({
       'package.json': JSON.stringify({ name: PACKAGE_NAME, dependencies: { '@deepseek-ai/cordis': '^4' } }),
       'index.js': 'process.execPath',
     })
     try {
       const { request } = buildRequest({ target: 'package', packagePath: dir })
-      expect(request.targetKind).toBe('generic')
+      expect(request.targetKind).toBe('plugin')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('冒名 vet 包（无依赖也判 plugin）：原型污染按 high 报，不再 generic 降 info', () => {
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: PACKAGE_NAME }),
+      'index.js': 'Object.prototype.polluted = true',
+    })
+    try {
+      const { request } = buildRequest({ target: 'package', packagePath: dir })
+      expect(request.targetKind).toBe('plugin')
+      const res = scan(request)
+      expect(res.report!.verdict).toBe('suspicious')
+      const r4 = res.report!.findings.find(f => f.rule === 'R4' && f.severity === 'high')
+      expect(r4).toBeDefined()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

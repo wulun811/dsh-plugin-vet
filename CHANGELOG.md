@@ -3,7 +3,18 @@
 所有重要变更记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.1.3]
+
+- **round-7.1（0.1.2 外部验证，5 项反馈）**：
+  - R3 只读成员分类（P-1/P-2）：`cwd`/`env`/`platform`/`pid`/`argv`/`execPath`/`stdout`/`nextTick`/on 等纯只读/无副作用成员在 plugin 模式降级 info 能力触达面（读 cwd/env/pid 不是逃逸通道）——dsh-bridges 类无 bin 声明但依赖 @deepseek-ai/* 的 MCP/工具插件 134 条 cwd/env/platform 误报清零；wechat-mp 的 cacheFile + pid + .tmp 原子写临时名不再误伤。副作用成员（`kill`/`abort`/`chdir`/`umask`/setuid/dlopen/binding 等）与未知成员保持 high，`exit`/getBuiltinModule/mainModule/module/reallyExit 保持 critical——不损失逃逸检测。
+  - R4 原型污染不再按 targetKind 降级（P-3）：污染语义与插件/通用包无关（generic 包也可能被当作插件装进宿主），files 模式一律 high；core-js 类 polyfill 误报风险有限（polyfill 通常只在 node_modules 依赖里，不在扫描面）。
+  - detectTargetKind 自豁免 realpath 化（P-3 安全面）：vet 自豁免原来只比 name——本地 file: 安装无 registry 校验，恶意 tarball 把 name 写成 @jieai/dsh-plugin-vet 即可骗过 generic 降级（R3/R4 全降、deny 放行）。现必须 realpath 验证目标就是当前 vet 实例；同名冒名包按最严格 plugin 判定（身份冒充即最高嫌疑），配合 R4 不再降级，该攻击面闭合。
+  - P-4 复验：vet 自扫的 2 条 R9 medium 自伤（constructor-chain.js/dynamic-exec.js 的规则正则）在 0.1.2 引擎已不再触发（round-7 组后 ? 修复覆盖），tarball 实测无 R9 medium；static-v6 使任何旧缓存失效。
+  - P-5 记录：官方包 @deepseek-ai/* 判 generic 的能力触达面降级是官方信任的一部分（与 internal/plugin 守卫同口径），供应链投毒时静态降级会掩盖 process 访问——已写入 README Known Limitations 8。
+  - 全部带回归测试（+5，243 总用例）；ENGINE_VERSION static-v5 → static-v6。
+
 ## [0.1.2]
+
 
 - **round-7（外部第二轮实测，4 项反馈全部通用化修复）**：
   - R2 `new (Function)('...')` 括号形态漏检：callee 括号包裹（含 `(async()=>{}).constructor` 的括号 base）此前被当普通表达式完全绕过（对抗样本 verdict=clean）——checkCall/checkNew/isConstructorCapture 统一剥括号（unwrapParens），`new (Function)('return process')` 等命中 critical。

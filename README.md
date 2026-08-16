@@ -34,9 +34,9 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 **本地 tarball 安装**（离线/先验证再发版场景）：
 
 ```sh
-dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.2.tgz
+dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.3.tgz
 # 或直接解包到 profile 的 node_modules：
-# tar -xzf jieai-dsh-plugin-vet-0.1.2.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
+# tar -xzf jieai-dsh-plugin-vet-0.1.3.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
 // 并在 profile 的 cordis.patch.yml 里 insert 挂载条目：
 //   - insert:
 //       - id: plugin-vet
@@ -114,8 +114,8 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.2.tgz
 |---|---|---|---|---|
 | R1 | constructor 链逃逸 | critical | code + files | certain/likely |
 | R2 | 动态执行（eval/Function/import/require） | high（files）/ medium（code；bin 入口降 medium） | both | certain/likely |
-| R3 | process 直接访问（按 runtime 分级；generic/bin 入口/应用型包 → info） | critical（host）/ high（sandbox） | both | certain |
-| R4 | 宿主闭包捕获（agent/TextEncoder…）+ 宿主全局原型污染 | critical（code）/ high（files 插件）/ info（generic） | both | certain/likely |
+| R3 | process 直接访问（按 runtime 分级；只读成员/generic/bin 入口/应用型包 → info） | critical（host）/ high（sandbox） | both | certain |
+| R4 | 宿主闭包捕获（agent/TextEncoder…）+ 宿主全局原型污染 | critical（code）/ high（files，与 targetKind 无关） | both | certain/likely |
 | R5 | ctx 逃逸尝试信号（withheld 成员/未声明服务；`ctx.logger` 等官方注入服务白名单放行） | medium | 仅 code | likely |
 | R6 | 字符串粗扫兜底（混淆特征需与动态执行组合证据） | info | both | heuristic |
 | R7 | 硬编码密钥 | high | both | likely |
@@ -141,8 +141,8 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 |---|---|---|---|
 | R1 | 构造器链逃逸：`x.constructor("return process")` / `x["constructor"]("return " + "process")` / `new (globalThis.constructor.constructor)("return process")()`（点/元素访问 + new 形态；字符串参数静态可求值：字面量/模板/拼接/const 绑定；new 支持 const 别名追踪） | critical | 矩阵 + 多文件 ✓ |
 | R2 | 动态执行：`eval()` / `Function()` / `new Function`/\`new AsyncFunction\`（含括号形态 `new (Function)(...)`；参数含逃逸串 → critical）/ `(async)=>{}.constructor` 捕获 / `vm.runInContext`/\`runInNewContext\` / 动态 `import()` / `require()` | high（files）/ medium（code，逃逸串 critical）；bin 入口文件按通用代码判定降 medium | 矩阵 + round-7 回归 ✓ |
-| R3 | process 直访：`getBuiltinModule`/\`mainModule\`/\`module\`/\`exit\` → critical；其余成员 → high；`runtime='sandbox'` 封顶 high；形态降级：generic 包 / bin 入口文件 / 应用型包（package.json 声明 bin，CLI/TUI/server 的 process 即产品功能）→ info 能力触达面 | critical / high / info | 矩阵 + round-7 回归 ✓ |
-| R4 | 宿主闭包捕获：agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob 的 `.constructor` 读取或 `Object.getPrototypeOf` 投喂（code 场景）；宿主全局原型污染：`<内置>.prototype.<成员> = ...` 覆盖赋值与 `Object.defineProperty(<内置>.prototype, ...)`（Object/Array/String/Function/TextEncoder/URL/Buffer 等 40+ 内置，round-7） | critical（code）/ high（files 插件）/ info（generic） | 矩阵 + round-7 回归 ✓ |
+| R3 | process 直访：`getBuiltinModule`/\`mainModule\`/\`module\`/\`exit\`（含 `reallyExit`）→ critical；副作用成员（`kill`/`abort`/`chdir`/`umask`/`setuid`/`dlopen`/`binding` 等）与未知成员 → high；**只读成员（round-7.1）**：`env`/`cwd`/`platform`/`pid`/`argv`/`execPath`/`stdin`/`stdout`/`stderr`/`nextTick`/`on` 等 → info 能力触达面（读 cwd/env/pid 不是逃逸通道，bridges 类无 bin 的 MCP/工具插件不再误伤）；`runtime='sandbox'` 封顶 high；形态降级：generic 包 / bin 入口文件 / 应用型包 → info | critical / high / info | 矩阵 + round-7.1 回归 ✓ |
+| R4 | 宿主闭包捕获：agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob 的 `.constructor` 读取或 `Object.getPrototypeOf` 投喂（code 场景）；宿主全局原型污染：`<内置>.prototype.<成员> = ...` 覆盖赋值与 `Object.defineProperty(<内置>.prototype, ...)`（Object/Array/String/Function/TextEncoder/URL/Buffer 等 40+ 内置，round-7） | critical（code）/ high（files，round-7.1 起与 targetKind 无关——污染语义不分插件/通用包，generic 不再降 info） | 矩阵 + round-7 回归 ✓ |
 | R7 | 硬编码密钥：`sk-` / `AKIA` / `AIza` / `gh[pousr]_` / `xox[baprs]-` / 环境变量赋值 / URL 内嵌 key（占位符排除） | high → suspicious | 矩阵 ✓ |
 | R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；ReDoS 嵌套量词 `(a+)+` 类与 alternation 分支重叠 `(a|aa)+` → medium（分支首字符互斥的 `(?:[^']|'')*` 类、组后 `?` 的 `(https?:)?` 类线性回溯不报，round-7）、递归无终止（for-of/for-in 集合遍历与带条件循环内的自调用不报，round-7）、循环内 `Map.set` → medium（不进 verdict）；含 `await` 常驻循环仅 info（§14.1 不短路审查） | 矩阵 + round-7 回归 ✓ |
 | R10 | 供应链：`package.json` scripts 的 preinstall/install/postinstall/uninstall 钩子（安装期任意代码执行）→ high；依赖清单 → info（已知漏洞核对：OSV 精确版本查询，osvCheck 可关） | high → suspicious（install 钩子） | 矩阵 ✓ |
@@ -175,7 +175,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | 依赖链/供应链：import/require 图、依赖版本漏洞、`package.json` scripts/install 钩子、许可证、作者信誉 | 不解析 |
 | 运行时行为：网络外传、动态原型污染链、死循环/资源耗尽、时序、权限滥用 | 无数据流/行为分析；静态的 `<内置>.prototype` 覆盖赋值已由 R4 检出（round-7） |
 | 语义知识：插件实际注入的服务、bundler polyfill 中的 `process`、遮蔽判定边界 | R5 只认 4 个变量名；遮蔽检查是 v1 启发式（偏少报） |
-| 宿主工具包的合法 `process` 使用（`process.env` 读配置、`process.stdin/stdout` 协议、`process.execPath` spawn） | 已解决：targetKind 分级——非 DSH 插件包/官方包（generic）下 R3/R2/R10/R9 死循环降级为能力触达面/提示（info/medium），不进 verdict；DSH 插件包保持严格。round-7 新增形态降级：应用型包（package.json 声明 bin，CLI/TUI/server 的 process 即产品功能）与 bin 入口文件（CLI 脚本独立运行）同样按能力触达面降级，实测 195 官方包全 clean |
+| 宿主工具包的合法 `process` 使用（`process.env` 读配置、`process.stdin/stdout` 协议、`process.execPath` spawn） | 已解决：targetKind 分级——非 DSH 插件包/官方包（generic）下 R3/R2/R10/R9 死循环降级为能力触达面/提示（info/medium），不进 verdict；DSH 插件包保持严格。round-7 新增形态降级：应用型包（package.json 声明 bin）与 bin 入口文件同样按能力触达面降级；round-7.1 只读成员分类：`cwd`/`env`/`platform`/`pid` 等纯只读成员在 plugin 模式也降 info（bridges 类无 bin 的 MCP/工具插件不再误伤），`kill`/`exit` 等副作用/逃逸成员保持 high/critical。实测 195 官方包全 clean |
 
 ## 信任边界
 
@@ -197,7 +197,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 5. **扫描耗时**：大插件包可能超时跳过（R8 info）；agent 审查按 vet-audit-protocol 步骤进行。
 6. **verdict 是静态层确定性判定**；agent 的主观判断记录在健康档案里，不构成安全保证。
 7. **/vet/status.json 无鉴权**：盾牌轮询需要匿名 GET，路由本身不鉴权——若 dsh web 绑定非回环地址，局域网内可读扫描结论/报警目标。vet 是 alarm-only 观测器，不做越权的访问控制；介意就保持回环绑定或信任网络（POST 开关守卫已有同源校验，无 Origin 拒绝）。
-8. **`@deepseek-ai/*` 默认信任**：未来若官方生态被攻破需收紧（v1 留开关）。
+8. **`@deepseek-ai/*` 默认信任**：未来若官方生态被攻破需收紧（v1 留开关）。scan_plugin 对官方包判 generic（能力触达面降级）——官方包供应链投毒时静态降级会掩盖 process 访问（已记录，P-5；官方包是平台本体，与 internal/plugin 守卫的官方豁免同口径）。vet 自身豁免同样收窄（P-3）：只按 name 匹配可被本地伪造（file: 安装无 registry 校验），现必须 realpath 验证目标就是当前 vet 实例，同名冒名包按最严格 plugin 判定。
 9. **R10 已知漏洞核对依赖 OSV 网络查询**：默认开启会把「包名+精确版本」发到 api.osv.dev（README 配置节有披露，介意可设 `osvCheck: false`）；网络失败/超时静默降级为跳过（不误拦）；仅对精确版本查询——`*`/`>=`/`^`/`~` 区间与无版本主包跳过（P3-1/P3-3；round-7 修正：`^`/`~` 不再剥前缀当下界精确版查询——下界受影响但实际已装版本已修复时会误报）；间接传递依赖不在核对面。
 10. **R11 只认 `fs.*` 形态**：解构/别名调用（`const { unlinkSync } = require('fs')`）与运行时路径漏检（已实测记录，属静态边界）。
 11. **T1/T2 是"防盗摄像头"不是"保险柜"**：抓明显搞事（内存/fork 炸弹、敏感路径操作、第三方 spawn），抓不了 worker 线程/原生插件/低流量慢外联；T2 对 ESM 具名导入快照、`process.binding` 等旁路不覆盖。
@@ -210,7 +210,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 ```sh
 npm run build       # scanner-bin + src 编译到 lib/ + client bundle
 npm run typecheck   # tsc --noEmit 全量
-npm test            # 构建 + vitest（238 用例，含覆盖率阈值）
+npm test            # 构建 + vitest（243 用例，含覆盖率阈值）
 npx vitest run --coverage   # 覆盖率报告（lines/functions >= 70%，branches >= 50%）
 ```
 

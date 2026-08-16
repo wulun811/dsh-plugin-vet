@@ -77,8 +77,8 @@ TypeScript compiler API（`createSourceFile`）只读解析 .js/.ts/.mjs/.cjs。
 |---|---|---|---|
 | R1 | constructor 链逃逸 | critical | certain/likely |
 | R2 | 动态执行（eval/Function/import/require，含遮蔽检查） | high（files）/ medium（code） | certain/likely |
-| R3 | process 直接访问（按 runtime 分级） | critical（host）/ high（sandbox） | certain |
-| R4 | 宿主闭包捕获（agent/TextEncoder…）+ 宿主全局原型污染（round-7） | critical（code）/ high（files 插件）/ info（generic） | certain/likely |
+| R3 | process 直接访问（按 runtime 分级；round-7.1：只读成员降 info、副作用成员 high、逃逸成员 critical） | critical（host）/ high（sandbox） | certain |
+| R4 | 宿主闭包捕获（agent/TextEncoder…）+ 宿主全局原型污染（round-7；round-7.1：files 一律 high，与 targetKind 无关） | critical（code）/ high（files） | certain/likely |
 | R5 | ctx 逃逸尝试信号 | medium | 仅 code |
 | R6 | 字符串粗扫兜底（混淆特征需与动态执行组合证据，round-7） | info | heuristic |
 | R7 | 硬编码密钥（占位符按段排除） | high | likely |
@@ -101,6 +101,7 @@ verdict（唯一权威判定）：`critical ≥ 1 → critical`；否则 `high �
 - `plugin`（DSH 插件包：依赖 @deepseek-ai/cordis 等）：严格——process 访问、危险 require 按逃逸面报。
 - `generic`（普通 npm 包/官方运行时）：能力触达面降级（info/medium），不进 verdict。
 - 自动扫描按插件语义（严格）执行；`scan_plugin` 按 package.json 依赖判定。
+- **自豁免 realpath 化（round-7.1 P-3）**：vet 自身（name 匹配）必须 realpath 验证目标就是当前 vet 实例才判 generic——本地 file: 安装无 registry 校验，只比 name 可被冒名伪造（恶意 tarball 冒充 @jieai/dsh-plugin-vet 骗过降级）；同名冒名包按最严格 plugin 判定。
 - **包形态降级（round-7）**：engine 读 package.json `bin` 字段注入 RuleContext——应用型包（`appShape`：声明 bin 的 CLI/TUI/server，process 即产品功能）R3 整体降 info；bin 入口文件（`cliFiles`，永远独立运行的 CLI 脚本）R2/R3 按通用代码判定、R9 死循环降 medium。package.json 内容在缓存 hash 内，形态变化自然失效。
 
 ### 4.6 缓存

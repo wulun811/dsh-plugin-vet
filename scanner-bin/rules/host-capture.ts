@@ -50,9 +50,11 @@ function isProtoAccess(n: ts.Expression): boolean {
 
 /** round-7（P1）：宿主全局原型污染——赋值/defineProperty 覆盖 <内置>.prototype 成员。 */
 function checkProtoMutation(sf: ts.SourceFile, ctx: RuleContext, found: Finding[]): void {
-  const severity: Severity = ctx.request.kind === 'code' ? 'critical'
-    : ctx.request.targetKind === 'generic' ? 'info' // 通用包里的 polyfill（core-js 类）是常见合法代码
-    : 'high'
+  // round-7.1（P-3）：污染语义与 targetKind 无关——generic 包也可能被当作插件装进宿主
+  // （本地 file: 安装无 registry 校验，冒名 vet 名即判 plugin）；不再对 generic 降 info。
+  // core-js 类 polyfill 误报风险：polyfill 通常只在 node_modules 依赖里（不在扫描面），
+  // 包自身源码写内置 prototype 覆盖是少见形态，保 high 合理。
+  const severity: Severity = ctx.request.kind === 'code' ? 'critical' : 'high'
   const note = ctx.request.kind === 'code' ? '（沙箱内可达宿主运行时）' : '（包加载进宿主时污染宿主全局）'
 
   const push = (owner: string, member: string, evidence: ts.Node): void => {

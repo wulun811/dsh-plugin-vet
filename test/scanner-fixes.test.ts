@@ -139,7 +139,7 @@ describe('round-7（外部第二轮实测）回归：R2 括号形态、R4 原型
     expect(findingOf(res.report!, 'R2', 'critical')).toBeDefined() // new (Function) 逃逸串
     expect(findingOf(res.report!, 'R4', 'critical')).toBeDefined() // 原型污染
   })
-  it('R4: Object.prototype.polluted = true → code critical / files-plugin high / files-generic info', () => {
+  it('R4: Object.prototype.polluted = true → code critical / files-plugin high / files-generic 也 high（round-7.1 P-3：污染语义与 targetKind 无关，不再降 info）', () => {
     const code = 'Object.prototype.polluted = true'
     const c = scan(codeRequest({ code }))
     expect(findingOf(c.report!, 'R4', 'critical')).toBeDefined()
@@ -151,7 +151,8 @@ describe('round-7（外部第二轮实测）回归：R2 括号形态、R4 原型
       const plugin = scan({ kind: 'files', files: [join(dir, 'package.json'), join(dir, 'index.js')], targetKind: 'plugin' })
       const g = scan({ kind: 'files', files: [join(dir, 'package.json'), join(dir, 'index.js')], targetKind: 'generic' })
       expect(findingOf(plugin.report!, 'R4', 'high')).toBeDefined()
-      expect(findingOf(g.report!, 'R4', 'info')).toBeDefined()
+      expect(findingOf(g.report!, 'R4', 'high')).toBeDefined()
+      expect(findingOf(g.report!, 'R4', 'info')).toBeUndefined()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -181,7 +182,7 @@ describe('round-7（外部第二轮实测）回归：R2 括号形态、R4 原型
     expect(res.report!.findings.some(f => f.rule === 'R9' && (f.message || '').includes('递归无终止'))).toBe(true)
   })
   // P4a/P4c: 应用型包 + bin 入口降级（外部实测 dsh-tui/dsh-bridges/dsh-web-open）
-  it('P4: 应用型包（bin 声明）process 访问全降 info；无 bin 同代码保持 high', () => {
+  it('P4: 应用型包（bin 声明）process 访问全降 info；无 bin 插件包副作用成员（kill）保持 high', () => {
     const app = tmpFiles({
       'package.json': JSON.stringify({ name: 'tui-app', bin: { app: './cli.js' } }),
       'cli.js': 'process.exit(0)',
@@ -189,22 +190,45 @@ describe('round-7（外部第二轮实测）回归：R2 括号形态、R4 原型
     })
     const plain = tmpFiles({
       'package.json': JSON.stringify({ name: 'plain-plugin', dependencies: { '@deepseek-ai/cordis': '^4' } }),
-      'app.js': 'const home = process.env.HOME; process.stdout.write(home)',
+      'app.js': "process.kill(1234, 'SIGTERM')",
     })
     try {
       const r = scan({ kind: 'files', files: [join(app, 'package.json'), join(app, 'cli.js'), join(app, 'app.js')], targetKind: 'plugin' })
       expect(r.ok).toBe(true)
       expect(r.report!.verdict).toBe('clean')
-      // bin 入口文件（CLI 面）+ 应用型包 app 代码全部降 info
+      // bin 入口文件（CLI 面）+ 应用型包 app 代码全部降 info（env/stdout 只读成员本就 info）
       expect(r.report!.findings.filter(f => f.rule === 'R3' && f.severity === 'info').length).toBeGreaterThanOrEqual(3)
       expect(r.report!.findings.filter(f => f.rule === 'R3' && (f.severity === 'critical' || f.severity === 'high')).length).toBe(0)
-      // 对照组：无 bin 的插件包 process.env → 仍 high → suspicious
+      // 对照组：无 bin 的插件包 process.kill（副作用成员）→ 仍 high → suspicious
       const p = scan({ kind: 'files', files: [join(plain, 'package.json'), join(plain, 'app.js')], targetKind: 'plugin' })
       expect(p.report!.verdict).toBe('suspicious')
       expect(findingOf(p.report!, 'R3', 'high')).toBeDefined()
     } finally {
       rmSync(app, { recursive: true, force: true })
       rmSync(plain, { recursive: true, force: true })
+    }
+  })
+  it('P-2: 拼接形态的 process.pid（原子写临时名，wechat-mp token.js 同款）→ info 不进 verdict', () => {
+    const res = scan(codeRequest({ code: 'const temp = this.cacheFile + "." + process.pid + ".tmp"' }))
+    expect(res.ok).toBe(true)
+    expect(res.report!.verdict).toBe('clean')
+    expect(findingOf(res.report!, 'R3', 'info')).toBeDefined()
+    expect(findingOf(res.report!, 'R3', 'high')).toBeUndefined()
+  })
+  it('P-1: process.cwd/platform 只读成员（bridges 类无 bin 插件）→ info，verdict clean', () => {
+    const dir = tmpFiles({
+      'package.json': JSON.stringify({ name: 'bridge-tool', dependencies: { '@deepseek-ai/dsh-tools': '^0.1.0-rc.6' } }),
+      'bridge.js': "const d = process.cwd(); const plat = process.platform; const v = process.versions.node",
+    })
+    try {
+      const files = [join(dir, 'package.json'), join(dir, 'bridge.js')]
+      const r = scan({ kind: 'files', files, targetKind: 'plugin' })
+      expect(r.ok).toBe(true)
+      expect(r.report!.verdict).toBe('clean')
+      expect(r.report!.findings.filter(f => f.rule === 'R3' && f.severity === 'info').length).toBeGreaterThanOrEqual(3)
+      expect(r.report!.findings.some(f => f.rule === 'R3' && f.severity === 'high')).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
   it('P4c: bin 入口文件 require(child_process) → R2 medium（CLI 面）；非 bin 插件文件保持 high', () => {

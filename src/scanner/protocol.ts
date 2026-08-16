@@ -34,7 +34,7 @@ export interface Finding {
 }
 
 export interface ScanReport {
-  engine: 'static-v5'
+  engine: 'static-v6'
   sourceCount: number
   findings: Finding[]
   staticScore: number

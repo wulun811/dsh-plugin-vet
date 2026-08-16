@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import { scan } from '../scanner/client.js'
@@ -17,11 +18,33 @@ export interface ScanPluginArgs {
   reason?: string
 }
 
+/** vet 自身包根（lib/tools/scan-plugin.js 上溯两级；realpath 防符号链接绕过）。 */
+const SELF_ROOT = (() => {
+  try {
+    return realpathSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..'))
+  } catch {
+    return ''
+  }
+})()
+
+/** 扫描目标是否是当前运行的 vet 实例本身（realpath 比对，round-7.1 P-3）。 */
+function isSelfPackage(packagePath: string): boolean {
+  if (SELF_ROOT === '') return false
+  try {
+    return realpathSync(packagePath) === SELF_ROOT
+  } catch {
+    return false
+  }
+}
+
 /**
  * 目标身份判定（PLAN §14.3 边界落地）：DSH 插件包（依赖 @deepseek-ai/* 或声明
  * dsh/cordis bundle）→ 'plugin' 严格逃逸判定；否则 'generic'——process 访问降级为
  * 能力触达面（info），避免把普通 npm 工具包/信任锚的合法宿主进程使用误报为逃逸。
  * P2-2：读用户指定路径属 vet 审计操作——withVetSelfIo 直通（.dsh 下不产生无主自报警）。
+ * round-7.1（P-3）：vet 自豁免必须 realpath 验证，不只比 name——本地 file: 安装无
+ * registry 校验，恶意 tarball 可把 package.json 的 name 写成 @jieai/dsh-plugin-vet
+ * 骗过 generic 降级（R3/R4 全降级、deny 放行）；同名冒名包按最严格 plugin 判定。
  */
 export function detectTargetKind(packagePath: string): 'plugin' | 'generic' {
   return withVetSelfIo(() => {
@@ -31,7 +54,10 @@ export function detectTargetKind(packagePath: string): 'plugin' | 'generic' {
     } catch {
       return 'generic' // 无 package.json：无插件形态证据，保守走通用审计
     }
-    if (pkg.name === PACKAGE_NAME) return 'generic' // vet 自身：信任锚工具包，process 为子进程实现
+    if (pkg.name === PACKAGE_NAME) {
+      // vet 自身（信任锚工具包，process 为子进程实现）→ generic；同名冒名包 → 最严格 plugin
+      return isSelfPackage(packagePath) ? 'generic' : 'plugin'
+    }
     // 官方包：宿主合法代码（与 internal/plugin 守卫 isExempt 的 @deepseek-ai/* 豁免一致），process 为能力触达面
     if (typeof pkg.name === 'string' && pkg.name.startsWith('@deepseek-ai/')) return 'generic'
     const deps: Record<string, unknown> = {

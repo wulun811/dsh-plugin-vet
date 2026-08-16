@@ -2,12 +2,34 @@ import ts from 'typescript'
 import type { Finding, RuleContext, Severity } from '../protocol.js'
 import { walk, isShadowed, lineOf } from '../ast.js'
 
-const CRITICAL_MEMBERS = new Set(['getBuiltinModule', 'mainModule', 'module', 'exit'])
+const CRITICAL_MEMBERS = new Set(['getBuiltinModule', 'mainModule', 'module', 'exit', 'reallyExit'])
 /** round-5（实测评估）：信号处理器内的 process.exit 是优雅退出（MCP server 等常驻插件
  * 在 SIGTERM/SIGINT 回调里关闭资源后退出是正常操作面），降级 info 不进 verdict；
  * 非信号上下文的裸 process.exit（条件分支、错误路径、任意位置）保持 critical。 */
 const SIGNAL_HANDLERS = new Set(['SIGTERM', 'SIGINT', 'SIGUSR1', 'SIGUSR2', 'SIGHUP', 'SIGQUIT', 'SIGABRT', 'SIGBREAK'])
 const SIGNAL_EVENTS = new Set(['on', 'once'])
+/**
+ * round-7.1（P-1/P-2）：纯只读/无副作用成员——能力触达面而非逃逸通道（读 cwd/env/pid
+ * 从来不是逃逸，运行时插件代码本就跑在宿主进程里，这些数据天然可读）。plugin 模式也降
+ * info 不进 verdict：MCP/工具插件（dsh-bridges 类：无 bin 声明但有 @deepseek-ai 依赖，
+ * 134 条 cwd/env/platform 误报全部清零）与 wechat-mp 的 cacheFile + pid + .tmp 原子写
+ * 临时名（write-then-rename，与 vet 自身 atomic-write 同款）不再误伤。
+ */
+const READONLY_MEMBERS = new Set([
+  'env', 'cwd', 'platform', 'pid', 'ppid', 'arch', 'version', 'versions', 'release',
+  'argv', 'argv0', 'execArgv', 'execPath', 'title', 'uptime', 'memoryUsage', 'hrtime',
+  'cpuUsage', 'resourceUsage', 'getActiveResourcesInfo', 'features', 'config', 'debugPort',
+  'stdin', 'stdout', 'stderr', 'exitCode', 'connected', 'domain', 'allowedNodeEnvironmentFlags',
+  'sourceMapsEnabled', 'report', 'emitWarning',
+  'nextTick', 'on', 'once', 'off', 'removeListener', 'removeAllListeners', 'emit',
+  'listeners', 'listenerCount', 'eventNames', 'setUncaughtExceptionCaptureCallback',
+  'getuid', 'getgid', 'geteuid', 'getegid', 'getgroups',
+])
+/** 有副作用/能力型成员（plugin 模式保持 high，round-7.1 显式化）：kill/abort/chdir/权限/原生加载等。 */
+const SIDE_EFFECT_MEMBERS = new Set([
+  'kill', 'abort', 'chdir', 'umask', 'setuid', 'setgid', 'setgroups', 'initgroups',
+  'dlopen', 'binding', 'send', 'disconnect',
+])
 
 /**
  * exit 调用是否位于 process.on/once('SIG*', handler) 的处理器回调内（含嵌套箭头/函数）。
@@ -80,7 +102,13 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
           severity = 'critical'
           message = '直接访问 process.' + member + '（Node 能力逃逸通道）'
         }
+      } else if (READONLY_MEMBERS.has(member)) {
+        // round-7.1：只读成员是能力触达面（读 cwd/env/pid 不是逃逸通道）→ info 不进 verdict
+        severity = 'info'
+        message = '只读 process 成员（能力触达面）：process.' + member
       } else {
+        // SIDE_EFFECT_MEMBERS 与未知成员：保持 high（kill/abort/权限/原生加载有真实副作用；
+        // 未知成员保守判定）
         severity = 'high'
         message = '直接访问 process.' + member
       }
@@ -92,9 +120,9 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
       if (member !== undefined && CRITICAL_MEMBERS.has(member)) {
         severity = 'critical'
         message = '直接访问 process[\'' + member + '\']（Node 能力逃逸通道）'
-      } else if (member !== undefined) {
-        severity = 'high'
-        message = '直接访问 process[\'' + member + '\']'
+      } else if (member !== undefined && READONLY_MEMBERS.has(member)) {
+        severity = 'info'
+        message = '只读 process 成员（能力触达面）：process[\'' + member + '\']'
       } else {
         severity = 'high'
         message = '直接访问 process[...]（动态成员）'
