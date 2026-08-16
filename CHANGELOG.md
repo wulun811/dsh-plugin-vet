@@ -3,7 +3,7 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
-## [0.1.6] - 2025-08-17
+## [0.1.6] - 2026-08-17
 
 ### Fixed
 
@@ -13,7 +13,7 @@ versioning follows [SemVer](https://semver.org/).
   object → regenerate with `js-yaml.dump()`. Bad input files are auto-repaired (with user-visible message).
   Comments are lost but stability is guaranteed — users never need to manually fix broken config files.
 
-## [0.1.5] - 2025-08-17
+## [0.1.5] - 2026-08-17
 
 ### Fixed
 
