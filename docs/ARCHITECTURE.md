@@ -71,7 +71,7 @@ stdin/stdout 均为单行 JSON：
 TypeScript compiler API（`createSourceFile`）只读解析 .js/.ts/.mjs/.cjs。
 辅助：字符串/数值静态求值（字面量/模板/拼接/const 绑定）、词法遮蔽检查。
 
-### 4.3 规则集（R1–R11）
+### 4.3 规则集（R1–R12）
 
 | ID | 名称 | 默认级别 | 确定性 |
 |---|---|---|---|
@@ -85,6 +85,7 @@ TypeScript compiler API（`createSourceFile`）只读解析 .js/.ts/.mjs/.cjs。
 | R9 | 资源安全（无界分配/死循环/循环内 spawn/ReDoS/递归） | high/medium/info | certain/likely/heuristic |
 | R10 | 供应链（install 钩子/依赖清单） | high/info | likely/heuristic |
 | R11 | 破坏性文件操作（fs 删除/敏感路径读写） | high/medium | likely |
+| R12 | Cordis/DSH bundle 契约（入口文件/bundle patch 声明/name/engines.node） | high/medium/info | certain/likely |
 
 规则开关：`rules: { "R7": false }` 可关单条。
 
@@ -108,9 +109,11 @@ verdict（唯一权威判定）：`critical ≥ 1 → critical`；否则 `high �
 
 ### 4.7 OSV 已知漏洞核对
 
-package.json 有 name 时按**安装版本**查询 Google OSV（`api.osv.dev/v1/query`），
+package.json 有 name 时按**安装版本（仅精确版本）**查询 Google OSV（`api.osv.dev/v1/query`），
 服务端按 affected ranges 过滤；命中追加 high finding 并重算 verdict。网络失败静默降级。
 `osvCheck: false` 可关（默认开启会外发包名，介意隐私可关）。
+核对面 = 插件自身 + 直接依赖（上限 8 个，`@deepseek-ai/*` 官方包跳过）；
+`*`/`>=`/`^` 区间与无版本主包跳过查询（P3-1/P3-3，避免陈旧全量历史误报）。
 
 ## 5. 运行时守卫（T1 + T2 + 蜜罐，alarm-only）
 
