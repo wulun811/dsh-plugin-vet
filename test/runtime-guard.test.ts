@@ -1100,7 +1100,9 @@ describe('sidecar 单例锁（D30 修漏：配置热重载重复 apply 不再叠
   const watchPath = fileURLToPath(new URL('../lib/guard/runtime-watch.js', import.meta.url))
   const args = [watchPath, '--vet-sidecar', '2000', '2048', '5', '512', '256', '600000']
 
-  it('同宿主重复 spawn → 后者立即退出（exit 0），前者存活', async () => {
+  // T1 哨兵完全依赖 /proc（单例认亲 + 宿主存活看护都是 /proc 读取）；Windows 无 /proc，
+  // 首个 tick 就会按「宿主不可读」优雅退出（exit 0），单例锁语义无从验证——Linux 专属用例。
+  it.skipIf(process.platform === 'win32')('同宿主重复 spawn → 后者立即退出（exit 0），前者存活', async () => {
     const first = spawn(process.execPath, args, { stdio: 'ignore' })
     // 等第一个完成 exec（cmdline 可读）再 spawn 第二个，避免 /proc 竞态
     // 等 first 进入稳态（单例锁已通过、setInterval 已建立）再 spawn second——

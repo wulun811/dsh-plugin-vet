@@ -3,6 +3,18 @@
 所有重要变更记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复
+
+- **Windows 测试环境**：sidecar 单例锁集成测试（D30）依赖 /proc，Windows 无此路径时首个 tick 即优雅退出（exit 0），断言必挂——按平台跳过（`skipIf(win32)`），Linux/CI 上原样执行。
+
+### 构建/发布
+
+- `exports["./client"]` 补 `types` 条件：build-client 顺带产出手写 `lib/client.d.ts`（与 src/client/index.ts 的 `inject`/`apply` 导出同步），浏览器半区接入方获得类型提示。
+- `files` 白名单补 `docs/ARCHITECTURE.md`：npm 包内 README 的架构链接不再断裂（此前只有 GitHub 上可访问）。
+- 新增 GitHub Actions CI（.github/workflows/ci.yml）：push/PR 触发 typecheck + 覆盖率阈值测试 + `npm pack --dry-run` 产物校验。
+
 ## [0.1.3]
 
 - **round-7.1（0.1.2 外部验证，5 项反馈）**：

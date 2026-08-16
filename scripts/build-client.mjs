@@ -1,7 +1,7 @@
 // vet 浏览器半区构建：esbuild 打包 src/client → lib/client.js（react 内联，单文件）。
 // 产物供 dsh client-modules 以 /plugins/<id>.js 提供服务（dsh.client 声明 + exports["./client"]）。
 import { build } from 'esbuild'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const PKG = JSON.parse(
@@ -34,3 +34,21 @@ await build({
   footer: { js: '\n\t\treturn module.exports;\n\t}\n});\n' },
 })
 console.log('client bundle → lib/client.js')
+
+// client 声明（手写：esbuild 产物不产出 d.ts，tsc 对 client 走 noEmit）
+// 与 src/client/index.ts 的导出（inject / apply）保持同步。
+await writeFileSync(
+  fileURLToPath(new URL('../lib/client.d.ts', import.meta.url)),
+  `/** vet 浏览器半区（GUI 盾牌）类型声明：esbuild 打包产物不产出 d.ts，此文件与 src/client/index.ts 手动同步。 */\n` +
+    `export declare const inject: string[]\n` +
+    `export declare function apply(ctx: {\n` +
+    `  slots: {\n` +
+    `    inject(name: string, register: () => unknown): unknown\n` +
+    `    register(spec: { name: string; id: string; order?: number; locale?: string; inject?: Record<string, unknown> }, component: (props: Record<string, unknown>) => unknown): unknown\n` +
+    `  }\n` +
+    `  locale?: { register(ns: string, dicts: { zh: Record<string, string>; en: Record<string, string> }): unknown }\n` +
+    `  effect?: (fn: () => unknown, label?: string) => unknown\n` +
+    `}): void\n`,
+  'utf8',
+)
+console.log('client types → lib/client.d.ts')
