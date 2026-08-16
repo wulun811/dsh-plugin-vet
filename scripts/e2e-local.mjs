@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dsh-plugin-vet 本地 e2e（手动脚本，PLAN.md §9.2-4）。
+ * dsh-plugin-vet 本地 e2e（手动脚本）。
  * 用法：node scripts/e2e-local.mjs [--profile <name>]
  * 无 DEEPSEEK_API_KEY 时自动跳过 LLM 相关断言（同 DSH test:e2e 惯例）。
  */
@@ -31,7 +31,7 @@ const scan = (request) => {
 console.log(`e2e: profile=${profile} DEEPSEEK_API_KEY=${HAS_KEY ? 'present' : 'absent'}`)
 
 // ---- 1) scanner 对 3 个正例 fixture 返回 critical（无 key 也可跑） ----
-// 正例按各自 runtime 语义扫描：workflow/动态插件 → sandbox；run_code → host（R3 分级，PLAN.md A2）
+// 正例按各自 runtime 语义扫描：workflow/动态插件 → sandbox；run_code → host（R3 分级）
 for (const [fixture, lang, runtime] of [
   ['escape-workflow.js', 'js', 'sandbox'],
   ['escape-dynamic-plugin.js', 'js', 'sandbox'],

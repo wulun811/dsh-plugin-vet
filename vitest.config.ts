@@ -16,8 +16,6 @@ export default defineConfig({
         'lib/index.js',               // 装配入口：apply 冒烟覆盖，行级意义小
         'lib/guard/runtime-watch.js', // 哨兵子进程：真实 /proc 集成场景（sidecarMain 不跑）
         'lib/guard/metrics.js',       // 宿主 /proc 读取：依赖真实系统，难稳定 mock
-        'lib/audit/**',               // 旧 LLM 审计工具（已废弃，仅留兼容壳）
-        'lib/tools/audit-plugin.js',  // 旧审计工具（废弃）
         'lib/report/types.js', 'lib/scanner/protocol.js', 'lib/scanner-bin/index.js',
         'lib/skills/index.js',        // client 入口壳
       ],

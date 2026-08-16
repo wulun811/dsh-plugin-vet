@@ -11,6 +11,10 @@ dsh-src/
 .real-plugins/
 # 会话/调试残留（不入库）
 .tmp-*/
+# npm 打包产物（不入库，发布前本地生成）
+*.tgz
+# npm pack 本地缓存（不入库）
+node_modules/.npm-cache-local/
 .conv.js
 .locale.js
 .subagent.js

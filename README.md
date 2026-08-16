@@ -60,30 +60,30 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | `runtimeGrowthWindowMs` | `600000` | 膨胀检测窗口（默认 10 分钟） |
 | `honeypot.enabled` | `false` | 蜜罐诱饵（需 `runtimeGuard: watch`）：往 `honeypot.dir` 放假密钥诱饵，T2 对诱饵路径的触碰（读/写/删）单独报 `honeypot` 类报警。目录/文件名/内容均无蜜罐关键词（反蜜罐），默认位置 `~/.dsh/.local`，诱饵值全是格式正确但无效的假凭据 |
 | `honeypot.dir` | `''` | 诱饵目录；空 = `$HOME/.dsh/.local` |
-| `osvCheck` | `true` | 扫描 package.json 时向 Google OSV 查询已知漏洞（按安装版本过滤，P0-3 修复）；默认开启会外发包名到 api.osv.dev，网络失败静默降级。介意隐私可设 false |
+| `osvCheck` | `true` | 扫描 package.json 时向 Google OSV 查询已知漏洞（**仅精确版本**查询：range（*、>=、^）与无 version 的主包跳过，P3-1/P3-3——避免陈旧全量历史误报）；核对面 = 插件自身 + 直接依赖（上限 8 个，`@deepseek-ai/*` 官方包跳过，P3-10）；间接传递树超出 OSV v1 范围与扫描预算。默认开启会外发包名到 api.osv.dev，网络失败静默降级。介意隐私可设 false |
 
 `@deepseek-ai/*` 官方包默认豁免（内置信任）。
 
 ## 工具
 
 - **`scan_plugin`** — 确定性静态扫描：`target` = `dynamic-code`（源码字符串）/ `package`（包目录）/ `file`（单文件）。返回评分卡（verdict + staticScore + findings）。verdict 只由静态规则产出。
-- **`vet-audit-protocol`（技能）** — 审查流程协议（`AUDIT_PROTOCOL.md`）：agent 按预设步骤审查新插件——scan_plugin 静态判据 → 读清单/源码 → 逐条核实发现 → 主动深挖（网络/文件/进程/凭据/库语义）→ 用系统写入能力手写健康档案到 `~/.dsh/vet/audits/<plugin>-<version>-<ts>.md`。vet 不内置审计工具、不替 agent 调查，只给判据与落盘约定。
+- **`vet-audit-protocol`（技能）** — 审查流程协议（`AUDIT_PROTOCOL.md`）：agent 按预设步骤审查新插件——scan_plugin 静态判据（含 R12 Cordis/DSH 契约）→ 读清单/源码 → 逐条核实发现 → 主动深挖（网络/文件/进程/凭据/库语义）→ **契约与代码质量审计**（4.5 步：入口/Config schema 一致性、错误处理/同步阻塞/资源泄漏/异步正确性等「写得烂」问题——静态干净≠值得装）→ 用系统写入能力手写健康档案到 `~/.dsh/vet/audits/<plugin>-<version>-<ts>.md`。vet 不内置审计工具、不替 agent 调查，只给判据与落盘约定。
 
 ## 自动行为
 
 - **`internal/plugin` 自动扫描**（`autoScan: true`）：新装第三方 npm 包加载时自动静态扫描；`deny` 模式 + verdict ≥ `denyOn` → 回滚加载。
-- **审计门槛**（`requireAudit: true`）：无健康档案的第三方插件加载时——`report` 模式记录黄色 `audit-required` 告警（进 /vet/status.json 告警列表，插件照常加载）；`deny` 模式回滚加载（引用 `vet-audit-protocol` 提示先审查）。
-- **`tools/execute` 拦截**：`cordis_define` / `cordis_run` / `run_code` / `workflow` 执行前扫描代码字符串；`report` 模式在结果文本加 `VET:` 前缀，`deny` 模式直接拦截（isError）。
+- **审计门槛**（`requireAudit: true`）：无健康档案的第三方插件加载时——`report` 模式记录黄色 `audit-required` 告警（进 /vet/status.json 告警列表，插件照常加载）；`deny` 模式回滚加载（引用 `vet-audit-protocol` 提示先审查）。**档案按版本精确匹配**（P-1）：插件升级后旧版本档案不放行新版本——重新审查才能消除告警/拦截。
+- **`tools/execute` 拦截**：`cordis_define` / `run_code` / `workflow` 执行前扫描代码字符串（`cordis_run` 的真实 schema 无 code 载荷，保留守卫位不生效，P3-11 同步）；`report` 模式仅在非 clean 结果时加 `VET:` 前缀（干净执行不污染机器可读输出），`deny` 模式直接拦截（isError）。
 - **运行时守卫（`runtimeGuard: watch`）**——alarm-only：
   - **T1 哨兵**：旁路子进程每 `runtimeIntervalMs` 读宿主 /proc（VmRSS / 子进程数 / fd 数），报警 JSON 行回传宿主 → 盾牌变黄/红。
-  - **T2 钩子**：进程内包装 fs / child_process（含 fs.promises），危险操作（敏感路径写入/删除、读密钥文件、含 shell/下载外联关键词的子进程、蜜罐诱饵触碰）取栈归因到插件包名后报警；官方包归因的 spawn 降噪（能力授权）。**从不阻断调用**。两类自伤豁免（实测误报后修复）：
+  - **T2 钩子**：进程内包装 fs / child_process（含 fs.promises），危险操作（敏感路径写入/删除、读密钥文件、含 shell/下载外联关键词的子进程、蜜罐诱饵触碰、`~/.dsh` 配置根侦察）取栈归因到插件包名后报警；官方包归因全类降噪（能力授权——官方包是平台本体，高频读写 `~/.dsh` 会话/配置/存储不刷屏；第三方无法伪造归因）。**从不阻断调用**。自伤豁免（实测误报后修复）：
     - **node_modules 包目录豁免**：包名/包内文件是公开工件——含 credential/secret 等词的包名是正常生态（`@aws-sdk/credential-provider-*`、`@deepseek-ai/dsh-credentials-local` 等），宿主模块解析（require.resolve 内部 realpathSync/stat 包内 package.json）与 vet 扫描读取都会高频触碰，不再误报 fs-probe；node_modules 之前的段照常判定（`~/.ssh/node_modules/x` 仍命中 .ssh），写删系统根（/usr 等）仍报警。
     - **归因排除 vet 自身**：包装器帧永远是报警栈栈顶，vet 根不参与归因映射——宿主/无主报警不再栽到 vet 头上（报警照发，归因到真实调用方）。
     - 工具链临时产物（tsc `<源名>.<pid>.<uuid>.tmpdir`、`*.tmp`、`*.temp`、`*.swp` 等）自动豁免——名字里的 secrets/credentials 只是被编译的源文件名，删它是清理不是破坏；父段照常判定（`~/.ssh/config.bak` 仍报警）。
 - **GUI 盾牌**：浏览器半区注册进 `conversation.session.header.actions`，轮询 /vet/status.json 显示绿/黄/红灯 + 报警计数。激活需 `dsh web` 重启（重启后 client-modules 才扫描到 `dsh.client` 声明）。
   - 交互：**可点击**——点击展开报警面板（**实时指标**：内存/CPU/I-O/子进程/fd；**守卫状态**：未开启时可一键写入 runtimeGuard: watch 配置（重启生效）；**报警列表**含严重度/归因/**逐条建议**；最近扫描回显、刷新、更新时刻），外部点击自动关闭；有报警时盾牌旁显示计数徽标（绿/黄/红主题色，明暗自适应）。
-  - **单条忽略**：每条报警可点「忽略」——只影响展示（不再计入盾牌等级与计数），记录保留可随时「恢复」；报警停止后忽略自动失效，将来复发会重新可见（可再忽略）。忽略状态与报警存储同生命周期（重启即重置）。
-  - **展示上限**：面板展示最近 8 条报警；存储为环形缓冲上限 20 条，同 id 60 秒内去重，24 小时 TTL 过期（持续触发会自然续期）——100 条不会全量展示，也无需展示（新报警会顶掉最旧的）。
+  - **单条忽略**：每条报警可点「忽略」——只影响展示（不再计入盾牌等级与计数），记录保留可随时「恢复」；报警停止后忽略自动失效，将来复发会重新可见（可再忽略）。忽略状态与报警存储同生命周期（重启即重置）。鉴权边界（P3-12 记录）：dismiss/restore 仅做同源校验（alarm-only 展示层风险——同源页面脚本可隐藏报警，但记录不删、不影响其他能力，体系内可接受）。
+  - **展示上限**：面板展示最近 8 条报警；存储为环形缓冲上限 20 条，同 id 60 秒内去重，24 小时 TTL 过期（持续触发会自然续期）——100 条不会全量展示，也无需展示（新报警会顶掉最旧的）。最近扫描回显（suspicious → 黄灯）同样按 24h TTL 过期（P3-2：一次可疑扫描不再永久黄，持续扫描自然续期）。
 
 ## 静态规则表（R1-R11）
 
@@ -99,6 +99,7 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | R9 | 资源安全（无界分配/无出口同步循环/循环内 spawn/ReDoS/递归无终止/循环内增长模式） | high（分配/死循环/fork）/ medium（ReDoS/递归/Map.set）/ info（常驻循环/+=/Promise.all） | both | certain/likely/heuristic |
 | R10 | 供应链（package.json install 钩子/依赖清单） | high（install 钩子）/ info（依赖清单） | files | likely/heuristic |
 | R11 | 破坏性文件操作（fs 删除/敏感路径读写） | high（敏感路径）/ medium（删除） | both | likely |
+| R12 | Cordis/DSH 契约（入口文件/bundle patch 声明/name/engines.node） | high（patch 缺失/入口缺失）/ medium（无入口/缺 name）/ info（node 版本低） | files | certain/likely |
 
 ## 评分模型
 
@@ -123,6 +124,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；ReDoS 嵌套量词 `(a+)+$`、递归无终止、循环内 `Map.set` → medium（不进 verdict）；含 `await` 常驻循环仅 info（§14.1 不短路审查） | 矩阵 ✓ |
 | R10 | 供应链：`package.json` scripts 的 preinstall/install/postinstall/uninstall 钩子（安装期任意代码执行）→ high；依赖清单 → info（已知漏洞匹配待数据源选型） | high → suspicious（install 钩子） | 矩阵 ✓ |
 | R11 | 破坏性文件操作：`fs.unlink/rm/rmdir(+Sync)` 删除敏感路径（/etc/root/.ssh 等）→ high，普通删除 → medium；`fs.writeFile` 等写入敏感路径 → high；`fs.readdir` 遍历敏感目录 → medium | high → suspicious（敏感路径）；medium 不进 verdict | 矩阵 ✓ |
+| R12 | Cordis/DSH 契约：`dsh.bundle.patch` 声明的文件缺失 → high；无 入口（无 main/exports["."] 且根无 index.js）→ medium；声明的入口文件缺失 → high；插件意图包缺 name → medium；`engines.node` 主版本低于 22 → info | high → suspicious（声明即挂载点/入口，缺失必失败）；medium/info 不进 verdict | 矩阵 ✓ |
 
 ### 能检测 —— 提示级（只降分，永不改变 verdict）
 
@@ -173,7 +175,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 6. **verdict 是静态层确定性判定**；agent 的主观判断记录在健康档案里，不构成安全保证。
 7. **/vet/status.json 无鉴权**：盾牌轮询需要匿名 GET，路由本身不鉴权——若 dsh web 绑定非回环地址，局域网内可读扫描结论/报警目标。vet 是 alarm-only 观测器，不做越权的访问控制；介意就保持回环绑定或信任网络（POST 开关守卫已有同源校验，无 Origin 拒绝）。
 7. **`@deepseek-ai/*` 默认信任**：未来若官方生态被攻破需收紧（v1 留开关）。
-8. **R10 已知漏洞匹配未做**：install 钩子与依赖清单已扫；CVE 匹配需数据源选型（OSV/NVD），待定。
+8. **R10 已知漏洞核对依赖 OSV 网络查询**：默认开启会把「包名+精确版本」发到 api.osv.dev（README 配置节有披露，介意可设 `osvCheck: false`）；网络失败/超时静默降级为跳过（不误拦）；仅对精确版本查询——`*`/`>=`/`^` 区间与无版本主包跳过（P3-1/P3-3），间接传递依赖不在核对面。
 9. **R11 只认 `fs.*` 形态**：解构/别名调用（`const { unlinkSync } = require('fs')`）与运行时路径漏检（已实测记录，属静态边界）。
 10. **T1/T2 是"防盗摄像头"不是"保险柜"**：抓明显搞事（内存/fork 炸弹、敏感路径操作、第三方 spawn），抓不了 worker 线程/原生插件/低流量慢外联；T2 对 ESM 具名导入快照、`process.binding` 等旁路不覆盖。
 11. **T2 归因与降噪**：栈归因是 best-effort（共享服务/定时器跨插件会误归因）；官方包 spawn 默认不报警（能力授权）。
@@ -185,7 +187,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 ```sh
 npm run build       # scanner-bin + src 编译到 lib/ + client bundle
 npm run typecheck   # tsc --noEmit 全量
-npm test            # 构建 + vitest（189 用例，含覆盖率阈值）
+npm test            # 构建 + vitest（215 用例，含覆盖率阈值）
 npx vitest run --coverage   # 覆盖率报告（lines/functions >= 70%，branches >= 50%）
 ```
 

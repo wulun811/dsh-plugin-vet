@@ -5,6 +5,47 @@
 
 ## [Unreleased]
 
+- **构建卫生：lib/ 旧残留清理**：
+  - build 前加 clean 步骤（rm -rf lib 再编译）——已删除源文件的旧编译产物此前残留 lib/ 并随 tgz 发布（session-events.js、tools/audit-plugin.js、audit/ 下 6 个废弃模块 js + 对应 d.ts，均为旧 LLM 审计工具的兼容壳）；清理后 tarball 从 83 文件降到 66 文件，vitest.config.ts 同步移除两条指向废弃文件的 coverage exclude。
+- **round-4 审查修复（开源准备）**：
+  - R12 nodeMajorBelow22 单数字主版本漏检：旧实现假定主版本两位数（two=s[0]+s[1]），4.0.0 / 8.17.0 / 2.0.0 / 6.0.0 / 9.0.0 / 3.x / 5.5.0 全部漏提示——改为解析数字前缀主版本与 22 比较，并顺带支持 v 前缀（v18.0.0）。
+  - R12 pickEntry 补两种合法形态：exports 字符串形态（Node 合法）此前被跳过 → 无 main 且根无 index.js 时产生 medium 误报；exports 条件对象新增 node 条件（DSH 运行在 Node，node 条件最常见）——旧列表只有 import/require/default/types。
+  - P2-2 修复缺口：nearestPackageRoot 的 existsSync 探测未包 withVetSelfIo——扫描 ~/.dsh 下非 node_modules 文件时产生无主 fs-probe 自报警；已包直通（与 detectTargetKind/listSourceFiles/readPackageVersion 对齐）。
+  - budgetMs 移除 DSH_PLUGIN_VET_SCAN_BUDGET_MS env 覆盖：设大值会绕过宿主超时对齐，再次让 R8-skip 不可达（子进程被杀 → deny fail-closed 误拦）；测试用 timeoutMs 参数控制预算。
+  - 锁文件切换 npmjs 官方源：package-lock.json 全部 resolved 从 registry.npmmirror.com 重生成到 registry.npmjs.org（含完整 integrity），npm ci 冒烟验证 137 包干净安装。
+- **开源发布前自检（dogfood 实测）**：
+  - 蜜罐诱饵 R7 自命中修复：诱饵前缀（sk-/AKIA）改常量拼接，模板串拼接文本不再被自己的 R7 判 high——发布物自扫从 suspicious 转 clean，deny 模式重装 vet 不再自锁；加回归测试。
+  - esbuild 声明为直接 devDependency（此前靠 vitest 传递依赖，脆弱）。
+  - README 数字/表述同步：用例数 189→214；Known Limitations #8 改为 OSV 现状（精确版本查询、网络失败静默降级、可关闭）。
+  - 清理仓库内不存在的 PLAN.md 注释引用（19 处）；.gitignore 补 *.tgz（npm pack 产物）。
+- **三轮审查修复 + 审计协议扩展（P-2 计划项落地）**：
+  - P2-1 扫描预算与宿主超时失配：engine 预算原来 files×2s 无界，deny 15+/report 31+ 文件包在 R8-skip 触发前就被宿主 kill → 误报 scan-fail（deny fail-closed 会误拦合法大包）。现在请求携带宿主计划超时（protocol.timeoutMs），engine 预算=min(files×2s, 超时-1.5s)——R8-skip 恒先于 kill，优雅降级结构上可达；scan_plugin 工具超时改与 internal/plugin 同公式（按文件数放大、60s 封顶）。
+  - P2-2 vet 自查 IO 未纳入 vetSelfIo：archive.hasAuditRecord 的 ~/.dsh 目录 readdir 与 scan_plugin 的 listSourceFiles/detectTargetKind 读用户路径，在 .dsh 敏感段下产生无主 fs-probe 自报警——全部 withVetSelfIo 直通（盾牌轮询同款）。
+  - P2-3 跨模块重复安装 + 5s respawn 窗口竞态监控静默死亡：exit handler 在 decideRespawn=false 且 env 指向存活 pid 时记 warn + 黄灯 t1:sentinel-taken-over——接管换手可观测而非静默。
+  - P3-1/P3-3 OSV 只查精确版本：*、>=、^ 与无 version 主包跳过查询（isExactVersion 字符判定），消除按 range/全量历史查询的陈旧误报。
+  - P3-2 lastScan 加 TTL（24h，复用 alarmTtlMs）：一次 suspicious 扫描不再让盾牌永久黄；持续扫描自然续期。
+  - P3-4 file 目标身份识别：父目录有 package.json 时 detectTargetKind（插件文件逃逸判定不再恒 generic）。
+  - P-1 档案版本精确绑定：requireAudit 门槛按装机版本匹配档案（internal/plugin 提前解析根目录读版本）——插件升级后旧档案不放行新版本，必须重新审计。
+  - 新规则 R12（Cordis/DSH bundle 契约）：dsh.bundle.patch 声明缺失/入口文件缺失 → high（suspicious）；无入口（无 main/exports 且无 index.js）→ medium；插件意图包缺 name → medium；engines.node 主版本低于 22 → info。确定性清单检查，非插件意图包不判。
+  - scan_plugin 输出补 pluginVersion（档案/版本核对用）；AUDIT_PROTOCOL 新增 4.5 步「契约与代码质量审计」（错误处理/同步阻塞/资源泄漏/异步正确性/生命周期卫生与热重载幂等）+ 档案模板质量小节 + 结论判据加入质量维度（静态 clean 但有拖垮宿主类缺陷 → review）。
+  - P3-5 记录（非问题）：readHostMetrics 每次 5s 轮询全量扫 /proc 子进程——子进程多时开销随规模线性放大，当前量级可接受，留待后续按需缓存/降频。
+  - 误报修复（盾牌实测）：atomic-write 协议锁（`<file>.lock`）的删/写豁免——DSH 写 `~/.dsh/.credentials.yaml` 用 dsh-atomic-write（wx 创建仅含 PID 的锁兄弟文件、写完 finally 删锁），宿主每次保存凭据都触发无主 fs-destroy red 误报；锁文件非凭据本体，单路径写/删不再归敏感（凭据本体与 cp/rename 双路径语义不变）。
+- **二轮审查修复（全部 14 项核实并处理）**：
+  - P1-1 `guardDisabled` 不对称重置：off→watch 转换后哨兵永不启动——watch 分支开头复位（原 fresh-spawn 分支检查后直接 return，无任何日志）。
+  - P1-2 T1 复用模式报警丢失：复用旧哨兵 = 新实例没有其 stdout 管道，T1 报警全写进已废弃 VetStatus——改为清 env + 终止旧哨兵 + 全新 spawn（新管道新监听器）。
+  - P1-3 `rootIndexing` 标志泄漏：归因构建（loader.entries()/ctx.baseUrl）抛错时标志永久滞留 → 所有 T2 报警静默 bypass——整个构建体纳入 try/finally，包装器对归因失败 try/catch（报警保留无主，fs 调用永不中断）。
+  - P2-4 环形缓冲 replace 语义：窗口外同 id 重发先移除旧副本再入列——持续报警不再占满 20 槽（alarmCount 虚高、挤掉其他报警）。
+  - P2-5 M5 半实现：clean 结果不再前置 `\n\n`（此前 notes 为空也污染机器可读输出）。
+  - P2-6 `~/.dsh` 敏感段：配置根侦察（readdir/stat/读配置）此前完全不可见——加入敏感段；配套官方包归因全类降噪（平台本体高频 IO 不刷屏）+ vet 自 IO 直通（withVetSelfIo，盾牌轮询不自报警）。
+  - P2-7 deny 同步冻结：同步路径剔除 OSV 网络查询 + 超时封顶 30s（此前按文件数放大到 60s + OSV 4s；超时仍 fail-closed 反扫描规避）。
+  - P2-8 vet 条目匹配规则统一：strip/extract/read 三处此前 trim 与顶格不一致——缩进嵌套条目被误读/摘不掉；统一为只认顶格。
+  - P3-9 enable 分支缩进复用：写 runtimeGuard 不再硬编码 4 空格，复用原 config 缩进（非 4 空格配置不再写出损坏 YAML）。
+  - P3-10 OSV 依赖树：核对面从插件自身扩展到直接依赖（上限 8 个，官方包跳过，独立超时静默降级）。
+  - P3-11 README 同步：cordis_run 无 code 载荷不生效（保留守卫位），移除拦截宣称；M5 行为同步。
+  - P3-12 鉴权边界记录：dismiss/restore 同源校验（alarm-only 展示层，README 记录）。
+  - P3-13 判定：保留 deny 扫描失败 fail-closed（M9 反扫描规避），OSV 已移出 deny 同步路径（网络抖动不再影响）；README/CHANGELOG 记录取舍。
+  - P3-14 清理：osv.ts 过期注释同步、data/code-index.sock 工作残留删除、render.ts 文件尾补换行。
+- **生命周期补漏（Cordis 规范）**：T2 钩子与 T1 哨兵是全局资源（fs/child_process 猴子补丁 + 哨兵子进程），此前只在重新 apply 时清理——条目被彻底移除会遗留到进程退出。现在 apply 用 `ctx.effect` 注册 disposer（cordis fiber 卸载时运行；核验时发现 `ctx.on('dispose')` 不在 cordis 类型化事件面内、编译报错，改用 effect 挂载）；disposer 幂等（与 prevGuardDisposer 双保险）。
 - 开源发布准备：MIT 许可证、CONTRIBUTING/SECURITY/CODE_OF_CONDUCT、公开架构文档、npm 元数据。
 - 误报修复（实测两条）：
   - T2 fs-destroy：工具链临时产物豁免——tsc 增量编译在源文件旁建的 `<源名>.<pid>.<uuid>.tmpdir`（`*.tmp`/`*.temp`/`*.swp` 等）随用随删，名字里的 secrets 只是被编译的源文件名；末段临时后缀不参与敏感词判定，父段照常判定（`~/.ssh/config.bak` 仍报警）。
