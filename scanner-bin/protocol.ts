@@ -36,7 +36,7 @@ export interface Finding {
 }
 
 export interface ScanReport {
-  engine: 'static-v6'
+  engine: 'static-v7'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -49,8 +49,8 @@ export interface ScanResponse {
   report?: ScanReport
 }
 
-/** 规则/引擎实现变更必须递增此版本——cache key 与缓存有效性校验都依赖它（round-6：R1 new 形态、R9 ReDoS 判定变更后未递增导致旧缓存中毒；round-7：R2 括号形态/R4 原型污染/R6 组合证据/R9 判定/R3 形态降级；round-7.1：R3 只读成员分类/R4 generic 不再降 info）。 */
-export const ENGINE_VERSION = 'static-v6' as const
+/** 规则/引擎实现变更必须递增此版本——cache key 与缓存有效性校验都依赖它（round-6：R1 new 形态、R9 ReDoS 判定变更后未递增导致旧缓存中毒；round-7：R2 括号形态/R4 原型污染/R6 组合证据/R9 判定/R3 形态降级；round-7.1：R3 只读成员分类/R4 generic 不再降 info；round-7.2：R2 new X.constructor 复用 isConstructorCapture base 校验/R9 带标签 break 出口语义）。 */
+export const ENGINE_VERSION = 'static-v7' as const
 
 /** The 9 rules of v1. R8 is a meta finding emitted by the engine (scan timeout skip). */
 export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12'] as const

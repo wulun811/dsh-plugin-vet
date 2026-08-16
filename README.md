@@ -41,9 +41,9 @@ resolves the bundle and mounts the plugin. Default configuration is in the Confi
 **Local tarball install** (offline or verify-before-release scenario):
 
 ```sh
-dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.3.tgz
+dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 # or unpack directly into the profile's node_modules:
-# tar -xzf jieai-dsh-plugin-vet-0.1.3.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
+# tar -xzf jieai-dsh-plugin-vet-0.1.4.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
 // and add an insert mount entry in the profile's cordis.patch.yml:
 //   - insert:
 //       - id: plugin-vet
@@ -203,11 +203,11 @@ and verdict are shown separately and never merged into a single total.
 | Rule | Problem class | Hit → verdict | Verified |
 |---|---|---|---|
 | R1 | Constructor-chain escape: `x.constructor("return process")` / `x["constructor"]("return " + "process")` / `new (globalThis.constructor.constructor)("return process")()` (dot/bracket-access + new forms; string args statically evaluable: literals/templates/concatenation/const bindings; new supports const-alias tracking) | critical | matrix + multi-file ✓ |
-| R2 | Dynamic execution: `eval()` / `Function()` / `new Function` / `new AsyncFunction` (incl. parenthesized `new (Function)(...)`; escape-string args → critical) / `(async)=>{}.constructor` capture / `vm.runInContext`/`runInNewContext` / dynamic `import()` / `require()` | high (files) / medium (code, escape-string → critical); bin entries judged as generic code, drop to medium | matrix + round-7 regression ✓ |
+| R2 | Dynamic execution: `eval()` / `Function()` / `new Function` / `new AsyncFunction` (incl. parenthesized `new (Function)(...)`; escape-string args → critical) / `(async)=>{}.constructor` capture (round-7.2: `new X.constructor` reported only when the base is a function literal — `new n.constructor(n.type, n)` object-clone no longer false-positives) / `vm.runInContext`/`runInNewContext` / dynamic `import()` / `require()` | high (files) / medium (code, escape-string → critical); bin entries judged as generic code, drop to medium | matrix + round-7/7.2 regression ✓ |
 | R3 | Direct process access: `getBuiltinModule`/`mainModule`/`module`/`exit` (incl. `reallyExit`) → critical; side-effect members (`kill`/`abort`/`chdir`/`umask`/`setuid`/`dlopen`/`binding`, etc.) and unknown members → high; **read-only members (round-7.1)**: `env`/`cwd`/`platform`/`pid`/`argv`/`execPath`/`stdin`/`stdout`/`stderr`/`nextTick`/`on`, etc. → info capability surface (reading cwd/env/pid isn't an escape channel; no-bin MCP/tool plugins like bridges no longer get hurt); `runtime='sandbox'` caps at high; shape degradation: generic packages / bin entry files / app-type packages → info | critical / high / info | matrix + round-7.1 regression ✓ |
 | R4 | Host-closure capture: reading `.constructor` of agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob or feeding `Object.getPrototypeOf` (code scenario); host-global prototype pollution: `<builtin>.prototype.<member> = ...` override assignments and `Object.defineProperty(<builtin>.prototype, ...)` (Object/Array/String/Function/TextEncoder/URL/Buffer and 40+ builtins, round-7) | critical (code) / high (files, since round-7.1 independent of targetKind — pollution semantics don't distinguish plugins from generic packages, generic no longer drops to info) | matrix + round-7 regression ✓ |
 | R7 | Hardcoded secrets: `sk-` / `AKIA` / `AIza` / `gh[pousr]_` / `xox[baprs]-` / env-var assignment / URL-embedded keys (placeholders excluded) | high → suspicious | matrix ✓ |
-| R9 | Resource safety: `new Array(2**31)` / `Buffer.alloc(1GB)` unbounded allocation (≥1e8), `while(true)`/`for(;;)` exit-less **synchronous** loops (freezes the host), `spawn`/`exec`/`fork`/`new Worker` in exit-less loops (fork bomb) | high → suspicious; ReDoS nested quantifiers `(a+)+`-class and overlapping alternation branches `(a|aa)+` → medium (first-char-disjoint branches like `(?:[^']|'')*` and group-then-`?` like `(https?:)?` are linear and not reported, round-7), non-terminating recursion (for-of/for-in collection traversal and self-calls inside conditional loops not reported, round-7), `Map.set` in loops → medium (not into verdict); resident `await` loops only info (§14.1 doesn't shortcut review) | matrix + round-7 regression ✓ |
+| R9 | Resource safety: `new Array(2**31)` / `Buffer.alloc(1GB)` unbounded allocation (≥1e8), `while(true)`/`for(;;)` exit-less **synchronous** loops (freezes the host; round-7.2: a labeled break whose label wraps the loop — `outer: for(;;){ ... break outer }` — counts as an exit signal), `spawn`/`exec`/`fork`/`new Worker` in exit-less loops (fork bomb) | high → suspicious; ReDoS nested quantifiers `(a+)+`-class and overlapping alternation branches `(a|aa)+` → medium (first-char-disjoint branches like `(?:[^']|'')*` and group-then-`?` like `(https?:)?` are linear and not reported, round-7), non-terminating recursion (for-of/for-in collection traversal and self-calls inside conditional loops not reported, round-7), `Map.set` in loops → medium (not into verdict); resident `await` loops only info (§14.1 doesn't shortcut review) | matrix + round-7/7.2 regression ✓ |
 | R10 | Supply chain: `preinstall`/`install`/`postinstall`/`uninstall` hooks in package.json scripts (arbitrary code execution at install time) → high; dependency manifest → info (known-vulnerability check: OSV exact-version query, osvCheck can be disabled) | high → suspicious (install hooks) | matrix ✓ |
 | R11 | Destructive file operations: `fs.unlink/rm/rmdir(+Sync)` deleting sensitive paths (/etc/root/.ssh etc.) → high, plain deletes → medium; `fs.writeFile` etc. writing sensitive paths → high; `fs.readdir` traversing sensitive directories → medium | high → suspicious (sensitive paths); medium not into verdict | matrix ✓ |
 | R12 | Cordis/DSH contract: missing declared `dsh.bundle.patch` file → high; no entry (no main/exports["."] and no root index.js) → medium; declared entry file missing → high; plugin-intent package missing name → medium; `engines.node` major < 22 → info | high → suspicious (declared mount point/entry missing means guaranteed failure); medium/info not into verdict | matrix ✓ |
@@ -310,13 +310,22 @@ and verdict are shown separately and never merged into a single total.
     run.js/util.js). Statically distinguishing `process.kill(child.pid)` (pid from this package's own spawn
     return) from arbitrary pids needs dataflow analysis — high cost, low benefit; kept as-is, to be ruled out
     manually by the agent during vet-audit-protocol review (conclusion recorded in the health record).
+16. **Platform support (Linux-first, graceful degradation elsewhere)**: the static scan layer (scanner-bin /
+    scan_plugin / R1-R12 / OSV), T2 runtime hooks, honeypot, GUI shield and audit protocol are all pure JS and
+    run cross-platform (macOS/Windows). **The T1 sentinel is Linux-only**: it depends on /proc for
+    VmRSS/children/fd; on non-Linux the sentinel exits gracefully and the metrics panel falls back to -1/0 (no
+    errors, no log spam, by design). T2 sensitive paths match by path-segment name (backslashes are normalized,
+    so `.ssh`/`.env`/`credentials` etc. hit on Windows too), but the "system-root prefix" (/etc /usr /var) is
+    POSIX-shaped: on Windows, write/delete of `C:\Windows\System32`-style paths bypasses the system-root
+    judgment (segment-name/keyword checks still apply); macOS has /etc /usr /var, so T2 is fully functional.
+    Consistent with DSH current Linux-first adaptation state.
 
 ## Development
 
 ```sh
 npm run build       # scanner-bin + src compiled to lib/ + client bundle
 npm run typecheck   # full tsc --noEmit
-npm test            # build + vitest (243 cases, incl. coverage thresholds)
+npm test            # build + vitest (249 cases, incl. coverage thresholds)
 npx vitest run --coverage   # coverage report (lines/functions >= 70%, branches >= 50%)
 ```
 

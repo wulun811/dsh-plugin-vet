@@ -36,9 +36,9 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 **本地 tarball 安装**（离线/先验证再发版场景）：
 
 ```sh
-dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.3.tgz
+dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 # 或直接解包到 profile 的 node_modules：
-# tar -xzf jieai-dsh-plugin-vet-0.1.3.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
+# tar -xzf jieai-dsh-plugin-vet-0.1.4.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
 // 并在 profile 的 cordis.patch.yml 里 insert 挂载条目：
 //   - insert:
 //       - id: plugin-vet
@@ -142,11 +142,11 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | 规则 | 检测的问题类 | 命中 → verdict | 验证 |
 |---|---|---|---|
 | R1 | 构造器链逃逸：`x.constructor("return process")` / `x["constructor"]("return " + "process")` / `new (globalThis.constructor.constructor)("return process")()`（点/元素访问 + new 形态；字符串参数静态可求值：字面量/模板/拼接/const 绑定；new 支持 const 别名追踪） | critical | 矩阵 + 多文件 ✓ |
-| R2 | 动态执行：`eval()` / `Function()` / `new Function`/\`new AsyncFunction\`（含括号形态 `new (Function)(...)`；参数含逃逸串 → critical）/ `(async)=>{}.constructor` 捕获 / `vm.runInContext`/\`runInNewContext\` / 动态 `import()` / `require()` | high（files）/ medium（code，逃逸串 critical）；bin 入口文件按通用代码判定降 medium | 矩阵 + round-7 回归 ✓ |
+| R2 | 动态执行：`eval()` / `Function()` / `new Function`/\`new AsyncFunction\`（含括号形态 `new (Function)(...)`；参数含逃逸串 → critical）/ `(async)=>{}.constructor` 捕获（round-7.2：`new X.constructor` 仅 base 为函数字面量才报——`new n.constructor(n.type, n)` 对象克隆形态不报）/ `vm.runInContext`/\`runInNewContext\` / 动态 `import()` / `require()` | high（files）/ medium（code，逃逸串 critical）；bin 入口文件按通用代码判定降 medium | 矩阵 + round-7/7.2 回归 ✓ |
 | R3 | process 直访：`getBuiltinModule`/\`mainModule\`/\`module\`/\`exit\`（含 `reallyExit`）→ critical；副作用成员（`kill`/`abort`/`chdir`/`umask`/`setuid`/`dlopen`/`binding` 等）与未知成员 → high；**只读成员（round-7.1）**：`env`/`cwd`/`platform`/`pid`/`argv`/`execPath`/`stdin`/`stdout`/`stderr`/`nextTick`/`on` 等 → info 能力触达面（读 cwd/env/pid 不是逃逸通道，bridges 类无 bin 的 MCP/工具插件不再误伤）；`runtime='sandbox'` 封顶 high；形态降级：generic 包 / bin 入口文件 / 应用型包 → info | critical / high / info | 矩阵 + round-7.1 回归 ✓ |
 | R4 | 宿主闭包捕获：agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob 的 `.constructor` 读取或 `Object.getPrototypeOf` 投喂（code 场景）；宿主全局原型污染：`<内置>.prototype.<成员> = ...` 覆盖赋值与 `Object.defineProperty(<内置>.prototype, ...)`（Object/Array/String/Function/TextEncoder/URL/Buffer 等 40+ 内置，round-7） | critical（code）/ high（files，round-7.1 起与 targetKind 无关——污染语义不分插件/通用包，generic 不再降 info） | 矩阵 + round-7 回归 ✓ |
 | R7 | 硬编码密钥：`sk-` / `AKIA` / `AIza` / `gh[pousr]_` / `xox[baprs]-` / 环境变量赋值 / URL 内嵌 key（占位符排除） | high → suspicious | 矩阵 ✓ |
-| R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；ReDoS 嵌套量词 `(a+)+` 类与 alternation 分支重叠 `(a|aa)+` → medium（分支首字符互斥的 `(?:[^']|'')*` 类、组后 `?` 的 `(https?:)?` 类线性回溯不报，round-7）、递归无终止（for-of/for-in 集合遍历与带条件循环内的自调用不报，round-7）、循环内 `Map.set` → medium（不进 verdict）；含 `await` 常驻循环仅 info（§14.1 不短路审查） | 矩阵 + round-7 回归 ✓ |
+| R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主；round-7.2：带标签 break 跳出外层循环算出口——`outer: for(;;){ ... break outer }` 不再误报）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；ReDoS 嵌套量词 `(a+)+` 类与 alternation 分支重叠 `(a|aa)+` → medium（分支首字符互斥的 `(?:[^']|'')*` 类、组后 `?` 的 `(https?:)?` 类线性回溯不报，round-7）、递归无终止（for-of/for-in 集合遍历与带条件循环内的自调用不报，round-7）、循环内 `Map.set` → medium（不进 verdict）；含 `await` 常驻循环仅 info（§14.1 不短路审查） | 矩阵 + round-7/7.2 回归 ✓ |
 | R10 | 供应链：`package.json` scripts 的 preinstall/install/postinstall/uninstall 钩子（安装期任意代码执行）→ high；依赖清单 → info（已知漏洞核对：OSV 精确版本查询，osvCheck 可关） | high → suspicious（install 钩子） | 矩阵 ✓ |
 | R11 | 破坏性文件操作：`fs.unlink/rm/rmdir(+Sync)` 删除敏感路径（/etc/root/.ssh 等）→ high，普通删除 → medium；`fs.writeFile` 等写入敏感路径 → high；`fs.readdir` 遍历敏感目录 → medium | high → suspicious（敏感路径）；medium 不进 verdict | 矩阵 ✓ |
 | R12 | Cordis/DSH 契约：`dsh.bundle.patch` 声明的文件缺失 → high；无 入口（无 main/exports["."] 且根无 index.js）→ medium；声明的入口文件缺失 → high；插件意图包缺 name → medium；`engines.node` 主版本低于 22 → info | high → suspicious（声明即挂载点/入口，缺失必失败）；medium/info 不进 verdict | 矩阵 ✓ |
@@ -214,7 +214,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 ```sh
 npm run build       # scanner-bin + src 编译到 lib/ + client bundle
 npm run typecheck   # tsc --noEmit 全量
-npm test            # 构建 + vitest（243 用例，含覆盖率阈值）
+npm test            # 构建 + vitest（249 用例，含覆盖率阈值）
 npx vitest run --coverage   # 覆盖率报告（lines/functions >= 70%，branches >= 50%）
 ```
 

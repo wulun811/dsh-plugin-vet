@@ -3,10 +3,19 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.1.4]
 
 ### Fixed
 
+- **round-7.2（minified bundle 实测，2 个语义级误报修复）**:
+  - R2: `new n.constructor(n.type, n)`（React 事件系统复制事件对象）误报 high——checkNew 的 constructor 分支改调
+    isConstructorCapture：base 必须是箭头/函数字面量才是真捕获（对象克隆/工厂形态不再误报；真捕获
+    `new (async()=>{}).constructor('return process')` 仍 critical）。
+  - R9: `outer: for(;;) { for(...) { break outer } }` 误报无出口循环——exitSignals 识别带标签 break 的出口语义：
+    标签绑定在包裹当前循环的 labeled 语句上（循环体祖先）即算出口信号；绑定在循环内部（`break inner`）不算，
+    真死循环照报。
+  - ENGINE_VERSION static-v6 → static-v7（规则变更使旧缓存失效）。
+  - 回归测试 +6（249 total cases）。
 - **Windows test environment**: the sidecar singleton-lock integration test (D30) depends on /proc; on Windows
   that path is absent, so the first tick exits gracefully (exit 0) and the assertion always fails — now skipped
   per platform (`skipIf(win32)`); still runs as-is on Linux/CI.
@@ -16,6 +25,8 @@ versioning follows [SemVer](https://semver.org/).
 - All documentation translated to English for international users: README.md (Chinese original kept as
   README.zh.md), AUDIT_PROTOCOL.md, CONTRIBUTING.md, SECURITY.md, CHANGELOG.md, docs/ARCHITECTURE.md.
   `README.zh.md` added to the npm `files` allowlist.
+  - Restored Known Limitation 16 (platform support: Linux-first, graceful degradation) in the English README.md
+    - the en rewrite dropped it while README.zh.md kept it; the two docs now stay in sync.
 
 ### Build / release
 

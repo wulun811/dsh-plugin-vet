@@ -82,13 +82,13 @@ check.
 | ID | Name | Default level | Determinism |
 |---|---|---|---|
 | R1 | constructor-chain escape | critical | certain/likely |
-| R2 | Dynamic execution (eval/Function/import/require, incl. shadowing check) | high (files) / medium (code) | certain/likely |
+| R2 | Dynamic execution (eval/Function/import/require, incl. shadowing check; `new X.constructor` capture reported only when the base is a function literal — object-clone forms (`new n.constructor(...)`) excluded, round-7.2) | high (files) / medium (code) | certain/likely |
 | R3 | Direct process access (runtime-graded; round-7.1: read-only members → info, side-effect members → high, escape members → critical) | critical (host) / high (sandbox) | certain |
 | R4 | Host-closure capture (agent/TextEncoder…) + host-global prototype pollution (round-7; round-7.1: files always high, independent of targetKind) | critical (code) / high (files) | certain/likely |
 | R5 | ctx-escape attempt signal | medium | code only |
 | R6 | String coarse-scan fallback (obfuscation signals need combined evidence with dynamic execution, round-7) | info | heuristic |
 | R7 | Hardcoded secrets (placeholders excluded by segment) | high | likely |
-| R9 | Resource safety (unbounded allocation / dead loops / spawn-in-loop / ReDoS / recursion; round-7: group-then-`?` not ReDoS, bounded traversal recursion not non-termination) | high/medium/info | certain/likely/heuristic |
+| R9 | Resource safety (unbounded allocation / dead loops / spawn-in-loop / ReDoS / recursion; round-7: group-then-`?` not ReDoS, bounded traversal recursion not non-termination; round-7.2: labeled break to a label wrapping the loop counts as an exit signal) | high/medium/info | certain/likely/heuristic |
 | R10 | Supply chain (install hooks / dependency manifest) | high/info | likely/heuristic |
 | R11 | Destructive file operations (fs deletes / sensitive-path reads-writes) | high/medium | likely |
 | R12 | Cordis/DSH bundle contract (entry file / bundle-patch declaration / name / engines.node) | high/medium/info | certain/likely |

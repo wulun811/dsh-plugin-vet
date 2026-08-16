@@ -125,9 +125,9 @@ function checkNew(n: ts.NewExpression, sf: ts.SourceFile, add: (n: ts.Node, sev:
     add(n, 'high', 'certain', 'new Function / new AsyncFunction 动态执行')
     return
   }
-  if (ts.isPropertyAccessExpression(expr) && expr.name.text === 'constructor') {
-    add(n, 'high', 'certain', 'new (async()=>{}).constructor 捕获构造器')
-  }
+  // round-7.2：复用 isConstructorCapture 的 base 校验——只有箭头/函数字面量才是真捕获；
+  // new n.constructor(n.type, n)（React 事件对象克隆等 minified bundle 形态）的 base 是变量，不报。
+  if (isConstructorCapture(expr)) add(n, 'high', 'certain', 'new (async()=>{}).constructor 捕获构造器')
 }
 
 function isConstructorCapture(n: ts.Node): boolean {

@@ -158,9 +158,27 @@ interface ExitSignals {
 
 function exitSignals(body: ts.Node): ExitSignals {
   const sig: ExitSignals = { hasBreak: false, hasReturn: false, hasThrow: false, hasAwait: false }
+  // round-7.2：带标签 break 的出口语义——`outer: for(;;) { for(...) { break outer } }` 跳出的是外层循环，
+  // 之前的 inInnerLoop 标记把它当内层 break 不算出口 → minified bundle 误报无出口循环。
+  // 规则：标签绑定在包裹当前循环的 labeled 语句上（是循环体祖先）→ 算本循环出口信号；
+  // 标签绑定在循环内部（`for(;;) { a: { break a } }`）→ 只跳出内部块，不算。
+  const loopAncestors = new Set<ts.Node>()
+  for (let p = body.parent; p !== undefined; p = p.parent) loopAncestors.add(p)
   const visit = (n: ts.Node, inInnerLoop: boolean): void => {
     if (ts.isFunctionLike(n)) return // nested functions don't affect this loop
-    if (ts.isBreakStatement(n) && !inInnerLoop) sig.hasBreak = true
+    if (ts.isBreakStatement(n)) {
+      if (!inInnerLoop) {
+        sig.hasBreak = true
+      } else if (n.label !== undefined) {
+        // 带标签 break：向上找标签绑定的 labeled 语句；若它包裹当前循环 → 本循环有出口
+        for (let p = n.parent; p !== undefined; p = p.parent) {
+          if (ts.isLabeledStatement(p) && p.label.text === n.label.text) {
+            if (loopAncestors.has(p)) sig.hasBreak = true
+            break
+          }
+        }
+      }
+    }
     if (ts.isReturnStatement(n)) sig.hasReturn = true
     if (ts.isThrowStatement(n)) sig.hasThrow = true
     if (ts.isAwaitExpression(n)) sig.hasAwait = true

@@ -257,6 +257,42 @@ describe('round-7（外部第二轮实测）回归：R2 括号形态、R4 原型
   })
 })
 
+describe('round-7.2（minified bundle 实测）回归：R2 new X.constructor、R9 带标签 break', () => {
+  // R2：new n.constructor(n.type, n)（React 事件系统复制事件对象）base 是变量 → 不是构造器捕获
+  it('R2: new n.constructor(n.type, n) → 不报构造器捕获（base 非函数字面量）', () => {
+    const res = scan(codeRequest({ code: 'function clone(n) { return new n.constructor(n.type, n) }' }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R2')).toBeUndefined()
+    expect(res.report!.verdict).toBe('clean')
+  })
+  it('R2: new (async()=>{}).constructor(...) 函数字面量 base → 仍报 high（真捕获不丢）', () => {
+    const res = scan(codeRequest({ code: "const f = new (async()=>{}).constructor('return process')" }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R2', 'high')).toBeDefined()
+  })
+  // R9：outer 标签 break 跳出 for(;;) 是出口信号（此前被 inInnerLoop 吞掉 → minified 误报 high）
+  it('R9: outer 标签 break 跳出 for(;;) → 有出口，不报无出口循环', () => {
+    const res = scan(codeRequest({ code: 'outer: for (;;) { for (let i = 0; i < 3; i++) { if (i === 1) break outer } }' }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R9')).toBeUndefined()
+  })
+  it('R9: outer 标签 break 跳出 while(true) → 有出口，不报', () => {
+    const res = scan(codeRequest({ code: 'outer: while (true) { for (let i = 0; i < 3; i++) { if (i === 1) break outer } }' }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R9')).toBeUndefined()
+  })
+  it('R9: break inner 只跳出内层循环 → 外层 for(;;) 仍报（不过度放行）', () => {
+    const res = scan(codeRequest({ code: 'for (;;) { inner: for (let i = 0; i < 3; i++) { if (i === 1) break inner } }' }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R9', 'high')).toBeDefined()
+  })
+  it('R9: 真 for(;;) 死循环仍报 high', () => {
+    const res = scan(codeRequest({ code: 'for (;;) {}' }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R9', 'high')).toBeDefined()
+  })
+})
+
 describe('P2-9：R7 占位符按段排除（真实 key 混 example 文本不再整段跳过）', () => {
   it('sk- 真实 key 与 example 文本同串 → 仍报 R7', () => {
     const code = `const k = 'sk-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c example'`
