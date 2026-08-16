@@ -425,6 +425,46 @@ describe('R12：Cordis/DSH bundle 契约（P-2 计划项）', () => {
   })
 })
 
+describe('round-5（实测评估）回归：R1 元素访问、R3 信号处理、R9 ReDoS 误报', () => {
+  it('R1: x["constructor"] 元素访问形态（拼接参数）→ critical（此前完全漏检）', () => {
+    const res = scan(codeRequest({ code: 'const x = {}; x["constructor"]("return " + "process")' }))
+    expect(res.ok).toBe(true)
+    expect(res.report!.verdict).toBe('critical')
+    expect(findingOf(res.report!, 'R1', 'critical')).toBeDefined()
+  })
+  it('R1: x["constructor"] 元素访问 + 字面量参数 → critical', () => {
+    const res = scan(codeRequest({ code: 'const x = {}; x["constructor"]("return process")' }))
+    expect(res.report!.verdict).toBe('critical')
+    expect(findingOf(res.report!, 'R1', 'critical')).toBeDefined()
+  })
+  it('R3: 信号处理器回调内的 process.exit（优雅退出）→ info 不进 verdict', () => {
+    const res = scan(codeRequest({ code: 'process.on("SIGTERM", () => { server.close(); process.exit(0) })' }))
+    expect(res.ok).toBe(true)
+    expect(res.report!.verdict).toBe('clean')
+    expect(findingOf(res.report!, 'R3', 'critical')).toBeUndefined()
+  })
+  it('R3: 裸 process.exit（错误路径）→ 仍 critical', () => {
+    const res = scan(codeRequest({ code: 'if (err) { process.exit(1) }' }))
+    expect(res.report!.verdict).toBe('critical')
+    expect(findingOf(res.report!, 'R3', 'critical')).toBeDefined()
+  })
+  it('R5: ctx.logger（cordis 官方服务）→ 不报', () => {
+    const res = scan(codeRequest({ code: 'export function apply(ctx) { ctx.logger.info("hi") }' }))
+    expect(res.ok).toBe(true)
+    expect(res.report!.findings.some(f => f.rule === 'R5')).toBe(false)
+  })
+  it('R9: 良性单可选组 (?:x)? → 不报 ReDoS（此前误报 medium）', () => {
+    const res = scan(codeRequest({ code: 'const re = /\\.(?:tmp(?:dir)?|temp|swp|bak|orig)$/i' }))
+    expect(res.ok).toBe(true)
+    expect(res.report!.findings.some(f => f.rule === 'R9' && (f.message || '').includes('ReDoS'))).toBe(false)
+  })
+  it('R9: 真 ReDoS (a+)+ → 仍报 medium', () => {
+    const res = scan(codeRequest({ code: 'const re = /(a+)+$/' }))
+    expect(res.ok).toBe(true)
+    expect(res.report!.findings.some(f => f.rule === 'R9' && (f.message || '').includes('ReDoS'))).toBe(true)
+  })
+})
+
 describe('开源自检（dogfood）：vet 扫描自己的蜜罐源码不该 R7 自命中', () => {
   it('src/guard/honeypot.ts 无 hardcoded secrets（前缀常量化的诱饵）', () => {
     // 回归：诱饵值若把 sk- 或 AKIA 写进模板串，R7 会把拼接文本判成 high，

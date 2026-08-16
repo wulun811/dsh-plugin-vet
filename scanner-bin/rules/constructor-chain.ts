@@ -12,7 +12,19 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   walk(sf, n => {
     if (!ts.isCallExpression(n)) return
     const callee = n.expression
-    if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'constructor') return
+    // round-4/5（实测对抗）：元素访问形态 x['constructor'](...) 是恶意代码最常用写法，
+    // 旧实现只认点访问 x.constructor(...)，x['constructor']('return ' + 'process') 完全漏检（verdict=clean）。
+    // 两种形态都查：属性名取点访问的 name 或元素访问的字符串字面量。
+    let ctorName: string | undefined
+    if (ts.isPropertyAccessExpression(callee)) {
+      ctorName = callee.name.text
+    } else if (ts.isElementAccessExpression(callee)) {
+      const key = callee.argumentExpression
+      if (key !== undefined && (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key))) {
+        ctorName = key.text
+      }
+    }
+    if (ctorName !== 'constructor') return
     const arg = n.arguments[0]
     if (arg === undefined) return
     const sv = stringyValue(arg, sf)

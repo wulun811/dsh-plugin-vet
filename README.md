@@ -93,7 +93,7 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 | R2 | 动态执行（eval/Function/import/require） | high（files）/ medium（code） | both | certain/likely |
 | R3 | process 直接访问（按 runtime 分级） | critical（host）/ high（sandbox） | both | certain |
 | R4 | 宿主闭包捕获（agent/TextEncoder…） | critical | code | certain |
-| R5 | ctx 逃逸尝试信号（withheld 成员/未声明服务） | medium | 仅 code | likely |
+| R5 | ctx 逃逸尝试信号（withheld 成员/未声明服务；`ctx.logger` 等官方注入服务白名单放行） | medium | 仅 code | likely |
 | R6 | 字符串粗扫兜底 | info | both | heuristic |
 | R7 | 硬编码密钥 | high | both | likely |
 | R9 | 资源安全（无界分配/无出口同步循环/循环内 spawn/ReDoS/递归无终止/循环内增长模式） | high（分配/死循环/fork）/ medium（ReDoS/递归/Map.set）/ info（常驻循环/+=/Promise.all） | both | certain/likely/heuristic |
@@ -116,7 +116,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 
 | 规则 | 检测的问题类 | 命中 → verdict | 验证 |
 |---|---|---|---|
-| R1 | 构造器链逃逸：`x.constructor("return process")`（字符串参数静态可求值：字面量/模板/拼接/const 绑定） | critical | 矩阵 + 多文件 ✓ |
+| R1 | 构造器链逃逸：`x.constructor("return process")` / `x["constructor"]("return " + "process")`（点访问与元素访问双形态；字符串参数静态可求值：字面量/模板/拼接/const 绑定） | critical | 矩阵 + 多文件 ✓ |
 | R2 | 动态执行：`eval()` / `Function()` / `new Function`/\`new AsyncFunction\`（参数含逃逸串 → critical）/ `(async)=>{}.constructor` 捕获 / `vm.runInContext`/\`runInNewContext\` / 动态 `import()` / `require()` | high（files）/ medium（code，逃逸串 critical） | 矩阵 ✓ |
 | R3 | process 直访：`getBuiltinModule`/\`mainModule\`/\`module\`/\`exit\` → critical；其余成员 → high；`runtime='sandbox'` 封顶 high | critical / high | 矩阵 ✓ |
 | R4 | 宿主闭包捕获：agent/parallel/pipeline/phase/log/TextEncoder/TextDecoder/btoa/atob 的 `.constructor` 读取或 `Object.getPrototypeOf` 投喂 | critical | 矩阵 ✓ |
@@ -146,7 +146,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 
 | 形态 | 实测结果 |
 |---|---|
-| 间接引用：别名函数 `const f = Function; f(...)`、计算访问 `x["constructor"]` / `process["getBuiltinModule"]`、`globalThis.process`、间接 eval `(0, eval)` | 仅 R6 info 或零 finding，verdict=clean |
+| 间接引用：别名函数 `const f = Function; f(...)`、`process["getBuiltinModule"]`、`globalThis.process`、间接 eval `(0, eval)` | 仅 R6 info 或零 finding，verdict=clean |
 | 运行时/外部构造载荷：base64 串、hex/charCode 拼装、网络/环境变量/参数读码、自修改代码 | base64 构造器串实测**零 finding** |
 | 非源码文件：`.jsx`/\`.tsx\`/\`.vue\`/\`.json\`/二进制/wasm/shell 脚本 | 不在扫描面（仅 .js/.ts/.mjs/.cjs） |
 | 依赖链/供应链：import/require 图、依赖版本漏洞、`package.json` scripts/install 钩子、许可证、作者信誉 | 不解析 |

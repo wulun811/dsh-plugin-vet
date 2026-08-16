@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+- **round-5（外部 DSH 实测评估）修复**：
+  - R1 元素访问形态漏检：x["constructor"]("return " + "process") 此前完全绕过（verdict=clean）——恶意代码最常用的形态之一，现点访问/元素访问双形态 + 拼接/模板/const 绑定参数静态求值全部命中 critical。
+  - R3 信号处理误报：process.on/once('SIG*') 注册与信号回调内的 process.exit（优雅退出）是 MCP server 等常驻插件的正常操作面，降级 info 不进 verdict；裸 process.exit（错误路径等）保持 critical。
+  - R5 ctx.logger 误报：cordis 官方注入服务（DSH mcp-client 等大量使用）加入白名单，不再报 medium。
+  - R9 ReDoS 误报重写：旧正则把 (?:x)? 组首 '?' 修饰符误当量词，所有单可选组误报 medium——改为函数式判定（组内顶层量词 + 组后量词叠加才算），(a+)+ 类真 ReDoS 仍报。
+  - 以上全部带回归测试（+7，225 总用例）。
 - **构建卫生：lib/ 旧残留清理**：
   - build 前加 clean 步骤（rm -rf lib 再编译）——已删除源文件的旧编译产物此前残留 lib/ 并随 tgz 发布（session-events.js、tools/audit-plugin.js、audit/ 下 6 个废弃模块 js + 对应 d.ts，均为旧 LLM 审计工具的兼容壳）；清理后 tarball 从 83 文件降到 66 文件，vitest.config.ts 同步移除两条指向废弃文件的 coverage exclude。
 - **round-4 审查修复（开源准备）**：

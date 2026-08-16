@@ -20,8 +20,41 @@ import { walk, numberyValue, stringyValue, lineOf } from '../ast.js'
 const ALLOC_LIMIT = 100_000_000
 const SPAWN_CALLS = new Set(['spawn', 'exec', 'execFile', 'fork'])
 const SPAWN_NEWS = new Set(['Worker'])
-/** (a+)+ style: quantifier at the end of a group, then a group-level quantifier. */
-const REDOS_RE = /(\([^()\\]*[+*?][^()\\]*\))[+*?]/
+/** (a+)+ style ReDoS detection — see isRedosPattern() below (round-5 rewrite). */
+function isRedosPattern(pattern: string): boolean {
+  const findClose = (open: number): number => {
+    let depth = 0
+    for (let j = open; j < pattern.length; j++) {
+      if (pattern[j] === '(') depth++
+      else if (pattern[j] === ')') {
+        depth--
+        if (depth === 0) return j
+      }
+    }
+    return -1
+  }
+  for (let i = 0; i < pattern.length; i++) {
+    if (pattern[i] !== '(') continue
+    const close = findClose(i)
+    if (close === -1) return false
+    const inner = pattern.slice(i + 1, close)
+    let body = inner
+    if (body.startsWith('?:') || body.startsWith('?=') || body.startsWith('?!')) body = body.slice(2)
+    let hasInnerQuant = false
+    let depth = 0
+    for (let j = 0; j < body.length; j++) {
+      const ch = body[j]
+      if (ch === '(') { depth++; continue }
+      if (ch === ')') { depth--; continue }
+      if (depth === 0 && (ch === '*' || ch === '+' || ch === '?')) {
+        if (j === 0 || body[j - 1] !== '\\') { hasInnerQuant = true; break }
+      }
+    }
+    const after = pattern[close + 1]
+    if (hasInnerQuant && (after === '*' || after === '+' || after === '?')) return true
+  }
+  return false
+}
 
 /** Per-node exit signals of a loop body, skipping nested functions. */
 interface ExitSignals {
@@ -135,7 +168,7 @@ function checkArrayAlloc(n: ts.CallExpression | ts.NewExpression, sf: ts.SourceF
 // ---------------------------------------------------------------------------
 
 function checkRedosPattern(pattern: string, n: ts.Node, sf: ts.SourceFile, found: Finding[]): void {
-  if (REDOS_RE.test(pattern)) {
+  if (isRedosPattern(pattern)) {
     found.push({
       rule: 'R9',
       severity: 'medium',
