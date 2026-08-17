@@ -169,7 +169,7 @@ Official `@deepseek-ai/*` packages are exempt by default (built-in trust).
     the 24h TTL (P3-2: one suspicious scan no longer turns the shield permanently yellow; sustained scanning
     renews naturally).
 
-## Static rule table (R1-R12)
+## Static rule table (R1-R14)
 
 | ID | Name | Default level | Scope | Determinism |
 |---|---|---|---|---|
@@ -184,6 +184,8 @@ Official `@deepseek-ai/*` packages are exempt by default (built-in trust).
 | R10 | Supply chain (package.json install hooks / dependency manifest) | high (install hooks) / info (dependency manifest) | files | likely/heuristic |
 | R11 | Destructive file operations (fs deletes / sensitive-path reads-writes) | high (sensitive paths) / medium (deletes) | both | likely |
 | R12 | Cordis/DSH contract (entry file / bundle-patch declaration / name / engines.node) | high (missing patch / missing entry) / medium (no entry / missing name) / info (low node version) | files | certain/likely |
+| R13 | Hardcoded network exfiltration sinks (Discord/Telegram/Slack webhooks, cloud-metadata endpoints, .onion) in string literals | high | both | likely |
+| R14 | Download-and-exec primitives in shipped non-JS scripts (.sh/.bash/.ps1/.cmd/.bat: curl|sh, encoded PowerShell, IEX, certutil…) | high (plugin) / info (generic) | files | likely |
 
 ## Scoring model
 
@@ -212,6 +214,8 @@ and verdict are shown separately and never merged into a single total.
 | R10 | Supply chain: `preinstall`/`install`/`postinstall`/`uninstall` hooks in package.json scripts (arbitrary code execution at install time) → high; dependency manifest → info (known-vulnerability check: OSV exact-version query, osvCheck can be disabled) | high → suspicious (install hooks) | matrix ✓ |
 | R11 | Destructive file operations: `fs.unlink/rm/rmdir(+Sync)` deleting sensitive paths (/etc/root/.ssh etc.) → high, plain deletes → medium; `fs.writeFile` etc. writing sensitive paths → high; `fs.readdir` traversing sensitive directories → medium | high → suspicious (sensitive paths); medium not into verdict | matrix ✓ |
 | R12 | Cordis/DSH contract: missing declared `dsh.bundle.patch` file → high; no entry (no main/exports["."] and no root index.js) → medium; declared entry file missing → high; plugin-intent package missing name → medium; `engines.node` major < 22 → info | high → suspicious (declared mount point/entry missing means guaranteed failure); medium/info not into verdict | matrix ✓ |
+| R13 | Network exfil: hardcoded Discord/Telegram/Slack webhooks, cloud-metadata endpoints (169.254.169.254 / metadata.*.internal / 100.100.100.200) and .onion destinations in string literals | high → suspicious | matrix + R13 tests ✓ |
+| R14 | Non-JS scripts: curl|sh, wget|sh, PowerShell download-pipe / -enc / IEX, certutil/bitsadmin/mshta/regsvr32/rundll32 in .sh/.bash/.ps1/.cmd/.bat (generic → info) | high → suspicious (plugin); info not into verdict (generic) | matrix + R14 tests ✓ |
 
 ### Detected — advisory level (downgrades score only, never changes the verdict)
 
@@ -235,7 +239,7 @@ and verdict are shown separately and never merged into a single total.
 |---|---|
 | Indirect references: alias function `const f = Function; f(...)`, `process["getBuiltinModule"]`, `globalThis.process`, indirect eval `(0, eval)` | R6 info or zero findings, verdict=clean |
 | Runtime/externally constructed payloads: base64 strings, hex/charCode assembly, reading code from network/env/args, self-modifying code | base64 constructor string tested → **zero findings** |
-| Non-source files: `.jsx`/`.tsx`/`.vue`/`.json`/binaries/wasm/shell scripts | Not in the scan surface (only .js/.ts/.mjs/.cjs) |
+| Non-source files: `.jsx`/`.tsx`/`.vue`/`.json`/binaries/wasm | Not in the scan surface; shell/PowerShell/batch scripts (.sh/.bash/.ps1/.cmd/.bat) are covered by R14 (download-and-exec) |
 | Dependency chain/supply chain: import/require graph, dependency-version vulnerabilities, package.json scripts/install hooks, licenses, author reputation | Not parsed |
 | Runtime behavior: network exfiltration, dynamic prototype-pollution chains, dead loops/resource exhaustion, timing, permission abuse | No dataflow/behavior analysis; static `<builtin>.prototype` override assignments are caught by R4 (round-7) |
 | Semantic knowledge: the actual services a plugin injects, `process` in bundler polyfills, shadowing boundary | R5 only recognizes 4 variable names; shadowing check is a v1 heuristic (undercounts) |

@@ -3,7 +3,7 @@ import { readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SOURCE_EXT = new Set(['.js', '.ts', '.mjs', '.cjs'])
+const SOURCE_EXT = new Set(['.js', '.ts', '.mjs', '.cjs', '.sh', '.bash', '.ps1', '.cmd', '.bat', '.psm1', '.zsh'])
 
 /**
  * 解析已安装 npm 包的根目录（经 package.json 定位，兼容 pnpm 软链）。

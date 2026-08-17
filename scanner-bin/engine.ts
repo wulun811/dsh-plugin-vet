@@ -9,6 +9,7 @@ import { parseSource } from './ast.js'
 import { executeRules } from './rules/index.js'
 import { runPackageJson } from './rules/supply-chain.js'
 import { runContract } from './rules/contract.js'
+import { NON_JS_SCRIPT_EXT, runNonJsScript } from './rules/non-js-scripts.js'
 import { computeScore, computeVerdict } from './score.js'
 import { cacheKey, readCached, writeCached } from './cache.js'
 import { ENGINE_VERSION } from './protocol.js'
@@ -154,6 +155,17 @@ function scanFiles(request: ScanRequest): ScanResponse {
       continue
     }
     const ext = extOf(file)
+    // R14: non-JS script files (shell/PowerShell/batch) get a deterministic
+    // text scan for download-and-exec primitives — the AST rules do not see them.
+    if (ext !== undefined && NON_JS_SCRIPT_EXT.has(ext)) {
+      if (request.rules?.['R14'] !== false) {
+        const script = readOrDefault(file)
+        if (script !== '') {
+          findings.push(...runNonJsScript(script, basename(file), request.targetKind))
+        }
+      }
+      continue
+    }
     if (ext === undefined || !SCANNABLE_EXT.has(ext)) continue
     const code = readOrDefault(file)
     if (code === '') continue
