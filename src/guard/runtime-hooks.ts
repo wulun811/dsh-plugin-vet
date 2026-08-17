@@ -139,6 +139,13 @@ export function isTransientTempPath(p: string): boolean {
  */
 export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'mutate' = 'mutate'): boolean {
   const norm = p.replace(/\\/g, '/')
+  // DSH 安装树豁免：~/.dsh/profiles/<name>/node_modules/** 是平台自己装的公开依赖树。
+  // 插件加载期 require.resolve 触发 realpathSync（electron/install.js、dsh-traffic-light/package.json
+  // 等），归因到插件但行为完全合法。凭据从不在 profiles/*/node_modules 下（真实凭据面
+  // ~/.dsh/.credentials.yaml、~/.dsh/sessions/** 等不匹配此模式，仍正常报警）。
+  // 没有这条：.dsh 段先命中 sensitiveSegments，node_modules 的 break 根本执行不到——
+  // A9 设计时只考虑了 ~/.ssh/node_modules/x（该报），没预料到 DSH 安装树是合法常态。
+  if (/\/\.dsh\/profiles\/[^/]+\/node_modules\//.test(norm)) return false
   const parts = norm.split('/')
   for (let i = 0; i < parts.length; i++) {
     const low = parts[i].toLowerCase()

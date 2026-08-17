@@ -389,6 +389,13 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     // 豁免只作用于 node_modules 段之后：~/.ssh/node_modules/x 仍命中 .ssh
     expect(isSensitivePath('/home/u/.ssh/node_modules/x', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
     expect(classifyOp({ module: 'fs', op: 'readdirSync', args: ['/home/u/.ssh/node_modules'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-probe' })
+    // DSH 安装树豁免：~/.dsh/profiles/<name>/node_modules/** 是平台自己装的公开依赖树
+    // 插件加载期 require.resolve 触发 realpathSync（electron/install.js 等）→ 不报警
+    expect(isSensitivePath('/home/chenzheng/.dsh/profiles/web/node_modules/electron/install.js', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    expect(isSensitivePath('/home/user/.dsh/profiles/web/node_modules/dsh-traffic-light/package.json', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    // 但 ~/.dsh/.credentials.yaml、~/.dsh/sessions/** 等真实凭据面仍正常报警
+    expect(isSensitivePath('/home/user/.dsh/.credentials.yaml', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
+    expect(isSensitivePath('/home/user/.dsh/sessions/abc/credentials', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
   })
 
   it('A9 集成：包装器在线上报的 realpathSync 场景不再产生任何报警（端到端复刻）', () => {

@@ -3,6 +3,19 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.1.7] - 2026-08-17
+
+### Fixed
+
+- **DSH install tree false positive exemption**: `isSensitivePath` previously flagged
+  `~/.dsh/profiles/<name>/node_modules/**` paths as sensitive because the `.dsh` segment triggered
+  the sensitive match before the `node_modules` exemption break could execute. This caused false positives
+  during plugin loading when `require.resolve` triggered `realpathSync` on package files (e.g.,
+  `electron/install.js`, `dsh-traffic-light/package.json`). Now paths matching `/.dsh/profiles/<name>/node_modules/`
+  are exempted entirely — these are platform-installed public dependencies, not credential probes. Real
+  credential surfaces (`~/.dsh/.credentials.yaml`, `~/.dsh/sessions/**`) remain protected.
+  Regression test assertions +4 (250 total cases).
+
 ## [0.1.6] - 2026-08-17
 
 ### Fixed

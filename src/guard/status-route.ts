@@ -49,11 +49,10 @@ function writeJson(res: ServerResponse, code: number, body: unknown): void {
 }
 
 /**
- * YAML 写入前校验：用 js-yaml 反序列化验证内容合法，防止拼字符串拼出坏 YAML 导致 DSH 启动崩溃。
- * 任何解析错误直接抛出，调用方捕获后返回用户可读提示（不写入坏文件）。
+ * YAML 写入前校验（防御层）：js-yaml.dump() 理论上总输出合法 YAML，但作为安全网在写入前
+ * 再验证一次——任何解析错误直接抛出，调用方捕获后返回用户可读提示（不写入坏文件）。
  */
 function validateYaml(content: string): void {
-  // js-yaml.load 抛 YAMLException 时带行号/列号，足够定位问题
   yaml.load(content)
 }
 
