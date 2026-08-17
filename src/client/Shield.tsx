@@ -22,6 +22,8 @@ export interface VetAlarmWire {
   message: string
   severity?: 'yellow' | 'red'
   pluginHint?: string
+  /** 报警目标路径（fs 类报警）。 */
+  target?: string
   /** 目标是否为会话日志文件（归因分层文案用，见 status.ts VetAlarm）。 */
   sessionLog?: boolean
   at: number
@@ -121,6 +123,11 @@ const COLOR: Record<'green' | 'yellow' | 'red', keyof MorandiPalette> = {
   red: 'rose',
 }
 
+// 卡片渐变背景常量
+const CARD_BG_LIGHT = 'linear-gradient(180deg, #F5F3ED 0%, #F0EDE6 100%)'
+const CARD_BG_DARK = 'linear-gradient(180deg, rgba(58,56,50,1) 0%, rgba(50,48,43,1) 100%)'
+
+
 /** 介绍栏卖点骨架：标题/正文走 t()，序号是通用符号。 */
 const INTRO_POINTS = [
   { n: '①', titleKey: 'intro.p1title', bodyKey: 'intro.p1body' },
@@ -130,56 +137,52 @@ const INTRO_POINTS = [
 
 /* ------------------------- 主题检测 ------------------------- */
 
-function linearize(c: number): number {
-  const v = c / 255
-  return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
-}
-
-/** 解析 #rgb/#rrggbb/rgb()/rgba() → WCAG 相对亮度（0 黑 ~ 1 白）。解析失败返回 null。 */
-function parseLuma(value: string): number | null {
-  const t = value.trim()
-  if (t === '') return null
-  let m = /^#([0-9a-f]{6})$/i.exec(t)
-  if (m === null) m = /^#([0-9a-f]{3})$/i.exec(t)
-  if (m !== null) {
-    let hex = m[1]
-    if (hex.length === 3) hex = hex.split('').map(c => c + c).join('')
-    const r = parseInt(hex.slice(0, 2), 16)
-    const g = parseInt(hex.slice(2, 4), 16)
-    const b = parseInt(hex.slice(4, 6), 16)
-    return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b)
-  }
-  m = /^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(t)
-  if (m !== null) {
-    return 0.2126 * linearize(Number(m[1])) + 0.7152 * linearize(Number(m[2])) + 0.0722 * linearize(Number(m[3]))
-  }
-  return null
-}
-
-/** 当前是否暗色：优先读 DSH 主题变量 --dsw-alias-bg-base 的计算值，缺失时回退系统配色。 */
+/** 当前是否暗色：检测 DSH 主题属性。 */
 function isDark(): boolean {
-  try {
-    const v = getComputedStyle(document.documentElement).getPropertyValue('--dsw-alias-bg-base')
-    const luma = parseLuma(v)
-    if (luma !== null) return luma < 0.28
-  } catch {
-    // 继续走媒体查询回退
+  // 检测 DSH 的 data-ds-dark-theme 属性
+  if (typeof document !== 'undefined' && document.body) {
+    // DSH web UI 的逻辑：有 data-ds-dark-theme 就是深色，没有就是浅色
+    return document.body.hasAttribute('data-ds-dark-theme')
   }
+  // 回退到系统偏好
   return typeof matchMedia !== 'undefined' && matchMedia('(prefers-color-scheme: dark)').matches
 }
 
 /* ------------------------- 视图片段 ------------------------- */
 
-function panelStyle(pal: MorandiPalette): CSSProperties {
+/** 浅色模式下调整颜色以保证对比度（半透明玻璃背景需要更深的文字） */
+function adjustForLightMode(pal: MorandiPalette, dark: boolean): MorandiPalette {
+  if (dark) return pal
+  // 浅色模式：Minimal White 风格，柔和的深蓝黑色调
+  return {
+    ...pal,
+    // 主文字色（带蓝色调，不刺眼）
+    ink: '#1a1a2e',    // 深蓝黑色
+    muted: '#4a4a6a',  // 蓝灰色
+    faint: '#6a6a8a',  // 浅蓝灰色
+    // 强调色（保持柔和）
+    sage: '#5A7A58',   // 深绿色
+    ochre: '#8A6D45',  // 深赭石色
+    rose: '#8A5656',   // 深玫瑰色
+    slate: '#4F5E78',  // 深石板蓝
+  }
+}
+
+function panelStyle(pal: MorandiPalette, dark: boolean): CSSProperties {
+  // Crystal Edge 底板：极简透明 + 强模糊，边框和高光交给 overlay div
   return {
     width: 340,
-    // 面板整体向下延伸（最高到视口 92%），日常内容无需滚动；极矮视口才出现滚动条。
     maxHeight: 'min(92vh, 800px)',
     overflowY: 'auto',
-    background: pal.bg,
-    border: '1px solid ' + pal.border,
+    // 几乎完全透明的底色，让 backdrop-filter 发挥
+    background: dark ? 'rgba(30, 28, 24, 0.55)' : 'rgba(180, 180, 180, 0.25)',
+    backdropFilter: 'blur(24px) saturate(1.4)',
+    WebkitBackdropFilter: 'blur(24px) saturate(1.4)',
     borderRadius: 12,
-    boxShadow: 'var(--dsw-shadow-lv2, 0 10px 28px rgba(20,18,14,0.35))',
+    // Minimal White 风格边框效果
+    boxShadow: dark
+      ? '0 12px 40px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.3)'
+      : '0 10px 40px rgba(0, 0, 0, 0.1), inset 0 1.5px 0 rgba(255, 255, 255, 1)',
     fontSize: 12,
     color: pal.ink,
     padding: '14px 14px 10px',
@@ -195,24 +198,31 @@ function panelStyle(pal: MorandiPalette): CSSProperties {
 const SHIELD_PATH = 'M8 0.9 L13.1 2.9 V7 C13.1 10.7 11 13.3 8 14.3 C5 13.3 2.9 10.7 2.9 7 V2.9 Z'
 
 function ShieldIcon({ level, color, size = 20 }: { level: 'green' | 'yellow' | 'red'; color: string; size?: number }): ReactNode {
-  const symbol =
+  // 符号掏空：用 mask 让符号区域真正透明，露出面板底色
+  const maskId = `shield-mask-${level}`
+  const maskContent =
     level === 'green' ? (
-      <path d="M5.2 8.2 L7.1 10.1 L10.8 5.9" stroke="#FFFFFF" strokeWidth={2} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5.2 8.2 L7.1 10.1 L10.8 5.9" stroke="black" strokeWidth={2} fill="none" strokeLinecap="round" strokeLinejoin="round" />
     ) : level === 'red' ? (
       <>
-        <line x1={8} y1={4.5} x2={8} y2={9.3} stroke="#FFFFFF" strokeWidth={2} strokeLinecap="round" />
-        <circle cx={8} cy={11.4} r={1.15} fill="#FFFFFF" />
+        <line x1={8} y1={4.5} x2={8} y2={9.3} stroke="black" strokeWidth={2} strokeLinecap="round" />
+        <circle cx={8} cy={11.4} r={1.15} fill="black" />
       </>
     ) : (
       <>
-        <path d="M6.3 5.5 C6.3 4.4 7 3.8 8 3.8 C9 3.8 9.7 4.4 9.7 5.3 C9.7 6.2 9.1 6.6 8.6 7.1 C8.1 7.6 8 8 8 8.8" stroke="#FFFFFF" strokeWidth={1.7} fill="none" strokeLinecap="round" />
-        <circle cx={8} cy={11.3} r={0.95} fill="#FFFFFF" />
+        <path d="M6.3 5.5 C6.3 4.4 7 3.8 8 3.8 C9 3.8 9.7 4.4 9.7 5.3 C9.7 6.2 9.1 6.6 8.6 7.1 C8.1 7.6 8 8 8 8.8" stroke="black" strokeWidth={1.7} fill="none" strokeLinecap="round" />
+        <circle cx={8} cy={11.3} r={0.95} fill="black" />
       </>
     )
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
-      <path d={SHIELD_PATH} fill={color} stroke={color} strokeWidth={0.6} opacity="0.95" />
-      {symbol}
+      <defs>
+        <mask id={maskId}>
+          <rect width="16" height="16" fill="white" />
+          {maskContent}
+        </mask>
+      </defs>
+      <path d={SHIELD_PATH} fill={color} stroke={color} strokeWidth={0.6} opacity="0.95" mask={`url(#${maskId})`} />
     </svg>
   )
 }
@@ -233,13 +243,15 @@ function GroupLabel({ pal, children }: { pal: MorandiPalette; children: ReactNod
   )
 }
 
-function Metric({ pal, label, value, hint, wide }: { pal: MorandiPalette; label: string; value: string; hint?: string; wide?: boolean }): ReactNode {
+function Metric({ pal, label, value, hint, wide, dark }: { pal: MorandiPalette; label: string; value: string; hint?: string; wide?: boolean; dark?: boolean }): ReactNode {
   return (
     <div
       title={hint}
       style={{
-        background: pal.card,
+        // 微渐变背景 + Crystal Edge 顶部高光
+        background: dark ? CARD_BG_DARK : CARD_BG_LIGHT,
         borderRadius: 8,
+        boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)'),
         padding: '6px 10px',
         display: 'flex',
         flexDirection: 'column',
@@ -267,28 +279,90 @@ function fmtRam(mb: number): string {
 }
 
 /** 右侧介绍栏：绝对定位贴住主面板右缘（主面板位置固定），等高；width 由调用方传入。 */
-function VetIntroPanel({ pal, width, t }: { pal: MorandiPalette; width: number; t: T }): ReactNode {
+function VetIntroPanel({ pal, width, t, dark }: { pal: MorandiPalette; width: number; t: T; dark: boolean }): ReactNode {
+  const [hovered, setHovered] = useState(false)
   return (
     <aside
       role="dialog"
       aria-label={t('intro.aria')}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
         position: 'absolute',
         top: 0,
         bottom: 0,
         left: 'calc(100% + 8px)',
         width,
-        background: pal.bg,
-        border: '1px solid ' + pal.border,
+        background: dark ? 'rgba(30, 28, 24, 0.55)' : 'rgba(180, 180, 180, 0.25)',
+        backdropFilter: 'blur(24px) saturate(1.4)',
+        WebkitBackdropFilter: 'blur(24px) saturate(1.4)',
         borderRadius: 12,
-        boxShadow: 'var(--dsw-shadow-lv2, 0 10px 28px rgba(20,18,14,0.35))',
+        boxShadow: dark
+          ? '0 12px 40px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.3)'
+          : '0 10px 40px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 1)',
         padding: '14px 14px 12px',
         fontSize: 12,
         color: pal.ink,
         lineHeight: 1.6,
-        overflowY: 'auto',
+        overflow: 'hidden',
       }}
     >
+      {/* Crystal Edge: 渐变边框层 */}
+      <div style={{
+        position: 'absolute',
+        inset: 0,
+        borderRadius: 12,
+        padding: 2,
+        background: dark
+          ? 'linear-gradient(135deg, rgba(255,255,255,0.5), rgba(255,255,255,0.05) 40%, rgba(255,255,255,0.05) 60%, rgba(255,255,255,0.4))'
+          : 'linear-gradient(135deg, rgba(255,255,255,1), rgba(255,255,255,0.4) 40%, rgba(255,255,255,0.4) 60%, rgba(255,255,255,0.9))',
+        WebkitMask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
+        WebkitMaskComposite: 'xor',
+        maskComposite: 'exclude',
+        pointerEvents: 'none',
+        zIndex: 10,
+        transition: 'opacity 0.5s ease',
+        opacity: hovered ? 1 : 0.7,
+      }} />
+      {/* Crystal Edge: 顶部高光线条 */}
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        height: 0.5,
+        background: dark
+          ? 'linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)'
+          : 'linear-gradient(90deg, transparent, rgba(255,255,255,0.72), transparent)',
+        pointerEvents: 'none',
+        zIndex: 10,
+      }} />
+      {/* Mirror Sheen: 散光层（默认）→ 聚光层（hover） */}
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: '100%',
+        height: '100%',
+        background: 'linear-gradient(135deg, transparent 20%, rgba(255,255,255,0.03) 35%, rgba(255,255,255,0.06) 50%, rgba(255,255,255,0.03) 65%, transparent 80%)',
+        pointerEvents: 'none',
+        zIndex: 5,
+        transition: 'opacity 0.4s ease',
+        opacity: hovered ? 0 : 0.5,
+      }} />
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: '100%',
+        height: '100%',
+        background: 'linear-gradient(135deg, transparent 40%, rgba(255,255,255,0.12) 50%, transparent 60%)',
+        pointerEvents: 'none',
+        zIndex: 5,
+        transition: 'opacity 0.4s ease',
+        opacity: hovered ? 0.5 : 0,
+      }} />
+      <div style={{ position: 'relative', zIndex: 2, height: '100%', overflowY: 'auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
         <ShieldIcon level="green" color={pal.sage} size={16} />
         <span style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.02em' }}>{t('intro.title')}</span>
@@ -301,7 +375,7 @@ function VetIntroPanel({ pal, width, t }: { pal: MorandiPalette; width: number; 
         {t('intro.lines')}
       </div>
 
-      <div style={{ background: pal.card, borderRadius: 8, padding: '7px 10px', marginBottom: 10, fontSize: 11, color: pal.muted }}>
+      <div style={{ background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 8, padding: '7px 10px', marginBottom: 10, fontSize: 11, color: pal.muted, boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
         <div>
           <b style={{ color: pal.ink }}>{t('intro.stat1')}</b>
           {t('intro.stat1b')}
@@ -325,12 +399,278 @@ function VetIntroPanel({ pal, width, t }: { pal: MorandiPalette; width: number; 
         </div>
       ))}
 
-      <div style={{ background: pal.cardSoft, borderRadius: 8, padding: '6px 10px', fontWeight: 700, color: pal.ink, margin: '8px 0 10px' }}>
+      <div style={{ background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 8, padding: '6px 10px', fontWeight: 700, color: pal.ink, margin: '8px 0 10px', boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
         {t('intro.tagline')}
       </div>
 
       <div style={{ fontSize: 10.5, color: pal.faint, borderTop: '1px solid ' + pal.borderSoft, paddingTop: 8 }}>
         {t('intro.cost')}
+      </div>
+      </div>
+    </aside>
+  )
+}
+
+/**
+ * 报警详情窗口（独立窗口，放在主面板右侧）。
+ * 每个报警可折叠/展开，带复制按钮（复制时带元信息）。
+ */
+function VetAlarmPanel({ pal, width, t, alarms, dark, onDismiss }: {
+  pal: MorandiPalette
+  width: number
+  t: T
+  alarms: VetAlarmWire[]
+  dark: boolean
+  onDismiss: (id: string) => void
+}): ReactNode {
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [hovered, setHovered] = useState(false)
+
+  const toggleExpand = (id: string): void => {
+    setExpandedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const copyAlarm = async (a: VetAlarmWire): Promise<void> => {
+    // 构造带元信息的文本
+    const plugin = a.pluginHint !== undefined ? `@${a.pluginHint}` : '(unattributed)'
+    const time = new Date(a.at).toLocaleString()
+    const text = `VET 插件警报，请查实后给出解决方案：\n\n` +
+      `时间：${time}\n` +
+      `插件：${plugin}\n` +
+      `类型：${a.kind}\n` +
+      `严重度：${a.severity ?? 'unknown'}\n` +
+      `信息：${a.message}`
+    
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedId(a.id)
+      setTimeout(() => setCopiedId(null), 2000)
+    } catch {
+      // 降级：创建临时 textarea
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+      setCopiedId(a.id)
+      setTimeout(() => setCopiedId(null), 2000)
+    }
+  }
+
+  return (
+    <aside
+      role="dialog"
+      aria-label={t('alarmPanel.aria')}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        left: 'calc(100% + 8px)',
+        width,
+        background: dark ? 'rgba(30, 28, 24, 0.55)' : 'rgba(180, 180, 180, 0.25)',
+        backdropFilter: 'blur(24px) saturate(1.4)',
+        WebkitBackdropFilter: 'blur(24px) saturate(1.4)',
+        borderRadius: 12,
+        boxShadow: dark
+          ? '0 12px 40px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.3)'
+          : '0 10px 40px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 1)',
+        padding: '14px 14px 12px',
+        fontSize: 12,
+        color: pal.ink,
+        lineHeight: 1.5,
+        overflowY: 'auto',
+        overflow: 'hidden',
+      }}
+    >
+      {/* Crystal Edge: 渐变边框层 */}
+      <div style={{
+        position: 'absolute',
+        inset: 0,
+        borderRadius: 12,
+        padding: 2,
+        background: dark
+          ? 'linear-gradient(135deg, rgba(255,255,255,0.5), rgba(255,255,255,0.05) 40%, rgba(255,255,255,0.05) 60%, rgba(255,255,255,0.4))'
+          : 'linear-gradient(135deg, rgba(255,255,255,0.9), rgba(255,255,255,0.2) 40%, rgba(255,255,255,0.2) 60%, rgba(255,255,255,0.8))',
+        WebkitMask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
+        WebkitMaskComposite: 'xor',
+        maskComposite: 'exclude',
+        pointerEvents: 'none',
+        zIndex: 10,
+        transition: 'opacity 0.5s ease',
+        opacity: hovered ? 1 : 0.7,
+      }} />
+      {/* Crystal Edge: 顶部高光线条 */}
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        height: 0.5,
+        background: dark
+          ? 'linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)'
+          : 'linear-gradient(90deg, transparent, rgba(255,255,255,0.72), transparent)',
+        pointerEvents: 'none',
+        zIndex: 10,
+      }} />
+      {/* Mirror Sheen: 散光层（默认）→ 聚光层（hover） */}
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: '100%',
+        height: '100%',
+        background: 'linear-gradient(135deg, transparent 20%, rgba(255,255,255,0.03) 35%, rgba(255,255,255,0.06) 50%, rgba(255,255,255,0.03) 65%, transparent 80%)',
+        pointerEvents: 'none',
+        zIndex: 5,
+        transition: 'opacity 0.4s ease',
+        opacity: hovered ? 0 : 0.5,
+      }} />
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: '100%',
+        height: '100%',
+        background: 'linear-gradient(135deg, transparent 40%, rgba(255,255,255,0.12) 50%, transparent 60%)',
+        pointerEvents: 'none',
+        zIndex: 5,
+        transition: 'opacity 0.4s ease',
+        opacity: hovered ? 0.5 : 0,
+      }} />
+      <div style={{ position: 'relative', zIndex: 2, height: '100%', overflowY: 'auto' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+        <ShieldIcon level={alarms.length > 0 ? (alarms[0].severity === 'red' ? 'red' : 'yellow') : 'green'} color={alarms.length > 0 ? (alarms[0].severity === 'red' ? pal.rose : pal.ochre) : pal.sage} size={16} />
+        <span style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.02em' }}>{t('alarmPanel.title')}</span>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: pal.muted, background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 9, padding: '1px 8px', boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
+          {alarms.length}
+        </span>
+      </div>
+
+      {alarms.length === 0 ? (
+        <div style={{ color: pal.faint, padding: '20px 0', textAlign: 'center' }}>{t('alarmPanel.empty')}</div>
+      ) : (
+        <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+          {alarms.map((a, index) => {
+            const expanded = expandedIds.has(a.id)
+            const copied = copiedId === a.id
+            return (
+              <li
+                key={a.id}
+                style={{
+                  background: dark ? CARD_BG_DARK : CARD_BG_LIGHT,
+                  borderRadius: 8,
+                  borderLeft: '3px solid transparent',
+                  borderImage: a.severity === 'red'
+                    ? 'linear-gradient(180deg, ' + pal.rose + ', ' + pal.rose + '44) 1'
+                    : a.severity === 'yellow'
+                    ? 'linear-gradient(180deg, ' + pal.ochre + ', ' + pal.ochre + '44) 1'
+                    : 'none',
+                  boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)'),
+                  padding: '8px 10px',
+                  marginBottom: 6,
+                }}
+              >
+                <div 
+                  onClick={() => toggleExpand(a.id)}
+                  style={{ 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: 6,
+                    cursor: 'pointer',
+                    transition: 'opacity 120ms ease',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.opacity = '0.7' }}
+                  onMouseLeave={(e) => { e.currentTarget.style.opacity = '1' }}
+                >
+                  <span style={{ fontSize: 11, fontWeight: 700, color: pal.sage, minWidth: 20 }}>
+                    #{index + 1}
+                  </span>
+                  <span style={{ fontSize: 10, fontWeight: 700, background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 4, padding: '1px 6px', color: pal.muted, boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
+                    {a.kind}
+                  </span>
+                  {a.pluginHint !== undefined && (
+                    <span style={{ fontSize: 10.5, color: pal.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
+                  )}
+                  <span style={{ fontSize: 10, color: pal.faint, flexShrink: 0 }}>{fmtTime(a.at)}</span>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); void copyAlarm(a) }}
+                    title={t('alarmPanel.copyHint')}
+                    style={{
+                      border: '1px solid ' + pal.borderSoft,
+                      background: copied ? pal.sage : 'transparent',
+                      color: copied ? pal.onSlate : pal.muted,
+                      borderRadius: 5,
+                      padding: '0 7px',
+                      cursor: 'pointer',
+                      fontSize: 10,
+                      flexShrink: 0,
+                      transition: 'all 120ms ease',
+                    }}
+                  >
+                    {copied ? t('alarmPanel.copied') : t('alarmPanel.copy')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onDismiss(a.id) }}
+                    title={t('alerts.dismissHint')}
+                    style={{
+                      border: '1px solid ' + pal.borderSoft,
+                      background: 'transparent',
+                      color: pal.muted,
+                      borderRadius: 5,
+                      padding: '0 7px',
+                      cursor: 'pointer',
+                      fontSize: 10,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {t('alerts.dismiss')}
+                  </button>
+                </div>
+                {expanded && (
+                  <div style={{ marginTop: 6, borderTop: '1px solid ' + pal.borderSoft, paddingTop: 6 }}>
+                    <div style={{ wordBreak: 'break-word', fontSize: 11.5, marginBottom: 4 }}>{a.message}</div>
+                    {(() => {
+                      // 归因分层文案
+                      let suggestKey: string
+                      if (a.pluginHint === undefined) {
+                        suggestKey = a.sessionLog === true
+                          ? 'suggest.' + a.kind + '.unattributed.sessionLog'
+                          : 'suggest.' + a.kind + '.unattributed'
+                      } else {
+                        suggestKey = 'suggest.' + a.kind
+                      }
+                      const hasSuggest = (zh as Record<string, string>)[suggestKey] !== undefined
+                      if (!hasSuggest) return null
+                      return (
+                        <div style={{ fontSize: 11, color: pal.ochre, marginBottom: 4 }}>{t('alerts.suggest')}{t(suggestKey)}</div>
+                      )
+                    })()}
+                    <div style={{ fontSize: 10.5, color: pal.muted }}>
+                      <div><b>ID:</b> {a.id}</div>
+                      <div><b>时间:</b> {new Date(a.at).toLocaleString()}</div>
+                      <div><b>严重度:</b> {a.severity ?? 'unknown'}</div>
+                      {a.target !== undefined && <div><b>目标:</b> {a.target}</div>}
+                    </div>
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
       </div>
     </aside>
   )
@@ -348,6 +688,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   const [toggling, setToggling] = useState(false)
   const [dark, setDark] = useState<boolean>(() => isDark())
   const [helpOpen, setHelpOpen] = useState(false)
+  const [alarmPanelOpen, setAlarmPanelOpen] = useState(false)
+  const [panelHovered, setPanelHovered] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
@@ -370,20 +712,40 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
     }
     loadRef.current = load
     void load()
-    const timer = window.setInterval(() => { void load() }, POLL_MS)
+    const timer = window.setInterval(() => { 
+      void load()
+      setDark(isDark())  // 每次轮询也检查主题变化
+    }, POLL_MS)
     return () => {
       alive = false
       window.clearInterval(timer)
     }
   }, [])
 
-  // 系统配色变化时即时切换色板（DSH 主题切换也会在下次轮询时被 isDark() 捕获）。
+  // 监听主题变化：MutationObserver 监听 data-ds-dark-theme 属性变化
   useEffect(() => {
-    if (typeof matchMedia === 'undefined') return
-    const mq = matchMedia('(prefers-color-scheme: dark)')
+    if (typeof document === 'undefined' || !document.body) return
+    
     const update = (): void => setDark(isDark())
-    mq.addEventListener('change', update)
-    return () => mq.removeEventListener('change', update)
+    
+    // 监听 body 属性变化
+    const observer = new MutationObserver(update)
+    observer.observe(document.body, { 
+      attributes: true, 
+      attributeFilter: ['data-ds-dark-theme'] 
+    })
+    
+    // 同时监听系统配色变化（作为后备）
+    let mq: MediaQueryList | null = null
+    if (typeof matchMedia !== 'undefined') {
+      mq = matchMedia('(prefers-color-scheme: dark)')
+      mq.addEventListener('change', update)
+    }
+    
+    return () => {
+      observer.disconnect()
+      if (mq) mq.removeEventListener('change', update)
+    }
   }, [])
 
   useEffect(() => {
@@ -436,7 +798,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   const dismissAlarm = (id: string): void => { void postAlarmAction('/vet/dismiss', id) }
   const restoreAlarm = (id: string): void => { void postAlarmAction('/vet/restore', id) }
 
-  const pal = dark ? MD : M
+  // 浅色模式下调整颜色以保证在半透明玻璃背景上的对比度
+  const pal = adjustForLightMode(dark ? MD : M, dark)
   const level = snap?.level ?? 'green'
   const color = pal[COLOR[level]]
   const statusLabel = t('status.' + level)
@@ -471,7 +834,11 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
       window.clearTimeout(openTimer.current)
       openTimer.current = null
     }
-    setHelpOpen(v => !v)
+    setHelpOpen(v => {
+      // 互斥：打开帮助窗口时关闭报警窗口
+      if (!v) setAlarmPanelOpen(false)
+      return !v
+    })
   }
 
   // 面板收起时同步关闭帮助浮层。
@@ -505,9 +872,10 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
           padding: '2px 8px',
           height: 28,
           border: 'none',
-          background: open ? pal.cardSoft : 'transparent',
+          background: open ? (dark ? CARD_BG_DARK : CARD_BG_LIGHT) : 'transparent',
           cursor: 'pointer',
           borderRadius: 8,
+          boxShadow: open ? 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') : undefined,
           transition: 'background 120ms ease',
         }}
       >
@@ -526,9 +894,10 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
               fontSize: 11,
               fontWeight: 700,
               color,
-              background: pal.card,
+              background: dark ? CARD_BG_DARK : CARD_BG_LIGHT,
               borderRadius: 9,
               padding: '1px 5px',
+              boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)'),
               lineHeight: 1.4,
               minWidth: 18,
               textAlign: 'center',
@@ -551,14 +920,106 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
             zIndex: 1000,
           }}
         >
-          <div style={panelStyle(pal)} role="dialog" aria-label={t('panel.label')}>
+          <div 
+            style={{...panelStyle(pal, dark), position: 'relative', overflow: 'hidden'}}
+            role="dialog" 
+            aria-label={t('panel.label')}
+            onMouseEnter={() => setPanelHovered(true)}
+            onMouseLeave={() => setPanelHovered(false)}
+          >
+          {/* Crystal Edge: 渐变边框层 */}
+          <div style={{
+            position: 'absolute',
+            inset: 0,
+            borderRadius: 12,
+            padding: 2,
+            background: dark
+              ? 'linear-gradient(135deg, rgba(255,255,255,0.5), rgba(255,255,255,0.05) 40%, rgba(255,255,255,0.05) 60%, rgba(255,255,255,0.4))'
+              : 'linear-gradient(135deg, rgba(255,255,255,0.9), rgba(255,255,255,0.2) 40%, rgba(255,255,255,0.2) 60%, rgba(255,255,255,0.8))',
+            WebkitMask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
+            WebkitMaskComposite: 'xor',
+            maskComposite: 'exclude',
+            pointerEvents: 'none',
+            zIndex: 10,
+            transition: 'opacity 0.5s ease',
+            opacity: panelHovered ? 1 : 0.7,
+          }} />
+          {/* Crystal Edge: 顶部高光线条 */}
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 0.5,
+            background: dark
+              ? 'linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)'
+              : 'linear-gradient(90deg, transparent, rgba(255,255,255,0.72), transparent)',
+            pointerEvents: 'none',
+            zIndex: 10,
+          }} />
+          {/* Mirror Sheen: 散光层（默认）→ 聚光层（hover） */}
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            background: 'linear-gradient(135deg, transparent 20%, rgba(255,255,255,0.03) 35%, rgba(255,255,255,0.06) 50%, rgba(255,255,255,0.03) 65%, transparent 80%)',
+            pointerEvents: 'none',
+            zIndex: 5,
+            transition: 'opacity 0.6s ease',
+            opacity: panelHovered ? 0 : 0.5,
+          }} />
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            background: 'linear-gradient(135deg, transparent 40%, rgba(255,255,255,0.12) 50%, transparent 60%)',
+            pointerEvents: 'none',
+            zIndex: 5,
+            transition: 'opacity 0.6s ease',
+            opacity: panelHovered ? 0.5 : 0,
+          }} />
+          {/* 顶部状态色带 */}
+          <div style={{
+            height: 3,
+            borderRadius: '10px 10px 0 0',
+            background: level === 'green'
+              ? 'linear-gradient(90deg, ' + pal.sage + ', ' + pal.sage + '88)'
+              : level === 'yellow'
+              ? 'linear-gradient(90deg, ' + pal.ochre + ', ' + pal.ochre + '88)'
+              : 'linear-gradient(90deg, ' + pal.rose + ', ' + pal.rose + '88)',
+            marginBottom: 10,
+          }} />
           {/* 头部 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: color, display: 'inline-block' }} />
             <span style={{ fontWeight: 800, fontSize: 13.5, letterSpacing: '0.02em' }}>vet {statusLabel}</span>
-            <span style={{ marginLeft: 'auto', fontSize: 11, color: pal.muted, background: pal.card, borderRadius: 9, padding: '1px 8px' }}>
+            <button
+              type="button"
+              onClick={() => {
+                setAlarmPanelOpen(v => !v)
+                // 互斥：打开报警窗口时关闭帮助窗口
+                if (!alarmPanelOpen) setHelpOpen(false)
+              }}
+              style={{
+                marginLeft: 'auto',
+                fontSize: 11,
+                color: alarmPanelOpen ? pal.ink : pal.muted,
+                background: dark ? CARD_BG_DARK : CARD_BG_LIGHT,
+                border: 'none',
+                borderRadius: 9,
+                boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)'),
+                padding: '1px 8px',
+                cursor: 'pointer',
+                transition: 'all 120ms ease',
+              }}
+              title={count > 0 ? '查看报警详情' : '暂无报警'}
+            >
               {count} {t('alerts.count')}
-            </span>
+            </button>
           </div>
           <div style={{ color: pal.muted, marginTop: 5 }}>
             {level === 'yellow'
@@ -568,7 +1029,15 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
 
           {/* 黄灯且无报警：唯一来源是最近扫描 suspicious → 直接展示预警详情（这就是可点的「详情」） */}
           {level === 'yellow' && alarms.length === 0 && lastScan !== undefined && (
-            <div style={{ marginTop: 8, background: pal.card, borderRadius: 8, borderLeft: '3px solid ' + pal.ochre, padding: '8px 10px' }}>
+            <div style={{
+              marginTop: 8,
+              background: dark ? CARD_BG_DARK : CARD_BG_LIGHT,
+              borderRadius: 8,
+              borderLeft: '3px solid transparent',
+              borderImage: 'linear-gradient(180deg, ' + pal.ochre + ', ' + pal.ochre + '44) 1',
+              boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)'),
+              padding: '8px 10px',
+            }}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: pal.ochre, letterSpacing: '0.02em' }}>
                 {t('warn.title')}
               </div>
@@ -594,19 +1063,19 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
               <SectionLabel pal={pal}>{t('metrics.title')}</SectionLabel>
               <GroupLabel pal={pal}>{t('metrics.memory')}</GroupLabel>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
-                <Metric pal={pal} label={t('metric.total')} value={Math.round(metrics.rssMb + metrics.mcpRssMb + (metrics.vetRssMb ?? 0)) + ' MB'} hint={t('metric.totalHint')} />
-                <Metric pal={pal} label={t('metric.heap')} value={Math.round(metrics.heapUsedMb) + ' / ' + Math.round(metrics.heapTotalMb) + ' MB'} hint={t('metric.heapHint')} />
-                <Metric pal={pal} label={t('metric.native')} value={Math.round(metrics.externalMb) + ' MB'} hint={t('metric.nativeHint')} />
-                <Metric pal={pal} label={t('metric.other')} value={Math.round(Math.max(0, metrics.rssMb - metrics.heapUsedMb - metrics.externalMb)) + ' MB'} hint={t('metric.otherHint')} />
-                <Metric pal={pal} label={t('metric.mcp')} value={Math.round(metrics.mcpRssMb) + ' MB · ' + metrics.mcpCount + ' ' + t('metric.mcpUnit')} hint={t('metric.mcpHint')} />
-                <Metric pal={pal} label={t('metric.vet')} value={Math.round(metrics.vetRssMb ?? 0) + ' MB · ' + (metrics.vetCount ?? 0) + ' ' + t('metric.vetUnit')} hint={t('metric.vetHint')} />
+                <Metric pal={pal} dark={dark} label={t('metric.total')} value={Math.round(metrics.rssMb + metrics.mcpRssMb + (metrics.vetRssMb ?? 0)) + ' MB'} hint={t('metric.totalHint')} />
+                <Metric pal={pal} dark={dark} label={t('metric.heap')} value={Math.round(metrics.heapUsedMb) + ' / ' + Math.round(metrics.heapTotalMb) + ' MB'} hint={t('metric.heapHint')} />
+                <Metric pal={pal} dark={dark} label={t('metric.native')} value={Math.round(metrics.externalMb) + ' MB'} hint={t('metric.nativeHint')} />
+                <Metric pal={pal} dark={dark} label={t('metric.other')} value={Math.round(Math.max(0, metrics.rssMb - metrics.heapUsedMb - metrics.externalMb)) + ' MB'} hint={t('metric.otherHint')} />
+                <Metric pal={pal} dark={dark} label={t('metric.mcp')} value={Math.round(metrics.mcpRssMb) + ' MB · ' + metrics.mcpCount + ' ' + t('metric.mcpUnit')} hint={t('metric.mcpHint')} />
+                <Metric pal={pal} dark={dark} label={t('metric.vet')} value={Math.round(metrics.vetRssMb ?? 0) + ' MB · ' + (metrics.vetCount ?? 0) + ' ' + t('metric.vetUnit')} hint={t('metric.vetHint')} />
               </div>
               <GroupLabel pal={pal}>{t('metrics.runtime')}</GroupLabel>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
-                <Metric pal={pal} label={t('metric.cpu')} value={metrics.cpuPct + '%'} />
-                <Metric pal={pal} label={t('metric.ioRead')} value={metrics.ioReadMb + ' MB'} />
-                <Metric pal={pal} label={t('metric.ioWrite')} value={metrics.ioWriteMb + ' MB'} />
-                <Metric pal={pal} label={t('metric.children')} value={metrics.childCount >= 0 ? String(metrics.childCount) : '—'} />
+                <Metric pal={pal} dark={dark} label={t('metric.cpu')} value={metrics.cpuPct + '%'} />
+                <Metric pal={pal} dark={dark} label={t('metric.ioRead')} value={metrics.ioReadMb + ' MB'} />
+                <Metric pal={pal} dark={dark} label={t('metric.ioWrite')} value={metrics.ioWriteMb + ' MB'} />
+                <Metric pal={pal} dark={dark} label={t('metric.children')} value={metrics.childCount >= 0 ? String(metrics.childCount) : '—'} />
               </div>
               {metrics.fdCount >= 0 && (
                 <div style={{ marginTop: 5, fontSize: 10.5, color: pal.faint }}>
@@ -618,7 +1087,14 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
 
           {/* 运行时守卫：状态 + ? 提示 */}
           <SectionLabel pal={pal}>{t('guard.title')}</SectionLabel>
-          <div style={{ display: 'flex', alignItems: 'center', background: pal.card, borderRadius: 8, padding: '8px 10px' }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            background: dark ? CARD_BG_DARK : CARD_BG_LIGHT,
+            borderRadius: 8,
+            boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)'),
+            padding: '8px 10px',
+          }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: guard === 'watch' ? pal.sage : pal.faint, display: 'inline-block' }} />
             <span style={{ fontWeight: 700, marginLeft: 8 }}>{guard === 'watch' ? t('guard.on') : t('guard.off')}</span>
             {guard === 'off' ? (
@@ -649,9 +1125,10 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 style={{
                   marginLeft: 'auto',
                   border: 'none',
-                  background: pal.cardSoft,
+                  background: dark ? CARD_BG_DARK : CARD_BG_LIGHT,
                   color: pal.muted,
                   borderRadius: 7,
+                  boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)'),
                   padding: '3px 14px',
                   fontSize: 11.5,
                   fontWeight: 700,
@@ -678,6 +1155,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 background: pal.cardSoft,
                 color: pal.faint,
                 fontSize: 10.5,
+                boxShadow: dark ? undefined : 'inset 0 1px 0 rgba(255, 255, 255, 1)',
                 fontWeight: 700,
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -697,7 +1175,15 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
           {lastScan !== undefined && (
             <>
               <SectionLabel pal={pal}>{t('scan.recent')}</SectionLabel>
-              <div style={{ background: pal.card, borderRadius: 8, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{
+                background: dark ? CARD_BG_DARK : CARD_BG_LIGHT,
+                borderRadius: 8,
+                boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)'),
+                padding: '7px 10px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}>
                 <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lastScan.pluginName}</span>
                 <span style={{ marginLeft: 'auto', fontWeight: 700, color: lastScan.verdict === 'clean' ? pal.sage : lastScan.verdict === 'suspicious' ? pal.ochre : pal.rose }}>
                   {lastScan.verdict}
@@ -705,73 +1191,6 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 <span style={{ fontSize: 11, color: pal.faint }}>{lastScan.staticScore} {t('points')}</span>
               </div>
             </>
-          )}
-
-          {/* 报警列表：每行可单独忽略（用户自判噪音）；最多展示 8 条最新（存储上限 20，见 status.ts alarmMax） */}
-          <SectionLabel pal={pal}>{t('alerts.title')}</SectionLabel>
-          {alarms.length === 0 ? (
-            <div style={{ color: pal.faint, padding: '4px 2px' }}>{t('alerts.empty')}</div>
-          ) : (
-            <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
-              {alarms.slice(0, 8).map(a => (
-                <li
-                  key={a.id}
-                  style={{
-                    background: pal.card,
-                    borderRadius: 8,
-                    borderLeft: '3px solid ' + (a.severity === 'red' ? pal.rose : a.severity === 'yellow' ? pal.ochre : 'transparent'),
-                    padding: '7px 10px',
-                    marginBottom: 5,
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ fontSize: 10, fontWeight: 700, background: pal.cardSoft, borderRadius: 4, padding: '1px 6px', color: pal.muted }}>
-                      {a.kind}
-                    </span>
-                    {a.pluginHint !== undefined && (
-                      <span style={{ fontSize: 10.5, color: pal.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
-                    )}
-                    <span style={{ fontSize: 10, color: pal.faint, flexShrink: 0 }}>{fmtTime(a.at)}</span>
-                    <button
-                      type="button"
-                      onClick={() => dismissAlarm(a.id)}
-                      title={t('alerts.dismissHint')}
-                      style={{
-                        marginLeft: 'auto',
-                        border: '1px solid ' + pal.borderSoft,
-                        background: 'transparent',
-                        color: pal.muted,
-                        borderRadius: 5,
-                        padding: '0 7px',
-                        cursor: 'pointer',
-                        fontSize: 10,
-                        flexShrink: 0,
-                      }}
-                    >
-                      {t('alerts.dismiss')}
-                    </button>
-                  </div>
-                  <div style={{ marginTop: 3, wordBreak: 'break-word' }}>{a.message}</div>
-                  {(() => {
-                    // 归因分层文案：按 pluginHint × sessionLog 组合选择 suggest 文案
-                    // 无归因 + 会话日志 → 轮换提示（正常运维）
-                    // 无归因 + 非会话日志 → 通用无归因提示
-                    // 有归因 → 插件归因提示（即使是会话日志也按插件作案处理）
-                    let suggestKey: string
-                    if (a.pluginHint === undefined) {
-                      suggestKey = a.sessionLog === true
-                        ? 'suggest.' + a.kind + '.unattributed.sessionLog'
-                        : 'suggest.' + a.kind + '.unattributed'
-                    } else {
-                      suggestKey = 'suggest.' + a.kind
-                    }
-                    return (zh as Record<string, string>)[suggestKey] !== undefined && (
-                      <div style={{ marginTop: 3, fontSize: 11, color: pal.ochre }}>{t('alerts.suggest')}{t(suggestKey)}</div>
-                    )
-                  })()}
-                </li>
-              ))}
-            </ul>
           )}
 
           {/* 已忽略分区：用户可恢复；徽标/等级已不含这些 */}
@@ -783,8 +1202,11 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                   <li
                     key={a.id}
                     style={{
-                      background: pal.cardSoft,
+                      background: dark
+                        ? 'linear-gradient(180deg, rgba(52,50,45,0.9) 0%, rgba(46,44,40,0.9) 100%)'
+                        : 'linear-gradient(180deg, #F0EDE6 0%, #EBE8E1 100%)',
                       borderRadius: 8,
+                      boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.8)'),
                       padding: '6px 10px',
                       marginBottom: 5,
                       opacity: 0.75,
@@ -832,7 +1254,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 marginLeft: 'auto',
                 border: '1px solid ' + pal.border,
                 background: 'transparent',
-                color: pal.muted,
+                // 浅色模式下用更深的颜色保证在玻璃背景上的可见性
+                color: dark ? pal.muted : '#4A4640',
                 borderRadius: 7,
                 padding: '2px 12px',
                 cursor: 'pointer',
@@ -845,7 +1268,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
           </div>
         </div>
 
-        {helpOpen && <VetIntroPanel pal={pal} width={280} t={t} />}
+        {helpOpen && <VetIntroPanel pal={pal} width={280} t={t} dark={dark} />}
+        {alarmPanelOpen && <VetAlarmPanel pal={pal} width={340} t={t} alarms={alarms} dark={dark} onDismiss={dismissAlarm} />}
         </div>
         ,
         document.body,

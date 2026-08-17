@@ -3,6 +3,27 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.1.10] - 2026-08-17
+
+### Added
+
+- **Crystal Edge borders**: top highlight line on all panels and cards, stronger glass feel
+- **Mirror Sheen hover effect**: two-layer gloss (diffuse → focused) on hover
+- **Minimal White style**: light mode uses white-on-black design with softer blue-tinted text
+- **Alarm detail panel**: standalone alarm detail popup with expand/collapse and copy
+- **Instant theme switching**: MutationObserver watches theme changes, no polling delay
+
+### Changed
+
+- **Translucent glass**: light mode at 20% opacity with a grey base for a clearer look
+- **Unified card style**: all cards share the same gradient background and top highlight
+- **Code review cleanup**: removed dead code (parseLuma/linearize), extracted constants to avoid duplication
+
+### Fixed
+
+- **Theme detection**: light mode no longer incorrectly renders as dark UI
+- **isDark()**: now checks the `body[data-ds-dark-theme]` attribute, more accurate
+
 ## [0.1.9] - 2026-08-17
 
 ### Fixed

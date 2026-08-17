@@ -13,7 +13,7 @@ import { hasAuditRecord, setArchiveDirForTest } from '../lib/audit/archive.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import fsDefault from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import * as yaml from 'js-yaml'
@@ -146,7 +146,7 @@ describe('VetStatus（盾牌聚合器）', () => {
 })
 
 describe('hasAuditRecord（档案门槛：M1 前缀 + P-1 版本精确）', () => {
-  const d = mkdtempSync(join(process.cwd(), '.tmp-arch-'))
+  const d = mkdtempSync(join(tmpdir(), '.tmp-arch-'))
   const dir = join(d, 'audits')
   beforeAll(() => {
     mkdirSync(dir, { recursive: true })
@@ -434,7 +434,7 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
   })
 
   it('A9 集成：包装器在线上报的 realpathSync 场景不再产生任何报警（端到端复刻）', () => {
-    const tmp = mkdtempSync(join(process.cwd(), '.tmp-a9-'))
+    const tmp = mkdtempSync(join(tmpdir(), '.tmp-a9-'))
     const pkgDir = join(tmp, 'node_modules', '@deepseek-ai', 'dsh-credentials-local')
     mkdirSync(pkgDir, { recursive: true })
     mkdirSync(join(tmp, '.ssh'), { recursive: true })
@@ -546,7 +546,7 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
 
 describe('R31：归因阶段 fs 直通（递归护栏）', () => {
   it('敏感包名（dsh-credentials-local）下归因不再无限递归：恰好一条报警、标志经 finally 清除', () => {
-    const tmp = mkdtempSync(join(process.cwd(), '.tmp-r31-'))
+    const tmp = mkdtempSync(join(tmpdir(), '.tmp-r31-'))
     // 复刻真实崩溃场景：profile node_modules 里有含敏感词（credentials）的包名
     const pkgDir = join(tmp, 'node_modules', '@deepseek-ai', 'dsh-credentials-local')
     mkdirSync(pkgDir, { recursive: true })
@@ -585,7 +585,7 @@ describe('R31：归因阶段 fs 直通（递归护栏）', () => {
     const alarms: HookAlarm[] = []
     const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), () => new Map())
     try {
-      const p = join(mkdtempSync(join(process.cwd(), '.tmp-r31b-')), '.env')
+      const p = join(mkdtempSync(join(tmpdir(), '.tmp-r31b-')), '.env')
       setRootIndexing(true)
       fsDefault.writeFileSync(p, 'x') // 直通：不报警
       expect(alarms).toHaveLength(0)
@@ -614,7 +614,7 @@ describe('R31：归因阶段 fs 直通（递归护栏）', () => {
       }
     })
     try {
-      const p = join(mkdtempSync(join(process.cwd(), '.tmp-r31c-')), '.env')
+      const p = join(mkdtempSync(join(tmpdir(), '.tmp-r31c-')), '.env')
       // 旧实现把归因异常传给调用方（写被吞）；P1-3 改为 catch：报警保留（pluginHint 无主）、
       // fs 调用永不因归因失败而中断——归因只是 best-effort 增强
       fsDefault.writeFileSync(p, 'x')
@@ -722,7 +722,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   const mkCtx = (baseUrl: string): { baseUrl: string; logger?: undefined } => ({ baseUrl })
 
   it('enable 写入条目 + 重复 enable 幂等 + disable 移除', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const patch = join(dir, 'cordis.patch.yml')
     writeFileSync(patch, '- id: settings\n  config:\n    watch: false\n')
 
@@ -748,7 +748,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   })
 
   it('旧形态包名条目（含引号）会被重写/移除（自愈）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const patch = join(dir, 'cordis.patch.yml')
     writeFileSync(patch, '- id: settings\n- id: "@jieai/dsh-plugin-vet"\n  config:\n    runtimeGuard: watch\n')
 
@@ -769,7 +769,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   })
 
   it('vet 条目 config 含嵌套列表也能完整剥离（D29：缩进边界）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const patch = join(dir, 'cordis.patch.yml')
     writeFileSync(patch, '- id: settings\n  config:\n    watch: false\n- id: plugin-vet\n  config:\n    runtimeGuard: watch\n    allowlist:\n      - foo\n      - bar\n- id: other\n  config:\n    x: 1\n')
 
@@ -785,7 +785,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   })
 
   it('未配置时 disable 返回 ok', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     writeFileSync(join(dir, 'cordis.patch.yml'), '- id: settings\n')
     const r = writeRuntimeGuardConfig(mkCtx(dir), false)
     expect(r.ok).toBe(true)
@@ -793,7 +793,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   })
 
   it('baseUrl 为 file: URL 时正常读写（DSH web profile 实际形态）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     writeFileSync(join(dir, 'cordis.patch.yml'), '- id: settings\n')
     const r = writeRuntimeGuardConfig(mkCtx('file:' + dir), true)
     expect(r.ok).toBe(true)
@@ -805,7 +805,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   })
 
   it('patch 文件不存在时 enable 直接新建', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const r = writeRuntimeGuardConfig(mkCtx(dir), true)
     expect(r.ok).toBe(true)
     expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('- id: plugin-vet')
@@ -813,7 +813,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   })
 
   it('H1：disable 后文件只剩 vet 条目 → 写 []（DSH boot 契约，空文件会抛错）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const patch = join(dir, 'cordis.patch.yml')
     writeFileSync(patch, '- id: plugin-vet\n  config:\n    runtimeGuard: watch\n')
 
@@ -826,7 +826,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   })
 
   it('H2：开启守卫保留已有 config 的非 runtimeGuard 键（deny/allowlist 不被冲掉）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const patch = join(dir, 'cordis.patch.yml')
     writeFileSync(patch, '- id: plugin-vet\n  config:\n    mode: deny\n    allowlist:\n      - foo\n')
 
@@ -841,7 +841,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   })
 
   it('M5：readPatchRuntimeGuard 读文件级实际状态（watch/off）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const patch = join(dir, 'cordis.patch.yml')
     expect(readPatchRuntimeGuard(mkCtx(dir))).toBe('off')
     writeFileSync(patch, '- id: plugin-vet\n  config:\n    runtimeGuard: watch\n')
@@ -850,14 +850,14 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
   })
 
   it('patch 文件不存在时 disable 视为未开启', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const r = writeRuntimeGuardConfig(mkCtx(dir), false)
     expect(r.ok).toBe(true)
     rmSync(dir, { recursive: true, force: true })
   })
 
   it('对象操作：含 --- 分隔符的现有文件被自动修复（不崩溃 DSH）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-test-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     // 现有文件含 --- 文档分隔符 → 旧版字符串拼接会拼出坏 YAML → DSH 启动崩溃
     // 新版用 js-yaml.load + dump 对象操作 → 自动修复，输出合法 YAML
     const patch = join(dir, 'cordis.patch.yml')
@@ -1022,7 +1022,7 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
 
 describe('ensureHoneypot（蜜罐播种）', () => {
   it('创建诱饵文件集，内容/文件名无蜜罐关键词（反蜜罐）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-hp-data-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-hp-data-'))
     const root = ensureHoneypot(dir)
     expect(root).toBe(dir)
     const names = ['id_rsa.pem', 'id_rsa.pub', '.env', 'credentials.json', '.npmrc', '.netrc', 'aws-credentials']
@@ -1040,7 +1040,7 @@ describe('ensureHoneypot（蜜罐播种）', () => {
   })
 
   it('幂等：已存在诱饵不重写；被删诱饵自动重建', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-honeypot-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-honeypot-'))
     ensureHoneypot(dir)
     const before = readFileSync(join(dir, '.env'), 'utf8')
     ensureHoneypot(dir)
@@ -1082,7 +1082,7 @@ describe('installRuntimeGuard（T1 哨兵 + T2 钩子集成，覆盖率补盲）
       // 真实 fs 模块已被包装：写敏感路径应产生 fs-write 报警（T2 生效）
       const before = status.snapshot().alarmCount
       // 用真实 fs 触发（写一个临时敏感命名路径）
-      const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-integ-'))
+      const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-integ-'))
       try {
         // 用属性访问（fsDefault.writeFileSync）触发——ESM 具名导入是 patch 前固化的原始引用，
         // patchModule 包装的是模块对象属性（README 已知旁路），属性访问才能命中 T2 钩子
@@ -1102,7 +1102,7 @@ describe('installRuntimeGuard（T1 哨兵 + T2 钩子集成，覆盖率补盲）
     // dispose 后：环境变量清空、再写不再报警（钩子已恢复）
     expect(process.env.DSH_VET_SIDECAR_PID).toBeUndefined()
     const after = status.snapshot().alarmCount
-    const dir2 = mkdtempSync(join(process.cwd(), '.tmp-guard-integ2-'))
+    const dir2 = mkdtempSync(join(tmpdir(), '.tmp-guard-integ2-'))
     try {
       fsDefault.writeFileSync(join(dir2, 'id_rsa.pem'), 'y')
       expect(status.snapshot().alarmCount).toBe(after)
@@ -1129,7 +1129,7 @@ describe('蜜罐报警（classifyOp）', () => {
   const mkCfg = (roots: string[]): typeof DEFAULT_HOOK_CONFIG => ({ ...DEFAULT_HOOK_CONFIG, honeypotRoots: roots })
 
   it('M7：readdir 蜜罐根目录 → honeypot 报警（翻找的第一个动作）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-hp-probe-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-hp-probe-'))
     ensureHoneypot(dir)
     const cfg = mkCfg([dir])
     expect(classifyOp({ module: 'fs', op: 'readdirSync', args: [dir] }, cfg)).toMatchObject({ kind: 'honeypot', severity: 'yellow' })
@@ -1138,7 +1138,7 @@ describe('蜜罐报警（classifyOp）', () => {
   })
 
   it('触碰诱饵路径 → 独立 honeypot 报警（读黄/删红）', () => {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-honeypot-'))
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-honeypot-'))
     ensureHoneypot(dir)
     const cfg = mkCfg([dir])
     const read = classifyOp({ module: 'fs', op: 'readFileSync', args: [join(dir, '.env')] }, cfg)

@@ -19,3 +19,4 @@ node_modules/.npm-cache-local/
 .locale.js
 .subagent.js
 .index.html
+.npmrc
