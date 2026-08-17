@@ -41,6 +41,8 @@ export interface HookAlarm {
   message: string
   target?: string
   pluginHint?: string
+  /** 目标是否为会话日志文件（用于归因分层文案：无归因 + 会话日志 → 轮换提示）。 */
+  sessionLog?: boolean
 }
 
 export interface HookOp {
@@ -171,6 +173,18 @@ export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'muta
   return false
 }
 
+/**
+ * 检测路径是否为 DSH 会话日志文件（~/.dsh/sessions/** 下的 .zst/.zstd/.jsonl 等）。
+ * 这类文件的删除通常是宿主自身的日志轮换（压缩/整理），非恶意销毁。
+ */
+export function isSessionLogFile(path: string): boolean {
+  const norm = path.replace(/\\/g, '/')
+  // 必须在 ~/.dsh/sessions/ 下
+  if (!/\/\.dsh\/sessions\//.test(norm)) return false
+  // 文件名以压缩/日志扩展名结尾
+  return /\.(zst|zstd|jsonl|log)(\.tmp)?$/.test(norm)
+}
+
 /** 取第一个字符串参数作为目标（路径/命令）。 */
 function firstString(args: unknown[]): string | undefined {
   for (const a of args) {
@@ -276,7 +290,14 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
   if (module === 'fs') {
     // isLockSiblingPath：atomic-write 协议锁（<file>.lock）随写随删，豁免；凭据本体照删照报
     if (DESTROY_OPS.has(name) && isSensitivePath(target, cfg, 'mutate') && !isLockSiblingPath(target)) {
-      return { severity: 'red', kind: 'fs-destroy', message: `敏感路径删除：${name}(${target.slice(0, 120)})`, target }
+      const isSessionLog = isSessionLogFile(target)
+      return {
+        severity: 'red',
+        kind: 'fs-destroy',
+        message: `敏感路径删除：${name}(${target.slice(0, 120)})`,
+        target,
+        ...(isSessionLog && { sessionLog: true }),
+      }
     }
     // cp/rename 是成对路径：src 敏感（拷贝密钥出局）或 dest 敏感（覆盖系统文件/密钥落位）都要报
     if (name === 'cp' || name === 'cpSync' || name === 'rename' || name === 'renameSync' || name === 'copyFile' || name === 'copyFileSync') {

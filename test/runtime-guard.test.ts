@@ -4,6 +4,7 @@ import { analyzeSample, detectGrowth, type ProcSample, type RssSample, type Watc
 import {
   classifyOp, isSensitivePath, isTransientTempPath, patchModule, pluginFromStack, setRootIndexing, DEFAULT_HOOK_CONFIG,
 } from '../lib/guard/runtime-hooks.js'
+import { isSessionLogFile } from '../lib/guard/runtime-hooks.js'
 import { readHostMetrics } from '../lib/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../lib/guard/status-route.js'
@@ -396,6 +397,40 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     // 但 ~/.dsh/.credentials.yaml、~/.dsh/sessions/** 等真实凭据面仍正常报警
     expect(isSensitivePath('/home/user/.dsh/.credentials.yaml', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
     expect(isSensitivePath('/home/user/.dsh/sessions/abc/credentials', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
+  })
+
+  it('isSessionLogFile: 识别会话日志文件（用于轮换误报降噪）', () => {
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl.zst')).toBe(true)
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl.zstd')).toBe(true)
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl')).toBe(true)
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.log')).toBe(true)
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl.tmp')).toBe(true)
+    // 非会话目录下的日志文件不算
+    expect(isSessionLogFile('/home/user/.dsh/profiles/web/session.jsonl.zst')).toBe(false)
+    expect(isSessionLogFile('/tmp/session.jsonl.zst')).toBe(false)
+    // 会话目录下的非日志文件不算
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/credentials')).toBe(false)
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/config.json')).toBe(false)
+  })
+
+  it('fs-destroy: 会话日志文件删除设置 sessionLog 标志（归因分层用）', () => {
+    // 会话日志文件删除应该设置 sessionLog: true
+    const alarm1 = classifyOp({
+      module: 'fs', op: 'unlink', args: ['/home/user/.dsh/sessions/abc/session.jsonl.zst']
+    }, DEFAULT_HOOK_CONFIG)
+    expect(alarm1).not.toBeNull()
+    expect(alarm1!.kind).toBe('fs-destroy')
+    expect(alarm1!.severity).toBe('red')
+    expect(alarm1!.sessionLog).toBe(true)
+    expect(alarm1!.message).toBe('敏感路径删除：unlink(/home/user/.dsh/sessions/abc/session.jsonl.zst)')
+    
+    // 非会话日志的敏感文件删除 sessionLog 为 undefined
+    const alarm2 = classifyOp({
+      module: 'fs', op: 'unlink', args: ['/home/user/.ssh/id_rsa']
+    }, DEFAULT_HOOK_CONFIG)
+    expect(alarm2).not.toBeNull()
+    expect(alarm2!.kind).toBe('fs-destroy')
+    expect(alarm2!.sessionLog).toBeUndefined()
   })
 
   it('A9 集成：包装器在线上报的 realpathSync 场景不再产生任何报警（端到端复刻）', () => {

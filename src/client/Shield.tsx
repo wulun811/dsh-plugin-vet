@@ -750,9 +750,23 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                     </button>
                   </div>
                   <div style={{ marginTop: 3, wordBreak: 'break-word' }}>{a.message}</div>
-                  {(zh as Record<string, string>)['suggest.' + a.kind] !== undefined && (
-                    <div style={{ marginTop: 3, fontSize: 11, color: pal.ochre }}>{t('alerts.suggest')}{t('suggest.' + a.kind)}</div>
-                  )}
+                  {(() => {
+                    // 归因分层文案：按 pluginHint × sessionLog 组合选择 suggest 文案
+                    // 无归因 + 会话日志 → 轮换提示（正常运维）
+                    // 无归因 + 非会话日志 → 通用无归因提示
+                    // 有归因 → 插件归因提示（即使是会话日志也按插件作案处理）
+                    let suggestKey: string
+                    if (a.pluginHint === undefined) {
+                      suggestKey = a.sessionLog === true
+                        ? 'suggest.' + a.kind + '.unattributed.sessionLog'
+                        : 'suggest.' + a.kind + '.unattributed'
+                    } else {
+                      suggestKey = 'suggest.' + a.kind
+                    }
+                    return (zh as Record<string, string>)[suggestKey] !== undefined && (
+                      <div style={{ marginTop: 3, fontSize: 11, color: pal.ochre }}>{t('alerts.suggest')}{t(suggestKey)}</div>
+                    )
+                  })()}
                 </li>
               ))}
             </ul>

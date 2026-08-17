@@ -17,6 +17,8 @@ export interface VetAlarm {
   target?: string
   /** T2 栈归因 best-effort：插件包名（@scope/name 或 name）。 */
   pluginHint?: string
+  /** 目标是否为会话日志文件（用于归因分层文案：无归因 + 会话日志 → 轮换提示）。 */
+  sessionLog?: boolean
   at: number
 }
 

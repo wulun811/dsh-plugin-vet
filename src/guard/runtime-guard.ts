@@ -344,6 +344,7 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       message: alarm.message,
       target: alarm.target,
       pluginHint: alarm.pluginHint,
+      sessionLog: alarm.sessionLog,
       at: Date.now(),
     }
     status.record(entry)

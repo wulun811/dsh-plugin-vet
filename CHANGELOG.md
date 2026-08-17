@@ -3,7 +3,14 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.1.9] - 2026-08-17
+
+### Fixed
+
+- **Session log rotation false positive reduction**: fs-destroy red alerts now recognize compressed/log files (.zst/.zstd/.jsonl/.log) under `~/.dsh/sessions/**`, but rotation hints only display when unattributed (pluginHint is undefined) to avoid misleading users. Attributed session log deletions still treated as plugin malicious actions (real evidence destruction).
+- **Attribution-layered messaging**: Unattributed alerts now use independent suggest messages (e.g., "Check why there is an unattributed sensitive path deletion") instead of implying plugin responsibility. Session log rotation scenarios have dedicated hint messages.
+
+## [0.1.8] - 2026-08-17
 
 ### Added
 

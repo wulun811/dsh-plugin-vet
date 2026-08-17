@@ -88,9 +88,14 @@ export const zh: Record<string, string> = {
   'suggest.fork': '检查是否有插件循环 spawn 子进程（R9-1 fork 炸弹）',
   'suggest.fd': '检查是否有插件泄漏文件句柄',
   'suggest.spawn': '检查该插件为何启动子进程（非官方归因）',
+  'suggest.spawn.unattributed': '检查为何有未归因的子进程启动（可能来自宿主/核心代码）',
   'suggest.fs-destroy': '检查该插件删除敏感路径的意图',
+  'suggest.fs-destroy.unattributed': '检查为何有未归因的敏感路径删除（可能来自宿主/核心代码）',
+  'suggest.fs-destroy.unattributed.sessionLog': '可能是宿主会话日志轮换（属正常运维，但仍建议确认）',
   'suggest.fs-write': '检查该插件写入敏感路径的意图',
+  'suggest.fs-write.unattributed': '检查为何有未归因的敏感路径写入（可能来自宿主/核心代码）',
   'suggest.fs-read': '检查该插件读取密钥文件的意图',
+  'suggest.fs-read.unattributed': '检查为何有未归因的密钥文件读取（可能来自宿主/核心代码）',
 }
 
 export const en: Record<string, string> = {
@@ -175,7 +180,12 @@ export const en: Record<string, string> = {
   'suggest.fork': 'Check for a plugin spawning child processes in a loop (R9-1 fork bomb)',
   'suggest.fd': 'Check for a plugin leaking file descriptors',
   'suggest.spawn': 'Check why this plugin is spawning a process (non-official attribution)',
+  'suggest.spawn.unattributed': 'Check why there is an unattributed process spawn (may come from host/core code)',
   'suggest.fs-destroy': 'Check why this plugin deletes sensitive paths',
+  'suggest.fs-destroy.unattributed': 'Check why there is an unattributed sensitive path deletion (may come from host/core code)',
+  'suggest.fs-destroy.unattributed.sessionLog': 'Likely host session log rotation (normal maintenance, but still recommended to confirm)',
   'suggest.fs-write': 'Check why this plugin writes to sensitive paths',
+  'suggest.fs-write.unattributed': 'Check why there is an unattributed sensitive path write (may come from host/core code)',
   'suggest.fs-read': 'Check why this plugin reads key files',
+  'suggest.fs-read.unattributed': 'Check why there is an unattributed key file read (may come from host/core code)',
 }
