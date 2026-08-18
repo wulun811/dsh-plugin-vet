@@ -3,29 +3,76 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.1.12] - 2026-08-18
+
+### Fixed
+
+- **Top-level DSH install tree exemption (fs-probe false-positive flood)**: the install-tree exemption
+  regex `/\/.dsh\/profiles\/[^/]+\/node_modules\//` required a profile-name segment between
+  `profiles/` and `node_modules/`, so the top-level hoisted tree
+  (`~/.dsh/profiles/node_modules`, the pnpm workspace root layout) did not match and fell through to
+  the `.dsh` sensitive segment — every DSH restart/plugin-tree re-resolve replayed
+  realpathSync(package.json) on top-level `@deepseek-ai/*` packages and flooded the shield with ~20
+  (unattributed) fs-probe yellow alarms. The regex now uses an optional segment
+  (`(?:\/[^/]+)?`) covering both per-profile (`profiles/<name>/node_modules`) and top-level
+  (`profiles/node_modules`) trees. Real credential surfaces (`~/.dsh/.credentials.yaml`,
+  `~/.dsh/sessions/**`) and `~/.ssh/node_modules/x` remain fully sensitive — the exemption only
+  applies under `.dsh/profiles`. Regression assertions added for isSensitivePath and classifyOp
+  (realpathSync/realpath/statSync → no alarm).
+
 ## [0.1.11] - 2026-08-18
 
 ### Added
 
-- **P-5 官方包内容哈希基线**: 对 `@deepseek-ai/*` 包计算内容哈希（SHA-256），与基线比对，防止包名伪造。基线存储支持多版本共存（key = `name@version`），资源限制（1000 文件 / 50MB / 10s 超时）防 DoS，原子写防并发损坏。新增 `contentBaseline` 配置项（默认开启）。
-- **市场扫描闸门 (vet-gate)**: 新增 `runGate()` 编程接口和 `vet-gate` CLI，可被 `dsh-plugin-hub` 等安装流程回调。默认 `mode: report`（alarm-only），OSV 默认关闭（秒级反馈），超时按文件数动态计算。新增 `bin` 和 `exports` 字段。
-- **运行时网络出口观测**: 包装 http/https/net/http2/tls/dgram/fetch 模块，观测插件发起的网络请求。敏感主机（webhook.site, requestbin.com, ngrok.io 等）→ yellow，敏感端口（4444, 5555, 6666, 7777, 1337, 31337）→ red。dgram 特殊处理（实例方法包装）。新增 `networkEgress` 配置项（默认开启）。
-- **R10 传递依赖图扩展**: 新增 `transitiveDeps` 配置项（默认关闭），调用 upstream-radar CLI 扫描传递依赖树。使用 `createRequire` 探测本地安装（不使用 npx），OSV-T 规则 severity 降为 medium（传递依赖利用面小于直接依赖），upstream-radar 未安装时静默降级 + 首次 warn 提示。
+- **P-5 official-package content-hash baseline**: SHA-256 content hashes for `@deepseek-ai/*` packages
+  compared against a baseline to catch package-name forgery. Baseline storage supports multi-version
+  coexistence (key = `name@version`), resource limits (1000 files / 50MB / 10s timeout) against DoS, and
+  atomic writes against concurrent corruption. New `contentBaseline` config option (enabled by default).
+- **Marketplace scan gate (vet-gate)**: new `runGate()` programmatic API plus a `vet-gate` CLI, callable
+  from installer flows such as `dsh-plugin-hub`. Default `mode: report` (alarm-only), OSV off by default
+  (second-level feedback), timeout scales with file count. New `bin` and `exports` fields.
+- **Runtime network egress observation**: wraps http/https/net/http2/tls/dgram/fetch to observe
+  plugin-initiated network requests. Sensitive hosts (webhook.site, requestbin.com, ngrok.io, etc.) → yellow;
+  sensitive ports (4444, 5555, 6666, 7777, 1337, 31337) → red. dgram special-cased (instance-method
+  wrapping). New `networkEgress` config option (enabled by default).
+- **R10 transitive dependency graph**: new `transitiveDeps` config option (off by default) calling the
+  upstream-radar CLI to scan the transitive dependency tree. Local installation probed via `createRequire`
+  (no npx); OSV-T rule severity lowered to medium (transitive attack surface < direct); silent downgrade with
+  a first-run warn when upstream-radar is not installed.
 
 ### Changed
 
-- **基线哈希使用相对路径**: `computePackageHash` 使用 `relative(packageRoot, fullPath)` 而非绝对路径，确保同一包在不同路径下安装产生相同哈希（跨机器一致性）。
-- **基线哈希支持二进制文件**: 使用 Buffer 读取文件内容，避免 utf8 编码损坏二进制数据。
-- **排序使用字节序**: 基线文件排序使用 `<` / `>` 比较而非 `localeCompare`，确保跨平台排序一致性。
-- **mismatch 时记录 red 报警**: 官方包内容哈希与基线不一致时，通过 `status?.record()` 记录 red 报警，让用户知道官方包可能被篡改。
+- **Baseline hashes use relative paths**: `computePackageHash` uses `relative(packageRoot, fullPath)`
+  instead of absolute paths so the same package installed at different paths hashes identically (cross-machine
+  consistency).
+- **Baseline hashes support binary files**: file contents read as Buffer to avoid utf8 corruption of binary
+  data.
+- **Byte-order sorting**: baseline files sorted with `<` / `>` instead of `localeCompare` for
+  cross-platform consistency.
+- **Red alarm on mismatch**: an official-package hash mismatch now records a red alarm via
+  `status?.record()` so users know an official package may have been tampered with.
 
 ### Fixed
 
-- **符号链接检测**: `computePackageHash` 使用 `lstatSync` 而非 `statSync`，正确检测符号链接并跳过。
-- **ESM 模块兼容**: `content-baseline.ts` 直接导入 `mkdirSync` 而非使用 `require('node:fs')`；`engine.ts` 使用 `createRequire` 而非 `require.resolve`。
-- **dgram.send 参数形态**: 支持两种形态（`msg, port, address` 和 `msg, offset, length, port, address`），正确提取目标端口和地址。
-- **upstream-radar 输出校验**: 添加 `Array.isArray(radarResult.vulnerabilities)` 检查，防止输出格式不符预期时崩溃。
-- **saveBaseline 目录**: 使用 `dirname(baselinePath())` 而非硬编码路径，确保环境变量 `DSH_PLUGIN_VET_BASELINE_DIR` 生效时目录一致。
+- **Symlink detection**: `computePackageHash` uses `lstatSync` instead of `statSync` to correctly detect
+  and skip symlinks.
+- **ESM compatibility**: `content-baseline.ts` imports `mkdirSync` directly instead of
+  `require('node:fs')`; `engine.ts` uses `createRequire` instead of `require.resolve`.
+- **dgram.send argument shapes**: both forms (`msg, port, address` and `msg, offset, length, port,
+  address`) supported, extracting the target port/address correctly.
+- **upstream-radar output validation**: `Array.isArray(radarResult.vulnerabilities)` guard added so
+  unexpected output shapes don't crash the scan.
+- **saveBaseline directory**: uses `dirname(baselinePath())` instead of a hardcoded path so the
+  `DSH_PLUGIN_VET_BASELINE_DIR` env override keeps directories consistent.
+- **Deep security-review fixes (true positives)**: `http.get`/`https.get` are standalone exports whose
+  internal calls bypass `module.exports.request` patching — `'get'` added to the patched network ops;
+  the OSV network phase is now bounded by a time budget derived from the host request timeout, with
+  per-query timeouts narrowed dynamically (remaining / remaining targets), so scans always finish before the
+  host kills the subprocess.
+- **Alarm panel UI rework**: dismissed alarms moved out of the main shield panel to the bottom of the alarm
+  panel — flex two-column layout with collapsible sections and a thin scrollbar; active alarms get more
+  visual space.
+- **Dependency upgrade**: `@deepseek-ai/*` dependencies rc.6 → rc.7.
 
 ## [0.1.10] - 2026-08-17
 
@@ -115,15 +162,17 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Fixed
 
-- **round-7.2（minified bundle 实测，2 个语义级误报修复）**:
-  - R2: `new n.constructor(n.type, n)`（React 事件系统复制事件对象）误报 high——checkNew 的 constructor 分支改调
-    isConstructorCapture：base 必须是箭头/函数字面量才是真捕获（对象克隆/工厂形态不再误报；真捕获
-    `new (async()=>{}).constructor('return process')` 仍 critical）。
-  - R9: `outer: for(;;) { for(...) { break outer } }` 误报无出口循环——exitSignals 识别带标签 break 的出口语义：
-    标签绑定在包裹当前循环的 labeled 语句上（循环体祖先）即算出口信号；绑定在循环内部（`break inner`）不算，
-    真死循环照报。
-  - ENGINE_VERSION static-v6 → static-v7（规则变更使旧缓存失效）。
-  - 回归测试 +6（249 total cases）。
+- **round-7.2 (minified-bundle verification, 2 semantic false positives fixed)**:
+  - R2: `new n.constructor(n.type, n)` (React event system cloning event objects) false-positived as high —
+    checkNew's constructor branch now routes through isConstructorCapture: the base must be an arrow/function
+    literal to count as true capture (object-clone/factory shapes no longer alarm; true capture
+    `new (async()=>{}).constructor('return process')` stays critical).
+  - R9: `outer: for(;;) { for(...) { break outer } }` false-positived as an exit-less loop — exitSignals now
+    understands labeled-break exit semantics: a label bound to a labeled statement wrapping the current loop
+    (an ancestor of the loop body) counts as an exit signal; a label bound inside the loop (`break inner`)
+    does not, so true infinite loops still alarm.
+  - ENGINE_VERSION static-v6 → static-v7 (rule change → old caches invalidate).
+  - Regression tests +6 (249 total cases).
 - **Windows test environment**: the sidecar singleton-lock integration test (D30) depends on /proc; on Windows
   that path is absent, so the first tick exits gracefully (exit 0) and the assertion always fails — now skipped
   per platform (`skipIf(win32)`); still runs as-is on Linux/CI.

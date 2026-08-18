@@ -394,9 +394,18 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     // 插件加载期 require.resolve 触发 realpathSync（electron/install.js 等）→ 不报警
     expect(isSensitivePath('/home/chenzheng/.dsh/profiles/web/node_modules/electron/install.js', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
     expect(isSensitivePath('/home/user/.dsh/profiles/web/node_modules/dsh-traffic-light/package.json', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    // 顶层 hoisted 树（~/.dsh/profiles/node_modules，pnpm workspace 根布局，无 profile 名段）
+    // 用户实测：DSH 重启重解析插件树时对顶层 @deepseek-ai/* 包 realpathSync(package.json)
+    // 刷出 20 条 fs-probe 误报——旧豁免正则要求中间必有 profile 名段，顶层树不匹配。
+    expect(isSensitivePath('/home/user/.dsh/profiles/node_modules/@deepseek-ai/dsh-agent-loop/package.json', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    expect(classifyOp({ module: 'fs', op: 'realpathSync', args: ['/home/user/.dsh/profiles/node_modules/@deepseek-ai/dsh-agent-loop/package.json'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'fs', op: 'realpath', args: ['/home/user/.dsh/profiles/node_modules/@deepseek-ai/dsh-base/package.json'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'fs', op: 'statSync', args: ['/home/user/.dsh/profiles/node_modules/@deepseek-ai/dsh-client/package.json'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
     // 但 ~/.dsh/.credentials.yaml、~/.dsh/sessions/** 等真实凭据面仍正常报警
     expect(isSensitivePath('/home/user/.dsh/.credentials.yaml', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
     expect(isSensitivePath('/home/user/.dsh/sessions/abc/credentials', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
+    // 顶层豁免不误伤：~/.ssh/node_modules/x 仍命中 .ssh（豁免只在 .dsh/profiles 段生效）
+    expect(isSensitivePath('/home/u/.ssh/node_modules/x', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
   })
 
   it('isSessionLogFile: 识别会话日志文件（用于轮换误报降噪）', () => {
