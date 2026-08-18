@@ -10,6 +10,7 @@ import type { PluginScorecard } from '../report/types.js'
 import { renderScorecard } from '../report/render.js'
 import { PACKAGE_NAME } from '../invariant.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
+import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline } from '../guards/content-baseline.js'
 
 export interface ScanPluginArgs {
   target: 'dynamic-code' | 'package' | 'file'
@@ -58,8 +59,23 @@ export function detectTargetKind(packagePath: string): 'plugin' | 'generic' {
       // vet 自身（信任锚工具包，process 为子进程实现）→ generic；同名冒名包 → 最严格 plugin
       return isSelfPackage(packagePath) ? 'generic' : 'plugin'
     }
-    // 官方包：宿主合法代码（与 internal/plugin 守卫 isExempt 的 @deepseek-ai/* 豁免一致），process 为能力触达面
-    if (typeof pkg.name === 'string' && pkg.name.startsWith('@deepseek-ai/')) return 'generic'
+    // 官方包：P-5 内容哈希校验（v5 修订：信任内容而非名字）
+    if (typeof pkg.name === 'string' && pkg.name.startsWith('@deepseek-ai/')) {
+      const hashResult = computePackageHash(packagePath, { maxFiles: 1000, maxSizeBytes: 50 * 1024 * 1024, timeoutMs: 10000 })
+      if (hashResult === null) return 'plugin'  // 超限/超时：严格判定
+      const hash = hashResult.hash
+      const version = typeof pkg.version === 'string' ? pkg.version : 'unknown'
+      const store = getBaseline()
+      const result = checkBaseline(pkg.name, version, hash, store)
+      if (result === 'first-seen') {
+        recordBaseline(pkg.name, version, hash, store)
+        saveBaseline(store)
+        return 'generic'  // 首次见到，信任
+      }
+      if (result === 'match') return 'generic'  // 内容一致，信任
+      // mismatch：同名但内容变了 → 严格判定
+      return 'plugin'
+    }
     const deps: Record<string, unknown> = {
       ...(pkg.dependencies as Record<string, unknown> | undefined),
       ...(pkg.peerDependencies as Record<string, unknown> | undefined),
@@ -144,7 +160,7 @@ export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; plug
 }
 
 /** scan_plugin：确定性静态扫描工具（verdict 只来自静态层，LLM 不参与）。 */
-export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeoutMs?: number } = {}): ReturnType<typeof defineTool> {
+export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeoutMs?: number; transitiveDeps?: boolean } = {}): ReturnType<typeof defineTool> {
   return defineTool({
     name: 'scan_plugin',
     description: 'Static-scan plugin code or an installed package for escape patterns (constructor-chain, direct process access), dynamic execution, hardcoded secrets, and Cordis/DSH bundle contract. Deterministic rule engine in an isolated process; returns a scorecard with verdict (critical/suspicious/clean) and staticScore. 静态层为确定性判定，LLM 不参与。',
@@ -184,6 +200,7 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
     async execute(args) {
       const { request, pluginName, pluginVersion } = buildRequest(args as unknown as ScanPluginArgs)
       request.osv = config.osvCheck === true
+      request.transitiveDeps = config.transitiveDeps === true
       // P2-1 系列：工具超时与 internal/plugin 同公式（按文件数放大、60s 封顶），配合 engine
       // 预算对齐（budget=min(files×2s, timeout-1.5s)），大包走 R8-skip 而不是被 kill 报错
       const fileCount = request.files?.length ?? 0

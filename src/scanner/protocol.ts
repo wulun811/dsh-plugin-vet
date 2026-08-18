@@ -21,6 +21,8 @@ export interface ScanRequest {
   osv?: boolean
   /** 宿主侧计划超时（与 scanner-bin/protocol.ts 同步）：engine 据此对齐扫描预算（P2-1）。 */
   timeoutMs?: number
+  /** P1：传递依赖 OSV 核对（opt-in，默认 false）：调用 upstream-radar CLI 扫描传递依赖树。 */
+  transitiveDeps?: boolean
 }
 
 export interface Finding {

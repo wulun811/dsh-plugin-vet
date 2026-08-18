@@ -1,6 +1,6 @@
 {
   "name": "@jieai/dsh-plugin-vet",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Plugin trust pipeline for deepseek-harness (DSH): deterministic static scan, runtime guard (T1 sentinel + T2 hooks), audit protocol skill, GUI shield. Alarm-only monitor, never an enforcer.",
   "license": "MIT",
   "author": {
@@ -35,6 +35,9 @@
   },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
+  "bin": {
+    "vet-gate": "lib/gate-cli.js"
+  },
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
@@ -43,6 +46,10 @@
     "./client": {
       "types": "./lib/client.d.ts",
       "default": "./lib/client.js"
+    },
+    "./gate": {
+      "types": "./lib/types/gate.d.ts",
+      "import": "./lib/gate.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"

@@ -15,6 +15,23 @@ import { zh } from './i18n.ts'
 /** 构建时注入：package.json version（scripts/build-client.mjs define）。 */
 declare const __VET_VERSION__: string
 
+/** 细滚动条样式（注入一次）。 */
+const SCROLLBAR_STYLE_ID = 'vet-scrollbar-style'
+function injectScrollbarStyle(): void {
+  if (typeof document === 'undefined') return
+  if (document.getElementById(SCROLLBAR_STYLE_ID) !== null) return
+  const style = document.createElement('style')
+  style.id = SCROLLBAR_STYLE_ID
+  style.textContent = `
+    .vet-scrollbar::-webkit-scrollbar { width: 4px; }
+    .vet-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .vet-scrollbar::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, 0.3); border-radius: 2px; }
+    .vet-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(128, 128, 128, 0.5); }
+    .vet-scrollbar { scrollbar-width: thin; scrollbar-color: rgba(128, 128, 128, 0.3) transparent; }
+  `
+  document.head.appendChild(style)
+}
+
 export interface VetAlarmWire {
   /** 去重键（source+kind+target），忽略/恢复按它寻址。 */
   id: string
@@ -22,10 +39,10 @@ export interface VetAlarmWire {
   message: string
   severity?: 'yellow' | 'red'
   pluginHint?: string
-  /** 报警目标路径（fs 类报警）。 */
-  target?: string
   /** 目标是否为会话日志文件（归因分层文案用，见 status.ts VetAlarm）。 */
   sessionLog?: boolean
+  /** 触发告警的目标（主机:端口、文件路径等），见 status.ts VetAlarm.target。 */
+  target?: string
   at: number
 }
 
@@ -415,20 +432,33 @@ function VetIntroPanel({ pal, width, t, dark }: { pal: MorandiPalette; width: nu
  * 报警详情窗口（独立窗口，放在主面板右侧）。
  * 每个报警可折叠/展开，带复制按钮（复制时带元信息）。
  */
-function VetAlarmPanel({ pal, width, t, alarms, dark, onDismiss }: {
+function VetAlarmPanel({ pal, width, t, alarms, dismissed, dark, onDismiss, onRestore }: {
   pal: MorandiPalette
   width: number
   t: T
   alarms: VetAlarmWire[]
+  dismissed: VetAlarmWire[]
   dark: boolean
   onDismiss: (id: string) => void
+  onRestore: (id: string) => void
 }): ReactNode {
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [hovered, setHovered] = useState(false)
+  const [dismissedCollapsed, setDismissedCollapsed] = useState(true)
+  const [expandedDismissedIds, setExpandedDismissedIds] = useState<Set<string>>(new Set())
 
   const toggleExpand = (id: string): void => {
     setExpandedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleDismissedExpand = (id: string): void => {
+    setExpandedDismissedIds(prev => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
@@ -489,7 +519,8 @@ function VetAlarmPanel({ pal, width, t, alarms, dark, onDismiss }: {
         fontSize: 12,
         color: pal.ink,
         lineHeight: 1.5,
-        overflowY: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
         overflow: 'hidden',
       }}
     >
@@ -548,8 +579,8 @@ function VetAlarmPanel({ pal, width, t, alarms, dark, onDismiss }: {
         transition: 'opacity 0.4s ease',
         opacity: hovered ? 0.5 : 0,
       }} />
-      <div style={{ position: 'relative', zIndex: 2, height: '100%', overflowY: 'auto' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+      <div style={{ position: 'relative', zIndex: 2, height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, flexShrink: 0 }}>
         <ShieldIcon level={alarms.length > 0 ? (alarms[0].severity === 'red' ? 'red' : 'yellow') : 'green'} color={alarms.length > 0 ? (alarms[0].severity === 'red' ? pal.rose : pal.ochre) : pal.sage} size={16} />
         <span style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.02em' }}>{t('alarmPanel.title')}</span>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: pal.muted, background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 9, padding: '1px 8px', boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
@@ -557,6 +588,7 @@ function VetAlarmPanel({ pal, width, t, alarms, dark, onDismiss }: {
         </span>
       </div>
 
+      <div className="vet-scrollbar" style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
       {alarms.length === 0 ? (
         <div style={{ color: pal.faint, padding: '20px 0', textAlign: 'center' }}>{t('alarmPanel.empty')}</div>
       ) : (
@@ -672,6 +704,99 @@ function VetAlarmPanel({ pal, width, t, alarms, dark, onDismiss }: {
         </ul>
       )}
       </div>
+
+      {/* 已忽略警报区域 */}
+      {dismissed.length > 0 && (
+        <div style={{ flexShrink: 0, borderTop: '1px solid ' + pal.borderSoft, paddingTop: 10, marginTop: 8 }}>
+          <div 
+            onClick={() => setDismissedCollapsed(v => !v)}
+            style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: 6,
+              cursor: 'pointer',
+              padding: '4px 0',
+              userSelect: 'none',
+            }}
+          >
+            <span style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: pal.faint, fontWeight: 700 }}>
+              {t('alerts.dismissed')}
+            </span>
+            <span style={{ fontSize: 11, color: pal.muted, background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 9, padding: '1px 8px', boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
+              {dismissed.length}
+            </span>
+            <span style={{ marginLeft: 'auto', fontSize: 10, color: pal.faint }}>
+              {dismissedCollapsed ? '▸' : '▾'}
+            </span>
+          </div>
+          {!dismissedCollapsed && (
+            <div className="vet-scrollbar" style={{ maxHeight: 120, overflowY: 'auto', marginTop: 6 }}>
+              <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+                {dismissed.map(a => {
+                  const expanded = expandedDismissedIds.has(a.id)
+                  return (
+                    <li
+                      key={a.id}
+                      style={{
+                        background: dark
+                          ? 'linear-gradient(180deg, rgba(52,50,45,0.9) 0%, rgba(46,44,40,0.9) 100%)'
+                          : 'linear-gradient(180deg, #F0EDE6 0%, #EBE8E1 100%)',
+                        borderRadius: 6,
+                        boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.8)'),
+                        padding: '6px 8px',
+                        marginBottom: 4,
+                        opacity: 0.8,
+                      }}
+                    >
+                      <div 
+                        onClick={() => toggleDismissedExpand(a.id)}
+                        style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          gap: 6,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <span style={{ fontSize: 10, fontWeight: 700, color: pal.faint }}>{a.kind}</span>
+                        <span style={{ fontSize: 10, color: pal.faint }}>{fmtTime(a.at)}</span>
+                        {a.pluginHint !== undefined && (
+                          <span style={{ fontSize: 9.5, color: pal.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
+                        )}
+                        <span style={{ fontSize: 9, color: pal.faint, marginLeft: 'auto' }}>
+                          {expanded ? '▾' : '▸'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); onRestore(a.id) }}
+                          title={t('alerts.restoreHint')}
+                          style={{
+                            border: '1px solid ' + pal.borderSoft,
+                            background: 'transparent',
+                            color: pal.muted,
+                            borderRadius: 4,
+                            padding: '0 6px',
+                            cursor: 'pointer',
+                            fontSize: 9,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {t('alerts.restore')}
+                        </button>
+                      </div>
+                      {expanded && (
+                        <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px solid ' + pal.borderSoft }}>
+                          <div style={{ fontSize: 10.5, color: pal.muted, wordBreak: 'break-word' }}>{a.message}</div>
+                        </div>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+      </div>
     </aside>
   )
 }
@@ -681,6 +806,7 @@ function VetAlarmPanel({ pal, width, t, alarms, dark, onDismiss }: {
  */
 export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   const t = typeof props.t === 'function' ? props.t : zhT
+  injectScrollbarStyle()
   const [snap, setSnap] = useState<ShieldSnapshotWire | null>(null)
   const [open, setOpen] = useState(false)
   const [loadedAt, setLoadedAt] = useState(0)
@@ -1193,55 +1319,6 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
             </>
           )}
 
-          {/* 已忽略分区：用户可恢复；徽标/等级已不含这些 */}
-          {snap !== null && snap.dismissed !== undefined && snap.dismissed.length > 0 && (
-            <>
-              <SectionLabel pal={pal}>{t('alerts.dismissed')} · {snap.dismissed.length}</SectionLabel>
-              <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
-                {snap.dismissed.slice(0, 5).map(a => (
-                  <li
-                    key={a.id}
-                    style={{
-                      background: dark
-                        ? 'linear-gradient(180deg, rgba(52,50,45,0.9) 0%, rgba(46,44,40,0.9) 100%)'
-                        : 'linear-gradient(180deg, #F0EDE6 0%, #EBE8E1 100%)',
-                      borderRadius: 8,
-                      boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.8)'),
-                      padding: '6px 10px',
-                      marginBottom: 5,
-                      opacity: 0.75,
-                    }}
-                    title={t('alerts.dismissNote')}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontSize: 10, fontWeight: 700, color: pal.faint }}>{a.kind}</span>
-                      <span style={{ fontSize: 10, color: pal.faint, flexShrink: 0 }}>{fmtTime(a.at)}</span>
-                      <button
-                        type="button"
-                        onClick={() => restoreAlarm(a.id)}
-                        title={t('alerts.restoreHint')}
-                        style={{
-                          marginLeft: 'auto',
-                          border: '1px solid ' + pal.border,
-                          background: 'transparent',
-                          color: pal.muted,
-                          borderRadius: 5,
-                          padding: '0 7px',
-                          cursor: 'pointer',
-                          fontSize: 10,
-                          flexShrink: 0,
-                        }}
-                      >
-                        {t('alerts.restore')}
-                      </button>
-                    </div>
-                    <div style={{ marginTop: 2, fontSize: 11, color: pal.muted, wordBreak: 'break-word' }}>{a.message}</div>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-
           {/* 底部 */}
           <div style={{ display: 'flex', alignItems: 'center', marginTop: 12, paddingTop: 8, borderTop: '1px solid ' + pal.borderSoft }}>
             {loadedAt > 0 && (
@@ -1269,7 +1346,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
         </div>
 
         {helpOpen && <VetIntroPanel pal={pal} width={280} t={t} dark={dark} />}
-        {alarmPanelOpen && <VetAlarmPanel pal={pal} width={340} t={t} alarms={alarms} dark={dark} onDismiss={dismissAlarm} />}
+        {alarmPanelOpen && <VetAlarmPanel pal={pal} width={340} t={t} alarms={alarms} dismissed={snap?.dismissed ?? []} dark={dark} onDismiss={dismissAlarm} onRestore={restoreAlarm} />}
         </div>
         ,
         document.body,

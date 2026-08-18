@@ -203,10 +203,10 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 5. **扫描耗时**：大插件包可能超时跳过（R8 info）；agent 审查按 vet-audit-protocol 步骤进行。
 6. **verdict 是静态层确定性判定**；agent 的主观判断记录在健康档案里，不构成安全保证。
 7. **/vet/status.json 无鉴权**：盾牌轮询需要匿名 GET，路由本身不鉴权——若 dsh web 绑定非回环地址，局域网内可读扫描结论/报警目标。vet 是 alarm-only 观测器，不做越权的访问控制；介意就保持回环绑定或信任网络（POST 开关守卫已有同源校验，无 Origin 拒绝）。
-8. **`@deepseek-ai/*` 默认信任**：未来若官方生态被攻破需收紧（v1 留开关）。scan_plugin 对官方包判 generic（能力触达面降级）——官方包供应链投毒时静态降级会掩盖 process 访问（已记录，P-5；官方包是平台本体，与 internal/plugin 守卫的官方豁免同口径）。vet 自身豁免同样收窄（P-3）：只按 name 匹配可被本地伪造（file: 安装无 registry 校验），现必须 realpath 验证目标就是当前 vet 实例，同名冒名包按最严格 plugin 判定。
-9. **R10 已知漏洞核对依赖 OSV 网络查询**：默认开启会把「包名+精确版本」发到 api.osv.dev（README 配置节有披露，介意可设 `osvCheck: false`）；网络失败/超时静默降级为跳过（不误拦）；仅对精确版本查询——`*`/`>=`/`^`/`~` 区间与无版本主包跳过（P3-1/P3-3；round-7 修正：`^`/`~` 不再剥前缀当下界精确版查询——下界受影响但实际已装版本已修复时会误报）；间接传递依赖不在核对面。
+8. **`@deepseek-ai/*` 内容哈希基线（P-5）**：对官方包计算内容哈希（SHA-256），与基线比对，防止包名伪造。首次见到自动落盘基线并信任；后续哈希不一致时撤销豁免并记录 red 报警。基线存储支持多版本共存（key = `name@version`），资源限制（1000 文件 / 50MB / 10s 超时）防 DoS。已知限制：基线文件存储在 `~/.dsh/vet/baseline.json`（0600 权限），若攻击者已拿到用户权限可篡改基线文件；多进程并发写可能导致记录丢失（下次扫描重新计算）。可通过 `contentBaseline: false` 关闭。
+9. **R10 已知漏洞核对**：直接依赖 OSV 查询（默认开启，`osvCheck: false` 关闭）+ 传递依赖 upstream-radar 扫描（默认关闭，`transitiveDeps: true` 开启）。OSV 查询把「包名+精确版本」发到 api.osv.dev；网络失败/超时静默降级。传递依赖扫描需要安装 upstream-radar（本地探测，不使用 npx），未安装时静默降级。OSV-T 规则 severity 为 medium（传递依赖利用面小于直接依赖）。
 10. **R11 只认 `fs.*` 形态**：解构/别名调用（`const { unlinkSync } = require('fs')`）与运行时路径漏检（已实测记录，属静态边界）。
-11. **T1/T2 是"防盗摄像头"不是"保险柜"**：抓明显搞事（内存/fork 炸弹、敏感路径操作、第三方 spawn），抓不了 worker 线程/原生插件/低流量慢外联；T2 对 ESM 具名导入快照、`process.binding` 等旁路不覆盖。
+11. **T1/T2 是"防盗摄像头"不是"保险柜"**：抓明显搞事（内存/fork 炸弹、敏感路径操作、第三方 spawn、网络出口），抓不了 worker 线程/原生插件/低流量慢外联；T2 对 ESM 具名导入快照、`process.binding` 等旁路不覆盖。**网络出口观测**（`networkEgress: true`，默认开启）：包装 http/https/net/http2/tls/dgram/fetch 模块，观测敏感主机/端口。已知限制：IP 直连绕过域名敏感列表；WebSocket 使用底层 net.Socket 会被捕获，但浏览器 WebSocket 不在观测范围；不观测 DNS 查询（性能开销大）。
 12. **T2 归因与降噪**：栈归因是 best-effort（共享服务/定时器跨插件会误归因）；官方包 spawn 默认不报警（能力授权）。
 13. **盾牌激活需要 `dsh web` 重启**：client-modules 在启动时扫描 `dsh.client` 声明；重启前浏览器不会加载盾牌，但 /vet/status.json 端点与运行时守卫（宿主侧）重启即生效。
 14. **运行时守卫默认关闭**（`runtimeGuard: 'off'`）：包装 fs/child_process 有性能与稳定代价，opt-in 开启。

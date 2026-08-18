@@ -217,7 +217,7 @@ describe('round-7（外部第二轮实测）回归：R2 括号形态、R4 原型
   })
   it('P-1: process.cwd/platform 只读成员（bridges 类无 bin 插件）→ info，verdict clean', () => {
     const dir = tmpFiles({
-      'package.json': JSON.stringify({ name: 'bridge-tool', dependencies: { '@deepseek-ai/dsh-tools': '^0.1.0-rc.6' } }),
+      'package.json': JSON.stringify({ name: 'bridge-tool', dependencies: { '@deepseek-ai/dsh-tools': '^0.1.0-rc.7' } }),
       'bridge.js': "const d = process.cwd(); const plat = process.platform; const v = process.versions.node",
     })
     try {

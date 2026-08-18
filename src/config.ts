@@ -27,6 +27,12 @@ export interface VetConfig {
     /** 诱饵目录；空 = $HOME/.dsh/.local（隐蔽位置，反蜜罐：目录/文件名/内容均无蜜罐关键词）。 */
     dir: string
   }
+  /** P-5：官方包内容哈希基线（默认开启）：对 @deepseek-ai/* 包计算内容哈希，与基线比对，防止包名伪造。 */
+  contentBaseline: boolean
+  /** P1：运行时网络出口观测（默认开启）：包装 http/https/net/http2/tls/dgram/fetch，观测插件发起的网络请求。 */
+  networkEgress: boolean
+  /** P1：传递依赖 OSV 核对（默认关闭）：调用 upstream-radar CLI 扫描传递依赖树。需要安装 upstream-radar。 */
+  transitiveDeps: boolean
 }
 
 export const VetConfigSchema: z<VetConfig> = z.object({
@@ -49,4 +55,7 @@ export const VetConfigSchema: z<VetConfig> = z.object({
     enabled: z.boolean().default(false),
     dir: z.string().default(''),
   }).default({ enabled: false, dir: '' }),
+  contentBaseline: z.boolean().default(true),
+  networkEgress: z.boolean().default(true),
+  transitiveDeps: z.boolean().default(false),
 })

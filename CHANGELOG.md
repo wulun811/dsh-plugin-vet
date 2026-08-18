@@ -3,6 +3,30 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.1.11] - 2026-08-18
+
+### Added
+
+- **P-5 官方包内容哈希基线**: 对 `@deepseek-ai/*` 包计算内容哈希（SHA-256），与基线比对，防止包名伪造。基线存储支持多版本共存（key = `name@version`），资源限制（1000 文件 / 50MB / 10s 超时）防 DoS，原子写防并发损坏。新增 `contentBaseline` 配置项（默认开启）。
+- **市场扫描闸门 (vet-gate)**: 新增 `runGate()` 编程接口和 `vet-gate` CLI，可被 `dsh-plugin-hub` 等安装流程回调。默认 `mode: report`（alarm-only），OSV 默认关闭（秒级反馈），超时按文件数动态计算。新增 `bin` 和 `exports` 字段。
+- **运行时网络出口观测**: 包装 http/https/net/http2/tls/dgram/fetch 模块，观测插件发起的网络请求。敏感主机（webhook.site, requestbin.com, ngrok.io 等）→ yellow，敏感端口（4444, 5555, 6666, 7777, 1337, 31337）→ red。dgram 特殊处理（实例方法包装）。新增 `networkEgress` 配置项（默认开启）。
+- **R10 传递依赖图扩展**: 新增 `transitiveDeps` 配置项（默认关闭），调用 upstream-radar CLI 扫描传递依赖树。使用 `createRequire` 探测本地安装（不使用 npx），OSV-T 规则 severity 降为 medium（传递依赖利用面小于直接依赖），upstream-radar 未安装时静默降级 + 首次 warn 提示。
+
+### Changed
+
+- **基线哈希使用相对路径**: `computePackageHash` 使用 `relative(packageRoot, fullPath)` 而非绝对路径，确保同一包在不同路径下安装产生相同哈希（跨机器一致性）。
+- **基线哈希支持二进制文件**: 使用 Buffer 读取文件内容，避免 utf8 编码损坏二进制数据。
+- **排序使用字节序**: 基线文件排序使用 `<` / `>` 比较而非 `localeCompare`，确保跨平台排序一致性。
+- **mismatch 时记录 red 报警**: 官方包内容哈希与基线不一致时，通过 `status?.record()` 记录 red 报警，让用户知道官方包可能被篡改。
+
+### Fixed
+
+- **符号链接检测**: `computePackageHash` 使用 `lstatSync` 而非 `statSync`，正确检测符号链接并跳过。
+- **ESM 模块兼容**: `content-baseline.ts` 直接导入 `mkdirSync` 而非使用 `require('node:fs')`；`engine.ts` 使用 `createRequire` 而非 `require.resolve`。
+- **dgram.send 参数形态**: 支持两种形态（`msg, port, address` 和 `msg, offset, length, port, address`），正确提取目标端口和地址。
+- **upstream-radar 输出校验**: 添加 `Array.isArray(radarResult.vulnerabilities)` 检查，防止输出格式不符预期时崩溃。
+- **saveBaseline 目录**: 使用 `dirname(baselinePath())` 而非硬编码路径，确保环境变量 `DSH_PLUGIN_VET_BASELINE_DIR` 生效时目录一致。
+
 ## [0.1.10] - 2026-08-17
 
 ### Added

@@ -7,11 +7,17 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
 import cp from 'node:child_process'
+import http from 'node:http'
+import https from 'node:https'
+import net from 'node:net'
+import http2 from 'node:http2'
+import tls from 'node:tls'
+import dgram from 'node:dgram'
 import type { Context } from '@deepseek-ai/cordis'
 import type { VetConfig } from '../config.js'
 import { VetStatus, type VetAlarm } from './status.js'
 import type { WatchAlarm } from './runtime-watch.js'
-import { DEFAULT_HOOK_CONFIG, patchModule, setRootIndexing, type HookAlarm } from './runtime-hooks.js'
+import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, type HookAlarm } from './runtime-hooks.js'
 import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../invariant.js'
 import { ensureHoneypot } from './honeypot.js'
@@ -82,10 +88,7 @@ function killSidecarFromEnv(logger: { warn: (m: string) => void }): void {
   logger.warn(`vet: 运行时守卫关闭，终止哨兵 (pid=${pid})`)
 }
 
-/** 官方包信任（能力授权）：T2 对官方归因的 spawn 降噪（报警留给第三方）。 */
-function isOfficial(name: string): boolean {
-  return name.startsWith('@deepseek-ai/') || name === PACKAGE_NAME
-}
+// P2-5 修复：isOfficial 统一从 runtime-hooks.ts 导入（避免包名变更时一处遗漏）
 
 /**
  * A9 归因排除：vet 自身不参与 T2 栈归因。包装器帧（runtime-hooks.js）永远是报警栈的栈顶，
@@ -362,6 +365,70 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     disposers.push(patchModule(promisesMod, 'fs', hookCfg, sink, rootIndex))
   }
   disposers.push(patchModule(cp as unknown as Record<string, unknown>, 'child_process', hookCfg, sink, rootIndex))
+
+  // ── 网络出口观测（P1 特性）─────────────────────────────────────
+  if (config.networkEgress !== false) {
+    disposers.push(patchNetworkModule(http as unknown as Record<string, unknown>, 'http', hookCfg, sink, rootIndex))
+    disposers.push(patchNetworkModule(https as unknown as Record<string, unknown>, 'https', hookCfg, sink, rootIndex))
+    disposers.push(patchNetworkModule(net as unknown as Record<string, unknown>, 'net', hookCfg, sink, rootIndex))
+    disposers.push(patchNetworkModule(http2 as unknown as Record<string, unknown>, 'http2', hookCfg, sink, rootIndex))
+    disposers.push(patchNetworkModule(tls as unknown as Record<string, unknown>, 'tls', hookCfg, sink, rootIndex))
+    
+    // dgram 需要特殊处理：createSocket() 返回实例，send 是实例方法
+    const originalCreateSocket = dgram.createSocket
+    dgram.createSocket = function(...args: unknown[]) {
+      const socket = (originalCreateSocket as Function).apply(this, args)
+      const originalSend = socket.send
+      socket.send = function(...sendArgs: unknown[]) {
+        // dgram.send 有两种形态：
+        // 形态1: socket.send(msg, offset, length, port, address, callback)
+        // 形态2: socket.send(msg, port, address, callback)
+        let port: number | undefined
+        let address: string | undefined
+        
+        if (sendArgs.length >= 5 && typeof sendArgs[1] === 'number' && typeof sendArgs[2] === 'number' && typeof sendArgs[3] === 'number' && typeof sendArgs[4] === 'string') {
+          // 形态1: msg, offset, length, port, address
+          port = sendArgs[3] as number
+          address = sendArgs[4] as string
+        } else if (sendArgs.length >= 3 && typeof sendArgs[1] === 'number' && typeof sendArgs[2] === 'string') {
+          // 形态2: msg, port, address
+          port = sendArgs[1] as number
+          address = sendArgs[2] as string
+        }
+        
+        if (port !== undefined && address !== undefined) {
+          const alarm = classifyNetworkOp('dgram', 'send', [{ host: address, port }], hookCfg)
+          if (alarm !== null && !(isRootIndexing() || isVetSelfIo())) {
+            let hint: string | undefined
+            try { hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
+            if (hint === undefined || !isOfficial(hint)) {
+              sink({ ...alarm, pluginHint: hint })
+            }
+          }
+        }
+        return (originalSend as Function).apply(this, sendArgs)
+      }
+      return socket
+    }
+    disposers.push(() => { dgram.createSocket = originalCreateSocket })
+    
+    // fetch 是 globalThis 上的，需要单独处理
+    const originalFetch = globalThis.fetch
+    if (typeof originalFetch === 'function') {
+      globalThis.fetch = function vetFetchWrapper(...args: unknown[]) {
+        const alarm = classifyNetworkOp('http', 'fetch', args, hookCfg)
+        if (alarm !== null && !(isRootIndexing() || isVetSelfIo())) {
+          let hint: string | undefined
+          try { hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
+          if (hint === undefined || !isOfficial(hint)) {
+            sink({ ...alarm, pluginHint: hint })
+          }
+        }
+        return (originalFetch as Function).apply(this, args)
+      }
+      disposers.push(() => { globalThis.fetch = originalFetch })
+    }
+  }
 
   // 幂等：ctx.on('dispose') 与 prevGuardDisposer 都可能触发同一 disposer（重载时旧 ctx
   // 先 dispose、新 apply 再调 prevGuardDisposer）——先到者生效，重复执行是 no-op。

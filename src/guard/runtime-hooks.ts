@@ -85,6 +85,10 @@ let rootIndexing = false
 export function setRootIndexing(active: boolean): void {
   rootIndexing = active
 }
+/** 检查当前是否在归因阶段（用于网络模块包装）。 */
+export function isRootIndexing(): boolean {
+  return rootIndexing
+}
 
 /**
  * vet 自身 IO 直通标志（P2-6）：vet 的已知自操作（读/写自己在 ~/.dsh/profiles 下的
@@ -94,6 +98,10 @@ export function setRootIndexing(active: boolean): void {
  * 影响自身调用栈内的同步执行）。
  */
 let vetSelfIo = false
+/** 检查当前是否在 vet 自身 IO 期间（用于网络模块包装）。 */
+export function isVetSelfIo(): boolean {
+  return vetSelfIo
+}
 /** 在 fn 执行期间让 T2 包装器直通 vet 自身 IO（恢复式：嵌套调用安全）。 */
 export function withVetSelfIo<T>(fn: () => T): T {
   const prev = vetSelfIo
@@ -387,6 +395,208 @@ export function patchModule(
           hint = undefined
         }
         sink({ ...alarm, pluginHint: hint })
+      }
+      return (fn as (...a: unknown[]) => unknown).apply(this, args)
+    }
+    mod[opName] = wrapped
+  }
+  return () => {
+    for (const [opName, fn] of original) mod[opName] = fn
+  }
+}
+
+// ── 网络出口观测（P1 特性）─────────────────────────────────────
+
+/** 官方包信任（能力授权）：网络出口观测对官方归因的报警降噪。
+ * P2-5 修复：统一导出，runtime-guard.ts 复用（避免包名变更时一处遗漏）。
+ */
+export function isOfficial(name: string): boolean {
+  return name.startsWith('@deepseek-ai/') || name === '@jieai/dsh-plugin-vet'
+}
+
+/**
+ * 网络模块的操作名集合。
+ * P2-10：必须包含 'get'——http.get/https.get 是独立导出函数，其内部调用的是模块闭包里的
+ * request（非 module.exports.request），只包装 request/connect/createConnection 会让
+ * https.get('https://webhook.site/...') 这类外泄调用完全绕过出口监控（实测逃逸）。
+ * tls/net 没有 get 导出，patchNetworkModule 的 typeof fn==='function' 守卫会跳过，安全。
+ */
+const NET_OPS = new Set(['request', 'connect', 'createConnection', 'get'])
+
+/** 敏感主机列表（v5 修订：移除 gist.github.com，合法服务）。 */
+const SENSITIVE_HOSTS = [
+  'webhook.site', 'requestbin.com', 'ngrok.io', 'localtunnel.me',
+  'pastebin.com',
+  'api.binance.com', 'api.coinbase.com',
+]
+
+/** 敏感端口（v5 修订：移除 8888，Jupyter 默认端口）。 */
+const SENSITIVE_PORTS = new Set([4444, 5555, 6666, 7777, 1337, 31337])
+
+/** 白名单主机（不报警）。 */
+const EGRESS_ALLOWLIST = [
+  'registry.npmjs.org',
+  'api.github.com',
+  'cdn.jsdelivr.net',
+  'unpkg.com',
+]
+
+/**
+ * 从网络模块参数中提取目标（hostname, port, path）。
+ * 处理多种参数形态：
+ * - http.request(urlString, ...)
+ * - http.request(urlObject, ...)
+ * - http.request(options, ...)
+ * - net.connect({ host, port }, ...)
+ * - net.connect(port, host?, ...)
+ */
+export function extractNetworkTarget(args: unknown[]): { hostname: string; port?: number; path: string } | null {
+  if (args.length === 0) return null
+  
+  const first = args[0]
+  
+  // 字符串 URL
+  if (typeof first === 'string') {
+    try {
+      const url = new URL(first)
+      return {
+        hostname: url.hostname,
+        port: url.port ? parseInt(url.port, 10) : undefined,
+        path: url.pathname + url.search,
+      }
+    } catch {
+      return null
+    }
+  }
+  
+  // URL 对象
+  if (first instanceof URL) {
+    return {
+      hostname: first.hostname,
+      port: first.port ? parseInt(first.port, 10) : undefined,
+      path: first.pathname + first.search,
+    }
+  }
+  
+  // options 对象
+  if (typeof first === 'object' && first !== null) {
+    const opts = first as Record<string, unknown>
+    
+    // net.connect({ port, host }) 形态
+    if (typeof opts.port === 'number') {
+      const rawHost = typeof opts.host === 'string' ? opts.host : (typeof opts.hostname === 'string' ? opts.hostname : 'localhost')
+      return {
+        // P2-7 修复：hostname 统一小写（防止 {host:'Webhook.Site'} 逃逸敏感主机匹配）
+        hostname: rawHost.toLowerCase(),
+        port: opts.port,
+        path: typeof opts.path === 'string' ? opts.path : '/',
+      }
+    }
+    
+    // http.request({ hostname, port, path }) 形态
+    if (typeof opts.hostname === 'string' || typeof opts.host === 'string') {
+      const rawHost = (typeof opts.hostname === 'string' ? opts.hostname : opts.host) as string
+      return {
+        // P2-7 修复：hostname 统一小写
+        hostname: rawHost.toLowerCase(),
+        port: typeof opts.port === 'number' ? opts.port : (typeof opts.port === 'string' ? parseInt(opts.port, 10) : undefined),
+        path: typeof opts.path === 'string' ? opts.path : '/',
+      }
+    }
+    
+    // net.connect({ path }) Unix socket 形态
+    if (typeof opts.path === 'string' && opts.hostname === undefined && opts.host === undefined) {
+      return {
+        hostname: 'unix-socket',
+        path: opts.path,
+      }
+    }
+  }
+  
+  // net.connect(port, host?) 形态
+  if (typeof first === 'number') {
+    const rawHost = typeof args[1] === 'string' ? args[1] as string : 'localhost'
+    return {
+      // P2-7 修复：hostname 统一小写
+      hostname: rawHost.toLowerCase(),
+      port: first,
+      path: '/',
+    }
+  }
+  
+  return null
+}
+
+/**
+ * 网络操作分类函数。
+ */
+export function classifyNetworkOp(
+  moduleName: string,
+  opName: string,
+  args: unknown[],
+  _cfg: HookConfig
+): HookAlarm | null {
+  const target = extractNetworkTarget(args)
+  if (target === null) return null
+  
+  // 回环地址不报警
+  if (target.hostname === 'localhost' || target.hostname === '127.0.0.1' || target.hostname === '::1') return null
+  
+  // 白名单主机不报警
+  if (EGRESS_ALLOWLIST.includes(target.hostname)) return null
+  
+  // Unix socket 不报警（本地通信）
+  if (target.hostname === 'unix-socket') return null
+  
+  // 敏感端口 → red（反向 shell 特征）
+  if (target.port !== undefined && SENSITIVE_PORTS.has(target.port)) {
+    return {
+      severity: 'red',
+      kind: 'net-egress',
+      message: `网络出口：${moduleName}.${opName} → ${target.hostname}:${target.port}（敏感端口）`,
+      target: `${target.hostname}:${target.port}`,
+    }
+  }
+  
+  // 敏感主机 → yellow
+  if (SENSITIVE_HOSTS.some(h => target.hostname === h || target.hostname.endsWith('.' + h))) {
+    return {
+      severity: 'yellow',
+      kind: 'net-egress',
+      message: `网络出口：${moduleName}.${opName} → ${target.hostname}${target.path}（敏感主机）`,
+      target: target.hostname + target.path,
+    }
+  }
+  
+  return null
+}
+
+/**
+ * 包装网络模块（独立于 patchModule，因为网络模块的操作名和参数形态与 fs 完全不同）。
+ */
+export function patchNetworkModule(
+  mod: Record<string, unknown>,
+  moduleName: string,
+  cfg: HookConfig,
+  sink: (alarm: HookAlarm) => void,
+  rootIndex: () => Map<string, string>,
+): () => void {
+  const original = new Map<string, unknown>()
+  for (const opName of NET_OPS) {
+    const fn = mod[opName]
+    if (typeof fn !== 'function') continue
+    original.set(opName, fn)
+    const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+      if (rootIndexing || vetSelfIo) {
+        return (fn as (...a: unknown[]) => unknown).apply(this, args)
+      }
+      const alarm = classifyNetworkOp(moduleName, opName, args, cfg)
+      if (alarm !== null) {
+        let hint: string | undefined
+        try { hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
+        if (hint === undefined || !isOfficial(hint)) {
+          sink({ ...alarm, pluginHint: hint })
+        }
       }
       return (fn as (...a: unknown[]) => unknown).apply(this, args)
     }

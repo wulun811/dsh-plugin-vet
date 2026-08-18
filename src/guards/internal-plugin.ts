@@ -9,6 +9,7 @@ import { PACKAGE_NAME } from '../invariant.js'
 import { hasAuditRecord, auditRequiredMessage } from '../audit/archive.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
 import type { VetStatus } from '../guard/status.js'
+import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline } from './content-baseline.js'
 
 /** typert loader 为 Fiber 附加的 entry 元数据（loader.ts:412 同款访问）。 */
 type VetFiber = Fiber & { entry?: { options?: { name?: string } } }
@@ -31,11 +32,40 @@ function readInstalledVersion(root: string): string | undefined {
   })
 }
 
-function isExempt(packageName: string, config: VetConfig): boolean {
-  if (packageName.startsWith('@deepseek-ai/')) return true
+function isExempt(packageName: string, packageRoot: string | undefined, config: VetConfig, status?: VetStatus): boolean {
   // cordis builtin 命名空间（cordis:group 等框架内置分组入口，非可安装的第三方插件）——不扫描不审计
   if (packageName.startsWith('cordis:')) return true
-  return config.allowlist.includes(packageName)
+  if (config.allowlist.includes(packageName)) return true
+  if (!packageName.startsWith('@deepseek-ai/')) return false
+  if (!config.contentBaseline) return true  // 配置关闭时维持旧行为
+  if (packageRoot === undefined) return false  // 无法解析包根，不豁免
+
+  // 官方包：内容哈希校验（P-5）
+  const hashResult = computePackageHash(packageRoot, { maxFiles: 1000, maxSizeBytes: 50 * 1024 * 1024, timeoutMs: 10000 })
+  if (hashResult === null) return false  // 超限/超时：不豁免
+  const hash = hashResult.hash
+  const version = readInstalledVersion(packageRoot) ?? 'unknown'
+  const store = getBaseline()
+  const result = checkBaseline(packageName, version, hash, store)
+  if (result === 'first-seen') {
+    recordBaseline(packageName, version, hash, store)
+    saveBaseline(store)  // 原子写
+    return true  // 首次见到，自动信任（v5 修订：砍掉白名单，与 VET 信任官方包的定位一致）
+  }
+  if (result === 'match') return true  // 内容一致，信任
+  // mismatch：同名但内容变了 → 不豁免，记录 red 报警
+  const msg = `官方包 ${packageName}@${version} 内容哈希与基线不一致（疑似供应链篡改）`
+  status?.record({
+    id: `baseline-mismatch:${packageName}`,
+    severity: 'red',
+    source: 'scan',
+    kind: 'baseline-mismatch',
+    message: msg,
+    target: packageName,
+    pluginHint: packageName,
+    at: Date.now(),
+  })
+  return false
 }
 
 /**
@@ -51,7 +81,6 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     if (typeof entryName !== 'string') return
     if (entryName === PACKAGE_NAME) return
     if (!config.autoScan) return
-    if (isExempt(entryName, config)) return
 
     // DSH 把插件装进 profile 的 node_modules（vet 可能被符号链接，realpath 解析不到）→
     // 用 loader 的解析基准（ctx.baseUrl = profile 目录）定位第三方插件根目录。
@@ -59,6 +88,10 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // 扫描复用同一 root，避免重复 resolve。
     const profileDir = (ctx as { baseUrl?: string }).baseUrl
     const root = resolvePackageRoot(entryName, profileDir)
+    
+    // P-5：isExempt 需要 packageRoot 做内容哈希校验
+    if (isExempt(entryName, root, config, status)) return
+    
     const installedVersion = root === undefined ? undefined : readInstalledVersion(root)
 
     // D30 强制层：requireAudit 开启时，无健康档案的第三方插件在加载时被拦截（deny）/报警（report）。

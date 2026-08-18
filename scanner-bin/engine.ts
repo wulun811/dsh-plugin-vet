@@ -4,7 +4,8 @@
  * @module dsh-plugin-vet/scanner-engine
  */
 import { readFileSync } from 'node:fs'
-import { basename } from 'node:path'
+import { basename, dirname } from 'node:path'
+import { createRequire } from 'node:module'
 import { parseSource } from './ast.js'
 import { executeRules } from './rules/index.js'
 import { runPackageJson } from './rules/supply-chain.js'
@@ -204,6 +205,10 @@ export function scan(request: ScanRequest): ScanResponse {
 
 export interface OsvCheckOptions {
   osvTimeoutMs?: number
+  /** P2-10：OSV 总预算（宿主超时余量）。提供时逐查询超时按剩余预算动态收窄且 OSV 总耗时不超过预算，
+   * 避免超出宿主 kill 超时 → 子进程被 SIGKILL → 扫描失败（deny 模式 fail-closed 误拦合法包）。
+   * 直调引擎（无 timeoutMs）时不提供，沿用旧的每查询固定超时、无总预算行为。 */
+  osvBudgetMs?: number
   fetchImpl?: typeof fetch
 }
 
@@ -276,12 +281,22 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions): Promise<Fi
   ].filter(t => isExactVersion(t.version)) // filter: only exact versions take part in OSV checks
   const vulns: OsvVuln[] = []
   const seenVuln = new Set<string>()
-  for (const target of targets) {
+  // P2-10：OSV 总预算（宿主超时余量）——逐查询超时按「剩余预算 / 剩余目标数」动态收窄（下限
+  // 500ms、上限 4000ms），并保证 OSV 总耗时不超过预算，提前 break 避免超出宿主 kill 超时
+  // 导致子进程被 SIGKILL → 扫描失败（deny 模式 fail-closed 误拦合法包 / report 误报 scan-fail）。
+  const budgetEnd = opts.osvBudgetMs !== undefined ? Date.now() + opts.osvBudgetMs : undefined
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i]
+    if (budgetEnd !== undefined && Date.now() >= budgetEnd) break
+    const remaining = budgetEnd !== undefined ? budgetEnd - Date.now() : undefined
+    const perQuery = remaining !== undefined
+      ? Math.max(500, Math.min(4000, Math.floor(remaining / (targets.length - i))))
+      : (opts.osvTimeoutMs ?? 4000)
     let found: OsvVuln[]
     try {
       // F15：带 version 查询——OSV 服务端按 affected ranges 过滤，已修复版本不再误报
       found = await queryOsv(target.name, {
-        timeoutMs: opts.osvTimeoutMs,
+        timeoutMs: perQuery,
         fetchImpl: opts.fetchImpl,
         version: target.version,
       })
@@ -311,11 +326,18 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions): Promise<Fi
  * findings 并重算 score/verdict；网络失败静默降级为纯静态结果。
  */
 export async function scanWithOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promise<ScanResponse> {
+  const start = Date.now()
   const base = scan(request)
   if (!base.ok || base.report === undefined) return base
-  const osvFindings = await checkOsv(request, opts)
-  if (osvFindings.length === 0) return base
-  const findings = [...base.report.findings, ...osvFindings]
+  // P2-10：从宿主超时推导 OSV 总预算，确保 OSV 网络相位不超出宿主 kill 超时（见 checkOsv）。
+  // 预算 = 宿主超时 - 静态扫描耗时 - 引擎余量 - 输出余量；缺省（直调引擎、无 timeoutMs）不改行为。
+  let osvBudgetMs = opts.osvBudgetMs
+  if (osvBudgetMs === undefined && typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs)) {
+    osvBudgetMs = Math.max(1000, request.timeoutMs - (Date.now() - start) - ENGINE_KILL_MARGIN_MS - 500)
+  }
+  const supplyChainFindings = await checkSupplyChain(request, { ...opts, osvBudgetMs })
+  if (supplyChainFindings.length === 0) return base
+  const findings = [...base.report.findings, ...supplyChainFindings]
   const report: ScanReport = {
     ...base.report,
     findings,
@@ -323,4 +345,103 @@ export async function scanWithOsv(request: ScanRequest, opts: OsvCheckOptions = 
     verdict: computeVerdict(findings),
   }
   return { ok: true, report }
+}
+
+// ── 传递依赖扫描（P1 特性）─────────────────────────────────────
+
+import { execFile } from 'node:child_process'
+
+interface UpstreamRadarResult {
+  vulnerabilities: { id: string; package: string; severity: string; source: string }[]
+}
+
+// 创建 require 函数（ESM 模块中需要 createRequire）
+const require = createRequire(import.meta.url)
+
+// v5 修订（专家1 #5）：不使用 npx 自动安装，先探测本地安装路径
+async function queryUpstreamRadar(
+  packageRoot: string,
+  timeoutMs: number = 15_000
+): Promise<UpstreamRadarResult | null> {
+  // 优先使用本地安装的 upstream-radar（避免 npx 自动安装的供应链风险）
+  let radarPath: string | null = null
+  try {
+    radarPath = require.resolve('upstream-radar/bin/upstream-radar.js', { paths: [packageRoot] })
+  } catch {
+    // 未安装：静默降级
+    return null
+  }
+  
+  return new Promise((resolve) => {
+    execFile(radarPath!, ['scan', packageRoot, '--json'], {
+      timeout: timeoutMs,
+      maxBuffer: 10 * 1024 * 1024,  // v5 修订（专家2 #10）：增加到 10MB
+    }, (err, stdout) => {
+      if (err !== null || stdout === '') {
+        resolve(null)  // 超时/失败：静默降级
+        return
+      }
+      try {
+        resolve(JSON.parse(stdout) as UpstreamRadarResult)
+      } catch {
+        resolve(null)
+      }
+    })
+  })
+}
+
+let upstreamRadarWarned = false
+
+/**
+ * 供应链检查：直接依赖 OSV + 传递依赖 upstream-radar。
+ */
+async function checkSupplyChain(
+  request: ScanRequest,
+  opts: OsvCheckOptions & { transitiveDeps?: boolean }
+): Promise<Finding[]> {
+  // 1. 现有逻辑：插件自身 + 直接依赖 OSV 查询（osvBudgetMs 随 opts 透传，约束 OSV 总预算）
+  const directFindings = await checkOsv(request, opts)
+
+  // 2. 新增：传递依赖扫描（调用 upstream-radar CLI）
+  if (request.transitiveDeps !== true) return directFindings
+  const pkgFile = request.files?.find(f => basename(f) === 'package.json')
+  if (pkgFile === undefined) return directFindings
+  const pkgRoot = dirname(pkgFile)
+
+  // P2-10：传递依赖 CLI 超时同样受 OSV 总预算约束（缺省 15s），避免拖垮宿主 kill 超时
+  const radarTimeout = opts.osvBudgetMs !== undefined
+    ? Math.min(opts.osvBudgetMs, opts.osvTimeoutMs ?? 15_000)
+    : (opts.osvTimeoutMs ?? 15_000)
+  const radarResult = await queryUpstreamRadar(pkgRoot, radarTimeout)
+  if (radarResult === null) {
+    // v5 修订（专家2 #9）：首次调用时给出友好提示
+    if (!upstreamRadarWarned) {
+      console.warn('[vet] transitiveDeps enabled but upstream-radar not installed or failed, skipping transitive dependency scan')
+      upstreamRadarWarned = true
+    }
+    return directFindings  // 未安装/超时：静默降级
+  }
+
+  // 形状校验：确保 vulnerabilities 字段存在且为数组
+  if (!Array.isArray(radarResult.vulnerabilities)) {
+    return directFindings  // 输出格式不符合预期，静默降级
+  }
+
+  const transitiveFindings: Finding[] = []
+  const seenVuln = new Set<string>()
+
+  for (const vuln of radarResult.vulnerabilities.slice(0, 20)) {
+    if (seenVuln.has(vuln.id)) continue
+    seenVuln.add(vuln.id)
+    transitiveFindings.push({
+      rule: 'OSV-T',  // 新规则名：传递依赖已知漏洞
+      severity: 'medium',  // v5 修订（专家1 #7 + 专家2 #11）：传递依赖利用面小于直接依赖，权重降为 medium
+      confidence: 'certain',
+      message: `传递依赖已知漏洞 ${vuln.id}（${vuln.package}，来源 ${vuln.source}）`,
+      evidence: '',
+      file: 'package.json',
+    })
+  }
+
+  return [...directFindings, ...transitiveFindings]
 }
