@@ -3,6 +3,220 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.1.16] - 2026-08-19
+
+### Security hardening (post-review batch — C1–C4 critical, M5–M9 major/minor, rule patches)
+
+- **C1 — publish artifact hardening**: the host-side plugin is now published as a single esbuild bundle
+  (`lib/index.bundle.js`); the `files` whitelist no longer ships `lib/{guard,guards,tools,audit,skills,
+  config,invariant}`. All module-level guard state (`setRootIndexing`, `withVetSelfIo`, `confirmBlock`,
+  `canaryStore`, `capabilityDiff`, …) is closure-private — a malicious plugin can no longer reach vet's
+  internals via absolute-path `require` (previously verified reachable: full in-process T2/N7/N4/N1 disable,
+  `confirmBlock.setMode('off')`, permanent `rootIndexing` blind). Tests still run against per-file `lib/**`;
+  `test/bundle.test.ts` verifies bundle shape + closure privacy.
+- **C2 — ESM named-import T2 blind spot made explicit**: Node's ESM↔CJS interop snapshots named exports, so
+  `import { readFileSync } from 'node:fs'` bypasses all T2 hooks (empirically verified for fs, fs/promises and
+  named network imports). The N1 manifest now flags `esmNamedBuiltins` for named/namespace imports of
+  fs/fs·promises/child_process/http/https/http2/net/tls/dgram/worker_threads/vm; with `runtimeGuard: watch`
+  the guard records a yellow `esm-guard-coverage` notice for such plugins (T1 sentinel + audit protocol remain
+  the runtime defense — documented boundary, no silent coverage illusion).
+- **C3 — cache & store env hardening**: `DSH_PLUGIN_VET_BASELINE_DIR` and `DSH_PLUGIN_VET_CACHE_DIR` are
+  snapshotted at module load (vet loads before third-party plugins), so in-process tampering of
+  `process.env` can no longer redirect the capability store, baseline or scanner cache (previously read
+  dynamically per call — verified redirect). The scanner cache now verifies a host-injected per-process random
+  nonce (stored with the entry, checked on read): an attacker who can compute the content-addressed cache key
+  can no longer pre-seed a forged `clean` report into the deny path (verified forgery previously succeeded).
+  Redirect is now explicit (`request.cacheDir`, test setters).
+- **C4 — attribution tamper detection**: vet snapshots `Error.prepareStackTrace` at module load; when it is
+  replaced (forged official frames) or `Error.stackTraceLimit` is dropped below 2 (hint-less → N7 skip,
+  family-3/4 suppress), stack attribution is untrustworthy. Sensitive operations then emit a red
+  `attribution-tampered` alarm (withholding attribution is itself an attack signal) and N7 family-2
+  credential destruction still blocks via a sentinel identity (previously `hint === undefined` bypassed the
+  only interception).
+- **M5 — T2 ops surface**: added `symlink/link/chmod/chown/mkdir/mkdtemp/utimes/lutimes` (+Sync) to the
+  write surface (symlink-target redirection, permission widening, `/etc/cron.d` placement were previously
+  invisible) and `lstat/lstatSync` to the probe surface (symlink reconnaissance).
+- **M6 — R9 fork-bomb**: `spawnSync/execSync/execFileSync` added to the in-loop spawn set
+  (`while (1) { execSync() }` previously evaded R9-1).
+- **M7 — vet-store tamper self-check**: capability and baseline stores keep an in-process hash of vet's own
+  writes; a load whose content no longer matches (external overwrite by an in-process plugin — neutering
+  upgrade-diff or poisoning the baseline) sets a flag surfaced as a yellow `vet-store-tamper` alarm on the
+  next scan completion.
+- **M8 — N6 sensitive-path matching**: `isSensitiveFsPath` now matches path *segments* (exact, or `-`/`.`
+  bounded prefix/suffix) instead of substring — `my-credentials-manager`, `application-credentials-rotation.log`
+  etc. no longer false-escalate to red (prefix hits like `shadow-utils` remain flagged, consistent with the
+  T2 keyword semantics).
+- **M9 — sidecar PID reuse protection**: before SIGTERM, the guard verifies `/proc/<pid>/cmdline` contains the
+  vet-sidecar marker (Linux); on mismatch the kill is refused and a warning is logged — an exited sidecar whose
+  PID was reused by another process is no longer killed.
+- **Rule patches (ENGINE static-v11 → static-v12)**: R2 finds indirect/global eval forms (`globalThis.eval`,
+  `window.eval`, `globalThis['eval']`, `(0, eval)`/`(0, Function)`) and folds `require('child' + '_process')`;
+  R3 classifies `globalThis.process.exit/mainModule/…` by the same member policy as bare `process.*`
+  (previously defaulted to info); R4 accepts `Reflect.defineProperty`; R9's ReDoS parser skips escaped
+  parentheses in group-depth counting; R10 adds the npm `prepare` install hook; R14 adds python/ruby/perl
+  `-c/-e` download-and-exec patterns; R15 recognizes `undici.request/stream/pipeline/upgrade`.
+
+### dsh.so 静态注册站接入准备（scanner-only 集成）
+
+- **R3 测试/CI 文件上下文降级**：`coverage.*`、`*.test.*`、`*.spec.*`、`*.e2e.*`、`vitest.*`、`jest.*` 及 `test/ tests/ spec/ specs/ __tests__/ scripts/ .github/` 目录内的 `process` 访问按能力触达面降 info（不进 verdict），与 bin/appShape/generic 同构，但比 pilot 的“全部降级”更精准——真实源码里的 `process.exit` 仍 critical（详见 `docs/integration-dsh-so.md`）。
+- **R12 `scanBasis` 字段**：`ScanRequest` 新增 `scanBasis: 'git' | 'npm'`；git 基础上“声明入口文件缺失/无入口”降 info（构建产物通常不提交），npm 基础保持 high（发布物契约失败为真）；`scanBasis` 并入缓存 key，git/npm 结果互不污染。
+- **`scan_plugin` 工具暴露 `capabilities`**：output schema 和 execute 返回值新增 `capabilities` 字段（N1 能力清单：hosts/fsPaths/spawnCmds/imports/hasNetwork/hasExec/esmNamedBuiltins），供门户/审计工具入库作能力索引；code 模式无文件上下文时不输出。
+
+### Fixed: bundle-form 包根定位回归（C1 伴生，启动阻断）
+
+- **症状**：main 切到打包版 `lib/index.bundle.js` 后（C1），按旧逐文件形态固定上溯两级的包根定位
+  在 bundle 形态多上一级越出包根 —— `loadAuditProtocolContent` 读 `AUDIT_PROTOCOL.md` 直接 ENOENT，
+  重启 DSH 启动失败；同类固定级数定位还潜伏在 `SELF_ROOT`（scan-plugin）、`SCANNER_BIN`
+  （scanner/client）、T1 哨兵 sidecar 路径（runtime-guard）三处。
+- **修复**：新增 `src/pkg-root.ts` —— `resolvePkgRoot` 向上搜索 package.json 定位包根、
+  `resolveVetFile` 按候选目录存在性（lib/ → 根 → src/）解析包内资源，形态无关；4 处调用点全部迁移，
+  两个函数支持注入解析起点（回归测试用）。
+- **回归测试**：`test/pkg-root.test.ts` 覆盖 bundle 形态（lib/index.bundle.js → 包根，不再越出）、
+  逐文件形态、resolveVetFile 的三级候选回退。
+
+### Fixed: 代码审查 17 条核实修复（0.1.16 批次）
+
+- **#1-3 过时文档**：package.json description、runtime-hooks/runtime-guard 模块注释原写
+  「alarm-only / 绝不拦截」——N7（0.1.14 起）confirmBlock 默认 block，族 1/2 确认破坏即抛错拦截。
+  已改为「默认报警；N7 确认破坏类 fs 操作（族 1/2）抛错拦截」。
+- **#4 fetch(Request) 网络出口盲点**：`fetch(new Request(url, init))` 此前在 extractNetworkTarget
+  无分支 → classify/台账/金丝雀全失明。新增 Request 实例（含 .url 对象）目标提取，出口回到观测面。
+- **#5 scripts/ 白名单过宽**：scripts/ 目录多为产品代码（CLI/构建脚本），其中 process.exit 不应降级。
+  isTestOrCiFile 移除 scripts/（保留 test/tests/spec/specs/__tests__/.github 与文件名模式）。
+- **#6 缓存 key 整读大文件**：cacheKey 曾对所有文件 readOrDefault（含超 8MB 将被 R8-skip 的大文件）；
+  改为 stat 先行、超限文件以尺寸标记参与 key，避免散列阶段内存峰值。
+- **#7 dgram.send 字节计数**：形态 1（msg,offset,length,port,address）此前计整块 buffer；按 length 切片计。
+- **#8 OSV ↔ upstream-radar 跨源去重**：两处各用各的 seenVuln → 同一 CVE 报两条（OSV 与 OSV-T）。
+  现共享去重集合；并新增 radarImpl 注入点（测试用，与 fetchImpl 同款）。
+- **#9/#12 正则提为模块常量**：isSensitivePath 的 ~/.dsh/profiles 豁免、isSessionLogFile 会话目录/
+  扩展名正则从每次调用内联改为模块级常量（高频路径）。
+- **#10 credentialFiles 记忆化**：decideBlock 高频路径不再每次重建 11 元素数组 + homedir()，按 HOME 缓存
+  （HOME 变化自动重算，测试注入安全）。
+- **#11 README_ASSIGNED 重命名**：改为 isReadDataOp（原名误导为 README 文件相关）。
+- **#13 KEYWORD_REGEX_CACHE 上限**：超 512 清空，防异常增长无界缓存。
+- **#14 generateYamlFromObject 单次解析**：同一 existingContent 不再二次 yaml.load。
+- **#15 upstreamRadarWarned 可重置**：导出 resetUpstreamRadarWarned()（进程内测试状态隔离）。
+- **#16 allocFinding NaN 防护**：非有限值跳过歧义 finding（Infinity ≥ LIMIT 仍正确告警）。
+- **#17 open flags 复合形态**：识别 wx+/ax+/as+/rs+/rs（旧 `^[rwax]+?$` 漏复合 → 写意图按读报）。
+- **回归测试**：新增 #4 fetch(Request) / #5 scripts / #6 大文件 R8-skip / #8 跨源去重 / #17 复合 flags。
+
+### Security review scope
+
+Full code review (three deep-dive passes + manual empirical verification): scanner static engine, runtime
+guard layer, storage/governance. 51 new tests (533 total); coverage still above the 70/50 thresholds
+(Lines 83.9% · Branches 83.7% · Functions 91.2%).
+
+## [0.1.15] - 2026-08-19
+
+### Added
+
+- **N5 dynamic-string provenance (NEXT-GEN-PLAN)**: "deliberately built so the static layer cannot
+  see the target" is itself a signal (G1 complement to N2). New static rule **R15**
+  (`scanner-bin/rules/dynamic-targets.ts`) inspects network sinks — `fetch` / `new WebSocket` /
+  `http(s).request|get` (incl. `require('http').request`) / `net.connect|createConnection` — and flags a
+  target argument that cannot be statically resolved to a string (`stringyValue` + N2 `tryDecodeLiteral`
+  both fail) as **info/heuristic**: "网络目标动态构造，静态不可审计（N5）". The N1 manifest cannot name
+  this runtime target, so runtime observation is the only evidence (N1's hidden-capability red alarm is the
+  escalation; R15 stays at info per the v2 "escalate only when stacked" policy). Noise controls:
+  http(s) options-object form and unresolved plain identifiers there are skipped (ambiguous with the options
+  form), fetch/WebSocket first args and net host args are URL/string by contract so unresolved identifiers
+  flag; one finding per call site; resolvable targets (literal/constant concat/static template/N2-decodable)
+  are never flagged. **ENGINE_VERSION static-v10 → static-v11** (rule-set change; old disk caches invalidate),
+  R15 added to RULE_IDS.
+
+- **N6 upgrade behavioral diff (NEXT-GEN-PLAN)**: version-aware capability tracking — the supply-chain
+  blind spot "poisoning lives in the diff between old and new versions" (G4). Every auto-scan now records the
+  N1 capability manifest per `name@version` into `~/.dsh/vet/capabilities.json` (0600, atomic write, LRU
+  keeps the most recent 1000 versions by recordedAt; reuses the content-baseline store infra, same env
+  override for tests).
+  - On upgrade (a different version of the same package is scanned), the new manifest is diffed against the
+    previous recorded version (chosen by recordedAt, no semver parsing): newly added hosts/fsPaths/spawnCmds/
+    imports or a gained network/exec capability → yellow `upgrade-diff`; a new high-sensitivity combination
+    (exec+network / sensitive-path+network / sensitive-path+exec) → red. Removed capabilities are audit-only,
+    never alarmed (narrowing is benign). Cold start (first install) records only; a new manifest declaring
+    exec+network double-high gets a yellow `upgrade-cold` notice instead of silence. Same-version
+    re-installs refresh recordedAt without diffing; missing version/manifest or storage corruption → no-op,
+    fail-open (never disturbs plugin loading).
+  - New `vet_diff` tool (registered alongside `scan_plugin`): read-only, purely local — prints a package's
+    stored version history and the behavior changelog between its last two recorded versions (added|removed
+    hosts/fsPaths/spawnCmds/imports, network/exec flips) for pre-upgrade review and audit.
+  - Wiring: `internal/plugin` auto-scan completion (`src/guards/internal-plugin.ts`) → `recordScan`
+    (`src/guard/version-diff.ts`); alarms via VetStatus with kind `upgrade-diff`/`upgrade-cold`.
+  - Fully offline and alarm-only; the diff compares *declared* manifests only (runtime-hidden/dependency-carried
+    capability changes remain covered by N1 hidden-capability + N2 decoding, documented boundary).
+
+## [0.1.14] - 2026-08-19
+
+### Added
+
+- **N3 exfiltration & destruction ledger (NEXT-GEN-PLAN)**: a per-plugin runtime ledger
+  (`src/guard/exfil-ledger.ts`) fed by an optional observe channel on the T2 wrappers (near-zero overhead
+  when unwired) — never inspects session/chat content, only bytes + operation shapes.
+  - Byte counters (lifecycle cumulative): sensitive-path reads (actual result/chunk lengths) and writes to
+    non-allowlisted hosts (counted on the request object write/end, incl. streams); both > 0 → yellow
+    `n3-exfil`; magnitudes within [0.4×, 3×] (≥512B) → red `n3-exfil-match` (whole-package exfil).
+  - Sequence signatures (30s read→action window): READ_SECRET → SPAWN(curl|wget|nc) and READ_SECRET →
+    NET_WRITE → red (`n3-seq-read-spawn` / `n3-seq-read-net`).
+  - Destruction signature family (10s sliding window): MASS_DELETE / MASS_RENAME_EXT (encryption-marker
+    rename) / IN_PLACE_OVERWRITE (read→write same path) / WRITE_AMPLIFY → yellow; two+ families together →
+    red `n3-ransom`. node_modules/.git/build outputs, atomic-write locks and transient temp files are
+    noise-skipped; conservative thresholds (miss > false-positive); `markSuspected()` (honeypot/canary
+    confirmation, N4) lowers a plugin thresholds.
+  - Idle ledgers pruned on the VetStatus TTL cadence; alarm-only, never intercepts.
+- **N4 canary watermark & integrity canaries (NEXT-GEN-PLAN)**: honeypot lure values now embed one unique
+  high-entropy canary (40-hex, keyword-free — preserves the anti-honeypot guarantee); the active set lives in
+  memory only. Network wrappers scan URL (once per request) and body text (per chunk, cross-chunk accumulation,
+  64KB tail cap); dgram/fetch/spawn are scanned too, with direct / URL-decode / one base64-decode matching
+  variants. A canary found outbound → red `canary-leak` (100% exfil confirmation) and the plugin is marked
+  suspected in the N3 ledger. Integrity canaries (`ensureIntegrityCanaries`, ~/.dsh only) place two marker
+  files (fixed content + self sha256); write/delete → red kind `integrity` — earliest ransomware trigger
+  on the profile/credentials surface, backstop to the N3 destruction signatures. Canary sharding/reassembly
+  is a documented out-of-scope boundary.
+
+- **N7 confirmation block (NEXT-GEN-PLAN, the only interceptor)**: wrapper-level interception of
+  irreversible destruction only (`src/guard/confirm-block.ts` + wiring in `runtime-guard.ts`/`runtime-hooks.ts`).
+  - Families 1/2 (default `block`): family 1 — after a certain destructive confirmation (N3 `n3-ransom`
+    signature combination / integrity-canary write-delete / N4 canary leak) the plugin's destructive fs ops
+    (write/unlink/rename/cp/truncate/createWriteStream, incl. Sync) throw; family 2 — single-shot immediate
+    block of credential-body deletion and overwrite-to-existing (exact files: ~/.ssh/id_*, ~/.dsh/.credentials.yaml,
+    ~/.aws/credentials, .pgpass, .netrc, .git-credentials, .npmrc). Every block throws an actionable message
+    and writes a red `n7-block` alarm.
+  - Families 3/4 (default `alarm`): `classifyOp` flags persistence/privilege-surface writes
+    (bashrc/cron/systemd/ld.so.preload/sudoers.d/profile.d/autostart/authorized_keys/hosts/ssl) → yellow
+    `persistence-write` and supply-chain/install-state writes (node_modules package files, cordis.patch.yml /
+    cordis.yml / plugin.json) → yellow `install-write`; copy-pair ops check both source and destination.
+    Explicit `confirmBlockFamily3/4: block` upgrades a family to intercept (user opt-in, still never on
+    appendFile/new-file writes).
+  - Zero-false-intercept guards: official attribution / unattributed ops / vet self IO never blocked, exact
+    file-level credential matching, fail-open decision path (any internal error passes the call through),
+    process-memory blocked set (restart clears; config changes need restart). `confirmBlock` mode
+    (`block`/`alarm`/`off`) + family overrides in `src/config.ts`; T2 classification tests updated for the
+    more specific kinds (node_modules write → `install-write`, authorized_keys/cp-to-/etc/hosts →
+    `persistence-write`).
+
+## [0.1.13] - 2026-08-19
+
+### Added
+
+- **N1 cross-layer capability diff (NEXT-GEN-PLAN)**: the scanner now produces a per-package capability
+  manifest (`ScanReport.capabilities` — hosts/fsPaths/spawnCmds/imports/hasNetwork/hasExec, declaration-side
+  facts only, conservative over-collection, module-binding aware: fs/child_process bound via import/require
+  incl. destructuring). `internal/plugin` auto-scan registers it at load time; the T2 sink diffs each
+  sensitive runtime observation (net-egress/spawn/fs-read/fs-write/fs-destroy/fs-probe) against it — an
+  observed sensitive action with zero static footprint (incl. imports) is a **hidden capability** → red
+  `n1-hidden` alarm (confidence certain). Imports non-empty conservatively covers any action (capability
+  unknown, never-alarm bias). Dormant capabilities are recorded for the future nutrition label (M2).
+  Engine version bumped to `static-v10` (cache invalidated).
+- **N2 literal decode preprocessor (anti-obfuscation)**: `scanner-bin/decode.ts` statically decodes
+  all-literal base64 (`atob`, `Buffer.from(…, base64)`), hex, `String.fromCharCode`, constant
+  concatenation and static template strings (≤4KB, ≤2 nesting layers, never executes code, dynamic args →
+  undefined) and feeds the decoded corpus back into R13 (exfil endpoints), R7 (hardcoded secrets) and R11
+  (sensitive paths) with unchanged rule predicates — hits carry `decodedFrom` + original line for audit.
+- **Scan concurrency cap (tech-debt repayment)**: the host-side scanner client now limits concurrent scanner
+  subprocesses to 2 (FIFO queue) — bulk plugin loads at first boot no longer spawn unbounded processes.
+- **Large-file precheck (tech-debt repayment)**: the engine stats each source file before reading and skips
+  files > 8MB with an R8-scan-skipped info finding instead of loading them whole.
+
 ## [0.1.12] - 2026-08-18
 
 ### Fixed
@@ -99,7 +313,7 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Fixed
 
-- **Session log rotation false positive reduction**: fs-destroy red alerts now recognize compressed/log files (.zst/.zstd/.jsonl/.log) under `~/.dsh/sessions/**`, but rotation hints only display when unattributed (pluginHint is undefined) to avoid misleading users. Attributed session log deletions still treated as plugin malicious actions (real evidence destruction).
+- **Session log rotation noise fix**: `isSessionLogFile` now also recognizes sharded session files (e.g. `session.jsonl.zstd.9a3`, `session.jsonl.zst.001`) under `~/.dsh/sessions/**`. An **unattributed** session-log deletion is downgraded from red `fs-destroy` to **yellow** (host self-maintenance cannot attack itself); the `sessionLog` hint still displays. An **attributed** deletion stays red (possible evidence destruction by a plugin).
 - **Attribution-layered messaging**: Unattributed alerts now use independent suggest messages (e.g., "Check why there is an unattributed sensitive path deletion") instead of implying plugin responsibility. Session log rotation scenarios have dedicated hint messages.
 
 ## [0.1.8] - 2026-08-17

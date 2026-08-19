@@ -94,6 +94,9 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | `honeypot.enabled` | `false` | Honeypot lures (needs `runtimeGuard: watch`): plants fake key lures in `honeypot.dir`; T2 reports touches (read/write/delete) of lure paths as a separate `honeypot` alarm class. Directory/file names and contents carry no honeypot keywords (anti-honeypot), default location `~/.dsh/.local`, lure values are well-formed but invalid fake credentials |
 | `honeypot.dir` | `''` | Lure directory; empty = `$HOME/.dsh/.local` |
 | `osvCheck` | `true` | Query Google OSV for known vulnerabilities when scanning package.json (**exact-version queries only**: ranges (`*`/`>=`/`^`/`~`) and version-less main packages are skipped, P3-1/P3-3 — avoids stale full-history false positives; since round-7 ranges are no longer stripped to query as exact lower bounds). Verified targets = the plugin itself + direct dependencies (cap 8, official `@deepseek-ai/*` packages skipped, P3-10); transitive trees exceed the OSV v1 scope and the scan budget. Default on sends package names to api.osv.dev; network failure degrades silently. Set false if privacy-sensitive |
+| `confirmBlock` | `block` | N7 confirmation block (0.1.14, needs `runtimeGuard: watch`): only irreversible destruction is intercepted. `block` (default) — families 1/2 intercept on certain confirmation; `alarm` — all families alarm-only; `off` — disabled. Every block throws with an actionable message and writes a red `n7-block` alarm; process-memory state (cleared on restart) |
+| `confirmBlockFamily3` | `alarm` | N7 family 3 override (persistence/privilege-surface writes: bashrc/cron/systemd/ld.so.preload/sudoers.d/profile.d/autostart/authorized_keys/hosts/ssl). Explicit `block` is user opt-in — interception risk is the user's choice; default alarms only |
+| `confirmBlockFamily4` | `alarm` | N7 family 4 override (supply-chain/install-state writes: node_modules package files, cordis.patch.yml / cordis.yml / plugin.json). Explicit `block` is user opt-in; default alarms only |
 
 Official `@deepseek-ai/*` packages are exempt by default (built-in trust).
 
@@ -102,6 +105,9 @@ Official `@deepseek-ai/*` packages are exempt by default (built-in trust).
 - **`scan_plugin`** — deterministic static scan: `target` = `dynamic-code` (source string) / `package` (package
   directory) / `file` (single file). Returns a scorecard (verdict + staticScore + findings). The verdict is
   produced only by static rules.
+- **`vet_diff`** — read-only, purely local: prints the stored version history of a package and the behavior
+  diff between its last two recorded versions (N6). Outputs hosts/fsPaths/spawnCmds/imports added|removed and
+  network/exec capability flips. No scan, no network.
 - **`vet-audit-protocol` (skill)** — audit-process protocol (`AUDIT_PROTOCOL.md`): the agent audits a new plugin
   in preset steps — scan_plugin static criteria (incl. R12 Cordis/DSH contract) → read manifest/source →
   verify each finding → proactively dig deeper (network/files/processes/credentials/library semantics) →
@@ -185,6 +191,15 @@ Official `@deepseek-ai/*` packages are exempt by default (built-in trust).
 | R12 | Cordis/DSH contract (entry file / bundle-patch declaration / name / engines.node) | high (missing patch / missing entry) / medium (no entry / missing name) / info (low node version) | files | certain/likely |
 | R13 | Hardcoded network exfiltration sinks (Discord/Telegram/Slack webhooks, cloud-metadata endpoints, .onion) in string literals | high | both | likely |
 | R14 | Download-and-exec primitives in shipped non-JS scripts (.sh/.bash/.ps1/.cmd/.bat: curl|sh, encoded PowerShell, IEX, certutil…) | high (plugin) / info (generic) | files | likely |
+| R15 | Dynamic network targets (fetch / WebSocket / http(s).request|get / net.connect whose target argument cannot be statically resolved — "deliberately obscured" target) | info (observation; escalates only when other signals stack, e.g. N1 hidden capability fires) | both | heuristic |
+
+> **Engine pipeline additions (0.1.13)**: besides the rule set, the scanner now produces a per-package
+> **capability manifest (N1)** — hosts/fsPaths/spawnCmds/imports/hasNetwork/hasExec extracted from source
+> (declaration-side facts, never verdicts, conservative over-collection) — and runs a **literal decode
+> preprocessor (N2)** that statically decodes base64 / hex / Buffer.from / String.fromCharCode / constant
+> concatenation / template literals (all-literal arguments only, ≤4KB, ≤2 nesting layers, never executes
+> code) and feeds the decoded text back into R13/R7/R11 matching (findings carry `decodedFrom` and the
+> original line for audit). Capabilities enable the cross-layer diff (see Runtime monitoring below).
 
 ## Scoring model
 
@@ -230,6 +245,12 @@ and verdict are shown separately and never merged into a single total.
 |---|---|---|---|
 | T1 sentinel | Subprocess polling host /proc | Memory bomb (>memLimit), **sustained memory growth (leak; net window growth alarms by multiple)**, fork bomb (child-process burst), fd surge | Granularity = host-global (plugins share the process; can't attribute to a plugin) |
 | T2 hooks | In-process wrapping of fs/child_process (incl. fs.promises) | Sensitive-path writes/deletes (/etc, ~/.ssh, .env…), key-file reads, spawn with shell/download-exfiltration keywords | Stack attribution best-effort; per-call wrapper overhead (I/O-heavy <5%, hot paths 10-20% range) |
+| N1 capability diff (0.1.13) | Declared capability manifest (scanner, registered at plugin load) vs observed runtime actions (T2) | **Hidden capability executed** (observed sensitive action with zero static footprint incl. imports) → red `n1-hidden`; imports non-empty ⇒ 「capability unknown」 conservatively covers any action; only sensitive actions participate | Requires a prior scan of the plugin (auto-scan registers it); statically-visible-but-unused capabilities are recorded as dormant, shown in the nutrition label (M2, 0.1.16) |
+| N3 exfil/destruction ledger (0.1.14) | Per-plugin byte counters (sensitive-read / net-write, lifecycle cumulative) + 10s destruction signature windows + sequence signatures (READ_SECRET → SPAWN curl/wget/nc, READ_SECRET → NET_WRITE) | Read-secret-then-send-data: yellow n3-exfil (both counters > 0), red n3-exfil-match (magnitudes match — whole-package exfil), red sequence signatures (30s window); destruction family: mass delete / mass rename-to-encrypted-marker / read-then-overwrite-in-place / write amplification → yellow, two+ signatures together → red n3-ransom; honeypot/canary-confirmed (N4) plugins get lowest thresholds | No session/content inspection (bytes + operation-shape only); cross-session/ultra-slow exfil, native-binary internals, fd-level reads, fetch bodies not counted (documented boundary); per-plugin attribution best-effort |
+| N4 canary watermark (0.1.14) | High-entropy canaries embedded in honeypot lure values (in-memory set); network URL/body (write/end), dgram messages, fetch URLs/bodies and spawn args scanned for them | Canary found outbound → red `canary-leak` (100% exfil confirmation; direct / URL-decode / one base64-decode variants; offending plugin marked suspected in the N3 ledger) | Only confirms exfiltration of honeypot material; canary sharding/reassembly not countered (documented); needs honeypot lures (idempotent lures keep their canary) |
+| Integrity canaries (0.1.14) | Small marker files under ~/.dsh (fixed content + self sha256); write/delete → red kind `integrity` | Earliest ransomware trigger on the profile/credentials surface (backstop to N3 destruction signatures) | Scope limited to ~/.dsh (documented); reads not alarmed |
+| N7 confirmation block (0.1.14) | Wrapper-level intercept of destructive fs ops after certain confirmation (families 1/2) plus optional family 3/4 upgrade-to-block; guards: official attribution / unattributed ops / vet self IO never blocked, exact file-level credential matching, fail-open decision path | Family 1: post-confirmation (N3 ransom-signature combo / integrity-canary write-delete / N4 canary leak) destructive fs ops (write/unlink/rename/cp/truncate/createWriteStream) of that plugin throw; family 2: single-shot immediate block of credential-body deletion + overwrite-to-existing (exact files: ~/.ssh/id_*, ~/.dsh/.credentials.yaml, ~/.aws/credentials, .pgpass, .netrc, .git-credentials, .npmrc); families 3/4: yellow `persistence-write` / `install-write` alarms (never blocked by default) | Blocked set is process memory (restart clears); config changes need restart; recoverable writes (appendFile, new files) are never blocked; family 3/4 become blocking only via explicit user override (`confirmBlockFamily3/4: block`) |
+| N6 version behavioral diff (0.1.15) | Per-`name@version` capability manifests (N1 output) recorded locally at `~/.dsh/vet/capabilities.json` (0600, LRU 1000 versions) on every auto-scan; on upgrade the new manifest is diffed against the previous recorded version (by recordedAt, no semver parsing) | New capabilities vs. the previous version → yellow `upgrade-diff` (new hosts/fsPaths/spawnCmds/imports/network-or-exec gain); a new high-sensitivity combination (exec+network / sensitive-path+network / sensitive-path+exec) → red; cold start (first install): records only, exec+network double-high gets a yellow `upgrade-cold` notice; removed capabilities are audit-only, never alarmed; `vet_diff` tool prints local history + last-two-version behavior changelog | Compares *declared* manifests only (runtime-hidden or dependency-carried capability changes are covered by N1 hidden-capability/N2 decode, not the manifest diff); "previous version" = last version actually scanned here; same-version reinstall not diffed (content-baseline hash covers same-version tampering); local-only (no network), alarm-only |
 | Shield | Browser `conversation.session.header.actions` + /vet/status.json | Green/yellow/red light + alarm count | Requires `dsh web` restart to activate |
 
 ### Explicitly not detected (empirically verified)
@@ -237,10 +258,10 @@ and verdict are shown separately and never merged into a single total.
 | Form | Empirical result |
 |---|---|
 | Indirect references: alias function `const f = Function; f(...)`, `process["getBuiltinModule"]`, `globalThis.process`, indirect eval `(0, eval)` | R6 info or zero findings, verdict=clean |
-| Runtime/externally constructed payloads: base64 strings, hex/charCode assembly, reading code from network/env/args, self-modifying code | base64 constructor string tested → **zero findings** |
+| Runtime/externally constructed payloads: base64 strings, hex/charCode assembly, reading code from network/env/args, self-modifying code | base64 constructor string tested → **zero findings**; **0.1.15 (N5/R15)**: network sinks with a dynamically un-resolvable target are flagged info ("刻意遮蔽" — runtime target not auditable from source) |
 | Non-source files: `.jsx`/`.tsx`/`.vue`/`.json`/binaries/wasm | Not in the scan surface; shell/PowerShell/batch scripts (.sh/.bash/.ps1/.cmd/.bat) are covered by R14 (download-and-exec) |
 | Dependency chain/supply chain: import/require graph, dependency-version vulnerabilities, package.json scripts/install hooks, licenses, author reputation | Not parsed |
-| Runtime behavior: network exfiltration, dynamic prototype-pollution chains, dead loops/resource exhaustion, timing, permission abuse | No dataflow/behavior analysis; static `<builtin>.prototype` override assignments are caught by R4 (round-7) |
+| Runtime behavior: network exfiltration, dynamic prototype-pollution chains, dead loops/resource exhaustion, timing, permission abuse | No dataflow/behavior analysis; static `<builtin>.prototype` override assignments are caught by R4 (round-7); **0.1.13 (N2)**: statically decodable base64/hex/charCode/constant-concat payloads are now caught (decoded corpus fed back to R13/R7/R11); runtime-constructed payloads read from network/env/args remain undetected statically — the cross-layer diff (N1) surfaces them as **hidden capabilities** when the runtime actually executes a sensitive action the static manifest never declared ; **0.1.14 (N3)**: the runtime ledger correlates per-plugin sensitive reads with outbound writes (bytes + sequence + destruction signatures), partially closing low-traffic exfil and pure-JS file-destruction; cross-session/ultra-slow exfil remains out of scope (read and write not in the same plugin lifetime) |
 | Semantic knowledge: the actual services a plugin injects, `process` in bundler polyfills, shadowing boundary | R5 only recognizes 4 variable names; shadowing check is a v1 heuristic (undercounts) |
 | Legitimate `process` use by host tool packages (`process.env` config reads, `process.stdin/stdout` protocol, `process.execPath` spawn) | Resolved: targetKind grading — non-DSH plugin packages/official packages (generic) downgrade R3/R2/R10/R9 dead-loop to capability-surface/advice (info/medium), not into verdict; DSH plugin packages stay strict. round-7 adds shape downgrades: app-type packages (package.json declares bin) and bin entry files are likewise downgraded to capability surface; round-7.1 read-only member classification: pure read-only members (`cwd`/`env`/`platform`/`pid`, etc.) drop to info even in plugin mode (no-bin MCP/tool plugins like bridges no longer hurt); side-effect/escape members (`kill`/`exit`, etc.) stay high/critical. 195 official packages tested all clean |
 
@@ -260,6 +281,38 @@ and verdict are shown separately and never merged into a single total.
 7. **Alarm-only** — the runtime guard only watches, never kills; vet's automatic behavior (deny interception)
    exists only in the explicitly enabled opt-in mode. Alarms only carry advice; disposition is always left to
    the user on their DSH.
+
+## 0.1.16 hardening batch (security review)
+
+Fixes from the full code review (C1–C4 critical, M5–M9 major/minor, rule patches; ENGINE `static-v12`):
+
+- **C1** — host side is published as a single bundle (`lib/index.bundle.js`); guard internals
+  (`setRootIndexing`/`withVetSelfIo`/`confirmBlock`/`canaryStore`/`capabilityDiff`) are closure-private and no
+  longer ship as importable modules — an in-process plugin can no longer disable T2/N7/N4/N1 by absolute-path
+  `require`. Internal state is also no longer exported by the bundle. Companion fix: package-internal
+  resources (AUDIT_PROTOCOL.md / scanner-bin entry / T1 sidecar / self root) are now resolved
+  form-agnostically by `src/pkg-root.ts` (upward package.json search + candidate existence) — the old
+  fixed two-level `..` locators broke under the bundle main and made a plain restart ENOENT on
+  AUDIT_PROTOCOL.md.
+- **C2** — ESM named imports (`import { readFileSync } from 'node:fs'`) bypass all T2 hooks by Node's
+  interop snapshot (verified). The N1 manifest now flags this (`esmNamedBuiltins`) and, under
+  `runtimeGuard: watch`, a yellow `esm-guard-coverage` notice is recorded so the coverage gap is explicit, not
+  silent.
+- **C3** — `DSH_PLUGIN_VET_CACHE_DIR` / `DSH_PLUGIN_VET_BASELINE_DIR` are snapshotted at module load;
+  in-process `process.env` tampering can no longer redirect stores/cache. The scanner cache verifies a
+  host-injected random nonce on read — forged `clean` cache entries (verified attack) are now ignored.
+- **C4** — `Error.prepareStackTrace`/`stackTraceLimit` tampering is detected: attribution becomes
+  untrustworthy → red `attribution-tampered` alarm + N7 family-2 credential blocks still apply via a sentinel
+  identity.
+- **M5** — T2 now wraps `symlink/link/chmod/chown/mkdir/mkdtemp/utimes/lutimes` (+Sync, write surface) and
+  `lstat/lstatSync` (probe surface).
+- **M6/M7/M8/M9** — R9 fork-bomb covers sync spawn variants · capability/baseline stores self-check for
+  external overwrite (`vet-store-tamper` yellow) · `isSensitiveFsPath` matches path segments instead of
+  substrings · sidecar kill verifies `/proc/<pid>/cmdline` before SIGTERM (PID-reuse protection).
+- **Rule patches** — R2 global/indirect eval forms + require-concat folding, R3 `globalThis.process.*` member
+  policy, R4 `Reflect.defineProperty`, R9 escaped-paren ReDoS counting, R10 `prepare` hook, R14 python/ruby/perl
+  download-exec, R15 undici sinks (see Static rule table).
+- **Session-log rotation noise** — `isSessionLogFile` now also recognizes sharded session files (`session.jsonl.zstd.<shard>`); an unattributed session-log deletion under `~/.dsh/sessions/**` is downgraded from red `fs-destroy` to yellow (host self-maintenance can't attack itself), while an attributed deletion stays red (possible evidence destruction).
 
 ## Known Limitations
 
@@ -301,6 +354,10 @@ and verdict are shown separately and never merged into a single total.
 11. **T1/T2 are "security cameras", not "vaults"**: they catch obvious mischief (memory/fork bombs,
     sensitive-path operations, third-party spawn) but not worker threads/native plugins/low-traffic slow
     exfiltration; T2 doesn't cover ESM named-import snapshots, `process.binding`, and other side channels.
+    Since 0.1.16 the ESM named-import blind spot is explicit: the N1 manifest flags `esmNamedBuiltins` and
+    `runtimeGuard: watch` records a yellow `esm-guard-coverage` notice instead of silent loss of coverage,
+    and attribution tampering (`Error.prepareStackTrace`/`stackTraceLimit`) emits red `attribution-tampered`
+    alarms with N7 family-2 credential blocks still enforced.
 12. **T2 attribution & noise reduction**: stack attribution is best-effort (shared services/timers across
     plugins can mis-attribute); official-package spawn is not alarmed by default (capability grant).
 13. **Shield activation requires a `dsh web` restart**: client-modules scans the `dsh.client` declaration at
