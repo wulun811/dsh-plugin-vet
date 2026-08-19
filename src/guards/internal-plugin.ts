@@ -34,6 +34,33 @@ function readInstalledVersion(root: string): string | undefined {
   })
 }
 
+/**
+ * 提取包名（处理 rc.8 引入的子模块路径格式）。
+ * - '@deepseek-ai/dsh-tool-subagent-control/list-agents' → '@deepseek-ai/dsh-tool-subagent-control'
+ * - '@deepseek-ai/dsh-web-app' → '@deepseek-ai/dsh-web-app'
+ * - '/path/to/file.mjs' → 原样返回（本地文件路径）
+ */
+function extractPackageName(packageName: string): string {
+  // @scope/name/subpath 格式
+  if (packageName.startsWith('@') && packageName.includes('/')) {
+    const parts = packageName.split('/')
+    // @scope/name 至少 3 段（@scope, name, 可能更多）
+    if (parts.length >= 3) {
+      return parts.slice(0, 2).join('/')
+    }
+  }
+  // name/subpath 格式（非 scoped）
+  if (!packageName.startsWith('@') && packageName.includes('/')) {
+    // 检查是否是本地文件路径（以 / 或 ./ 开头）
+    if (packageName.startsWith('/') || packageName.startsWith('./')) {
+      return packageName  // 本地文件路径，原样返回
+    }
+    // npm 包名带子路径
+    return packageName.split('/')[0]
+  }
+  return packageName
+}
+
 function isExempt(packageName: string, packageRoot: string | undefined, config: VetConfig, status?: VetStatus): boolean {
   // cordis builtin 命名空间（cordis:group 等框架内置分组入口，非可安装的第三方插件）——不扫描不审计
   if (packageName.startsWith('cordis:')) return true
@@ -79,8 +106,11 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
   ctx.on('internal/plugin', (fiber: Fiber) => {
     const vetFiber = fiber as VetFiber
     if (fiber.uid === null) return
-    const entryName = vetFiber.entry?.options?.name
-    if (typeof entryName !== 'string') return
+    const rawEntryName = vetFiber.entry?.options?.name
+    if (typeof rawEntryName !== 'string') return
+    // rc.8 起部分插件 entryName 带子模块路径（如 @deepseek-ai/dsh-tool-subagent-control/list-agents），
+    // 提取包名用于解析/豁免/档案匹配，保留原始名用于日志
+    const entryName = extractPackageName(rawEntryName)
     if (entryName === PACKAGE_NAME) return
     if (!config.autoScan) return
 

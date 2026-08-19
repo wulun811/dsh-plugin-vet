@@ -65,14 +65,25 @@ export function t2AlarmId(kind: string, target: string | undefined, pluginHint: 
 
 /**
  * 0.1.16 修正：未归因的会话日志删除（~/.dsh/sessions 下分片文件轮换）从 red 降到 yellow。
- * 这类删除是宿主自身运维——宿主不会"攻击自己"；归因到插件的会话日志删除仍保持 red
- * （可能是插件在销毁证据、规避审计）。其余报警严重度原样透传。
+ * 0.1.19 起：无主会话日志删除完全静默（见 isSuppressUnattributedSessionLog）——DSH 宿主压缩
+ * 会话日志（zstd 删分片）是无归因高频运维，每次降级 yellow 仍刷屏；归因到插件的会话日志
+ * 删除仍保持 red（可能是插件在销毁证据、规避审计）。其余报警严重度原样透传。
  */
 export function t2Severity(alarm: HookAlarm, pluginHint: string | undefined): HookAlarm['severity'] {
   if (alarm.kind === 'fs-destroy' && alarm.sessionLog === true && pluginHint === undefined) {
     return 'yellow'
   }
   return alarm.severity
+}
+
+/**
+ * 无主会话日志删除是否静默（0.1.19）：DSH 宿主压缩/轮转 ~/.dsh/sessions 会话日志
+ * （zstd 产生 session.jsonl.zstd.xxx 分片后删除）是无归因高频运维——每次压缩都报 yellow
+ * 会刷屏淹没真报警。仅当 kind=fs-destroy + sessionLog=true + 无插件归因时静默；
+ * 归因到插件的会话日志删除仍是 red（插件销毁证据），无归因的非会话日志敏感删除照报。
+ */
+export function isSuppressUnattributedSessionLog(kind: string | undefined, sessionLog: boolean | undefined, pluginHint: string | undefined): boolean {
+  return kind === 'fs-destroy' && sessionLog === true && pluginHint === undefined
 }
 
 function envSidecarPid(): number | undefined {
@@ -382,6 +393,11 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     if (alarm.pluginHint !== undefined && isOfficial(alarm.pluginHint)) return
     // N7 族 3/4 报警只对第三方归因有效（宿主/用户自己写 bashrc、npm install 等无主操作不报）
     if ((alarm.kind === 'persistence-write' || alarm.kind === 'install-write') && alarm.pluginHint === undefined) return
+    // 无主会话日志删除静默（isSuppressUnattributedSessionLog）：DSH 宿主压缩/轮转会话日志
+    // （zstd 会产生 session.jsonl.zstd.xxx 分片后删除）是无归因高频运维——每次压缩都报 yellow
+    // 会刷屏淹没真报警。归因到插件的会话日志删除仍是 red（插件销毁证据）；无归因的非会话日志
+    // 敏感删除（如删 .credentials.yaml 本体）照报。
+    if (isSuppressUnattributedSessionLog(alarm.kind, alarm.sessionLog, alarm.pluginHint)) return
     // N7 族 1 触发：完整性金丝雀被写删（归因插件）→ 进入拦截名单（后续破坏类操作抛错）
     if (alarm.kind === 'integrity' && alarm.pluginHint !== undefined) confirmBlock.markFamily1(alarm.pluginHint)
     const entry: VetAlarm = {

@@ -292,19 +292,20 @@ export function isTransientTempPath(p: string): boolean {
  * mode='read' 只看密钥特征（段名/后缀/关键词）——读系统目录下的普通文件（库文件、配置）属正常
  * 操作；枚举目标（/etc/passwd、/etc/shadow）已由精确段名覆盖，不需要系统根。
  */
-/** DSH 安装树豁免正则（~/.dsh/profiles 下 node_modules 依赖树）——高频路径，提为模块常量。 */
-const DASH_PROFILES_NODE_MODULES_RE = /\/\.dsh\/profiles(?:\/[^/]+)?\/node_modules\//
+/** DSH 安装树豁免正则（~/.dsh 下任意 profile 目录里的 node_modules 依赖树）——高频路径，提为模块常量。 */
+const DASH_PROFILES_NODE_MODULES_RE = /\/\.dsh\/(?:[^/]+\/)*node_modules\//
 export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'mutate' = 'mutate'): boolean {
   const norm = p.replace(/\\/g, '/')
-  // DSH 安装树豁免：~/.dsh/profiles/**/node_modules/** 是平台自己装的公开依赖树。
+  // DSH 安装树豁免：~/.dsh/**/node_modules/** 是平台自己装的公开依赖树（任意 profile 布局——
+  // 本机 profiles/web/node_modules、用户机 .dsh/web/node_modules、顶层 hoisted node_modules）。
   // 插件加载期 require.resolve 触发 realpathSync（electron/install.js、dsh-traffic-light/package.json
-  // 等），归因到插件但行为完全合法。凭据从不在 profiles/*/node_modules 下（真实凭据面
-  // ~/.dsh/.credentials.yaml、~/.dsh/sessions/** 等不匹配此模式，仍正常报警）。
+  // 等），归因到插件但行为完全合法；DSH 升级安装/重解析依赖树时这些无主访问也高频出现。
+  // 凭据从不在任何 profile 的 node_modules 下（真实凭据面 ~/.dsh/.credentials.yaml、
+  // ~/.dsh/sessions/** 等不匹配此模式，仍正常报警）。
   // 没有这条：.dsh 段先命中 sensitiveSegments，node_modules 的 break 根本执行不到——
   // A9 设计时只考虑了 ~/.ssh/node_modules/x（该报），没预料到 DSH 安装树是合法常态。
-  // (?:/[^/]+)? 可选 profile 名段：per-profile（profiles/web/node_modules）与顶层 hoisted
-  // 树（profiles/node_modules，pnpm workspace 根布局）都豁免——旧正则要求中间必须有 profile
-  // 名，顶层树不匹配 → 落到 .dsh 敏感段 → DSH 重启重解析插件树时刷出一批 fs-probe 误报。
+  // 旧正则只豁免 profiles(?:/[^/]+)?——顶层 hoisted 或 .dsh 直接放 profile（无 profiles 层）
+  // 都落回 .dsh 敏感段 → DSH 重启/升级重解析插件树时刷出一批 fs-probe/fs-read 误报。
   if (DASH_PROFILES_NODE_MODULES_RE.test(norm)) return false
   const parts = norm.split('/')
   for (let i = 0; i < parts.length; i++) {
