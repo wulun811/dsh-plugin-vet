@@ -37,9 +37,10 @@ const SIDE_EFFECT_MEMBERS = new Set([
  * 且该调用位于本函数边界之外（即本函数是被注册的 handler 本体）→ 是信号处理上下文。
  */
 function inSignalHandler(exitNode: ts.Node): boolean {
-  // exitNode 是 process 标识符：parent = process.exit（属性访问），再上一级 = 调用表达式
+  // exitNode 是 process 标识符：parent = process.exit（属性访问）或 global.process（属性访问），
+  // 逐级上溯直到找到最近的调用表达式（round-9：global.process.exit 需跨两级属性访问）
   let exitCall = exitNode.parent
-  if (exitCall !== undefined && ts.isPropertyAccessExpression(exitCall)) exitCall = exitCall.parent
+  while (exitCall !== undefined && ts.isPropertyAccessExpression(exitCall)) exitCall = exitCall.parent
   if (exitCall === undefined || !ts.isCallExpression(exitCall)) return false
   // 找到最近的函数体（exit 所在的函数）
   let fn: ts.Node | undefined = exitNode
@@ -72,6 +73,21 @@ function inSignalHandler(exitNode: ts.Node): boolean {
  * (run_code AsyncFunction realm, bootstrap.ts:405) and files mode keep
  * critical severity: process is genuinely reachable.
  */
+/**
+ * round-10.x（接入 dsh.so 静态注册站）：测试/CI 文件内的 process 访问是开发期行为，
+ * 不是发布物逃逸通道。按能力触达面降 info——与 bin/appShape/generic 同构降级，但比 pilot 的
+ * "全部降级"更精准：只放过测试/CI 文件（目录 test/tests/spec/specs/__tests__/.github
+ * 或文件名 *.test.*  *.spec.*  *.e2e.*  coverage.*  vitest.*  jest.*），真实源码里的 process.exit 仍 critical。
+ * 注：scripts/ 不是测试/CI 目录——包里的 scripts/ 常是产品代码（CLI 工具、构建脚本），其内
+ * 的 process.exit 是真实逃逸意图，不能降级（曾把 scripts/ 与测试目录等同 → 潜在漏报）。
+ */
+function isTestOrCiFile(fileName: string): boolean {
+  const segs = fileName.replace(/\\/g, '/').split('/').filter(Boolean)
+  if (segs.some(s => s === 'test' || s === 'tests' || s === 'spec' || s === 'specs' || s === '__tests__' || s === '.github')) return true
+  const base = segs[segs.length - 1] ?? fileName
+  return /\.(test|spec|e2e)\./i.test(base) || /(^|[^a-z0-9])coverage\./i.test(base) || /^(vitest|jest)\./i.test(base)
+}
+
 export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const found: Finding[] = []
   walk(sf, n => {
@@ -112,6 +128,33 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
         severity = 'high'
         message = '直接访问 process.' + member
       }
+    } else if (parent !== undefined && ts.isPropertyAccessExpression(parent) && parent.name === n
+      && ts.isIdentifier(parent.expression)
+      && (parent.expression.text === 'globalThis' || parent.expression.text === 'global' || parent.expression.text === 'window')) {
+      // round-9（0.1.16 加固）：global.process.exit() / globalThis.process.mainModule 等前缀形态——
+      // process 是属性名而非表达式，旧检查（parent.expression === n）不成立 → 落默认 info 漏检。
+      // 与标准形态同一成员口径：exit/mainModule/binding 等 critical，只读成员 info，副作用 high。
+      const gp = parent.parent
+      const member = gp !== undefined && ts.isPropertyAccessExpression(gp) && gp.expression === parent ? gp.name.text : undefined
+      evidence = member !== undefined && gp !== undefined ? gp.getText(sf) : parent.getText(sf)
+      if (member === undefined) {
+        severity = 'info'
+        message = '裸 process 引用（' + parent.expression.text + '.process，无成员访问）'
+      } else if (CRITICAL_MEMBERS.has(member)) {
+        if (member === 'exit' && inSignalHandler(n)) {
+          severity = 'info'
+          message = '信号处理回调内的 process.exit（优雅退出，常驻插件正常操作面）'
+        } else {
+          severity = 'critical'
+          message = '直接访问 ' + parent.expression.text + '.process.' + member + '（Node 能力逃逸通道）'
+        }
+      } else if (READONLY_MEMBERS.has(member)) {
+        severity = 'info'
+        message = '只读 process 成员（能力触达面）：' + parent.expression.text + '.process.' + member
+      } else {
+        severity = 'high'
+        message = '直接访问 ' + parent.expression.text + '.process.' + member
+      }
     } else if (parent !== undefined && ts.isElementAccessExpression(parent) && parent.expression === n) {
       // F4：process['exit'] 括号访问此前只报 info——同样致命，按属性访问口径判定
       const arg = parent.argumentExpression
@@ -136,8 +179,10 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
     // （CLI 脚本永远独立运行）、应用型包（bin 声明：TUI/CLI/server 的 process 即产品功能，
     // 外部实测 dsh-tui 4065 分扣减全部误报）
     const cliEntry = ctx.cliFiles !== undefined && ctx.cliFiles.has(sf.fileName)
-    if (severity !== 'info' && (ctx.request.targetKind === 'generic' || cliEntry || ctx.appShape === true)) {
-      const why = ctx.request.targetKind === 'generic' ? '非 DSH 插件包'
+    const testOrCi = isTestOrCiFile(ctx.filePath ?? sf.fileName)
+    if (severity !== 'info' && (ctx.request.targetKind === 'generic' || cliEntry || ctx.appShape === true || testOrCi)) {
+      const why = testOrCi ? '测试/CI 文件'
+        : ctx.request.targetKind === 'generic' ? '非 DSH 插件包'
         : cliEntry ? 'CLI/bin 入口'
         : '应用型包（bin 入口，process 即产品功能）'
       severity = 'info'

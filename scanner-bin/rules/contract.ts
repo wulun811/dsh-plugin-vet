@@ -16,9 +16,11 @@ import type { Finding } from '../protocol.js'
  * - engines.node 明确低于 DSH 要求（major < 22）→ info
  * 非插件意图包不判（避免误伤通用 npm 工具包）。generic 官方包同样适用本规则。
  */
-export function runContract(content: string, file: string, targetKind?: 'plugin' | 'generic'): Finding[] {
+export function runContract(content: string, file: string, targetKind?: 'plugin' | 'generic', scanBasis?: 'git' | 'npm'): Finding[] {
   const found: Finding[] = []
   void targetKind
+  // scanBasis==='git'：仅源码仓（通常不提交 lib/ 等构建产物），入口声明对照发布物无效 → 缺失降 info 不误报
+  const gitBasis = scanBasis === 'git'
   let pkg: Record<string, unknown>
   try {
     pkg = JSON.parse(content) as Record<string, unknown>
@@ -56,18 +58,18 @@ export function runContract(content: string, file: string, targetKind?: 'plugin'
   if (entry === undefined && !existsSync(join(pkgRoot, 'index.js'))) {
     found.push({
       rule: 'R12',
-      severity: 'medium',
+      severity: gitBasis ? 'info' : 'medium',
       confidence: 'likely',
-      message: '无包入口（无 main、无 exports["."]，根目录也无 index.js）——cordis 无法解析插件模块',
+      message: (gitBasis ? '（git 基础）' : '') + '无包入口（无 main、无 exports["."]，根目录也无 index.js）——cordis 无法解析插件模块',
       evidence: '',
       file,
     })
   } else if (entry !== undefined && !existsSync(resolve(pkgRoot, entry))) {
     found.push({
       rule: 'R12',
-      severity: 'high',
+      severity: gitBasis ? 'info' : 'high',
       confidence: 'certain',
-      message: '入口文件缺失：' + entry,
+      message: (gitBasis ? '（git 基础）入口文件缺失（构建产物通常不提交，非误报来源）：' : '入口文件缺失：') + entry,
       evidence: entry,
       file,
     })

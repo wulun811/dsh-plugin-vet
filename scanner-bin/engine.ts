@@ -3,21 +3,27 @@
  * content-hash cache. Pure logic — the stdio wrapper is index.ts.
  * @module dsh-plugin-vet/scanner-engine
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { parseSource } from './ast.js'
+import { extractCapabilities, aggregateCapabilities } from './capability.js'
+import { collectDecodedLiterals } from './decode.js'
 import { executeRules } from './rules/index.js'
 import { runPackageJson } from './rules/supply-chain.js'
 import { runContract } from './rules/contract.js'
 import { NON_JS_SCRIPT_EXT, runNonJsScript } from './rules/non-js-scripts.js'
 import { computeScore, computeVerdict } from './score.js'
-import { cacheKey, readCached, writeCached } from './cache.js'
+import { cacheKey, readCached, writeCached, cacheDirFor } from './cache.js'
 import { ENGINE_VERSION } from './protocol.js'
 import { queryOsv, type OsvVuln } from './osv.js'
-import type { Finding, ScanReport, ScanRequest, ScanResponse } from './protocol.js'
+import type { CapabilityManifest, Finding, ScanReport, ScanRequest, ScanResponse } from './protocol.js'
 
 const SCANNABLE_EXT = new Set(['js', 'ts', 'mjs', 'cjs'])
+
+/** 大文件预检上限（技术债偿还）：超过该大小的源码文件不做整文件 readFileSync——
+ * 直接产出 R8-scan-skipped info（规则扫不到≠干净，但绝不让大文件把引擎内存打爆）。 */
+const PRE_FILE_SIZE_LIMIT = 8 * 1024 * 1024
 
 /** Extension of a path (without dot), or undefined when none. */
 function extOf(file: string): string | undefined {
@@ -96,14 +102,22 @@ function skipFinding(file: string): Finding {
 }
 
 /** Assemble the final report (score + verdict) for a request. */
-function buildReport(request: ScanRequest, findings: Finding[], sourceCount: number): ScanReport {
-  return {
+function buildReport(
+  request: ScanRequest,
+  findings: Finding[],
+  sourceCount: number,
+  capabilities?: CapabilityManifest,
+): ScanReport {
+  const report: ScanReport = {
     engine: ENGINE_VERSION,
     sourceCount,
     findings,
     staticScore: computeScore(findings),
     verdict: computeVerdict(findings),
   }
+  // N1：能力清单仅 files 模式产出（code 模式无插件身份）
+  if (capabilities !== undefined) report.capabilities = capabilities
+  return report
 }
 
 /** Scan one in-memory code string. */
@@ -112,7 +126,9 @@ function scanCode(request: ScanRequest): ScanResponse {
     return { ok: false, error: 'code 模式需要 language 与 code' }
   }
   const sf = parseSource(request.code, `input.${request.language}`, request.language)
-  const findings = executeRules(sf, { request, runtime: request.runtime ?? 'host' })
+  // N2：解码预处理（code 模式同样受益：scan_plugin dynamic-code 对混淆片段输出解码命中）
+  const decodedLiterals = collectDecodedLiterals(sf, `input.${request.language}`)
+  const findings = executeRules(sf, { request, runtime: request.runtime ?? 'host', decodedLiterals })
   return { ok: true, report: buildReport(request, findings, 1) }
 }
 
@@ -125,15 +141,29 @@ function scanFiles(request: ScanRequest): ScanResponse {
   // round-7：package.json 内容参与缓存 hash（bin 形态变化 → 缓存自然失效），无需额外 context
   const pkgJson = request.files.find(f => basename(f) === 'package.json')
   const shape = pkgJson === undefined ? undefined : packageShape(readOrDefault(pkgJson))
+  // R8-skip 先于缓存散列：超过 PRE_FILE_SIZE_LIMIT 的文件不会进入扫描循环（stat 先行跳过），
+  // 缓存 key 不再整读它们——旧实现 key 阶段对全部文件 readOrDefault，大文件被全量读入 → 内存峰值。
+  // 超限文件用 stat 尺寸做 key 占位（超大文件内容从不参与判定，尺寸即"未扫描"的充分表示）。
   const key = cacheKey(
-    request.files.map(file => ({ path: file, content: readOrDefault(file) })),
+    request.files.map(file => {
+      try {
+        const st = statSync(file)
+        if (st.size > PRE_FILE_SIZE_LIMIT) return { path: file, content: 'vet-skipped:size=' + st.size }
+      } catch {
+        // stat 失败 → 走 readOrDefault 的空串兜底
+      }
+      return { path: file, content: readOrDefault(file) }
+    }),
     request.rules,
-    { targetKind: request.targetKind, runtime },
+    { targetKind: request.targetKind, runtime, scanBasis: request.scanBasis },
   )
-  const cached = readCached(key)
+  // C3（0.1.16 加固）：目录与 nonce 均来自宿主注入（cacheDirFor 缺省回退 env/tmpdir）
+  const cacheDir = cacheDirFor(request.cacheDir)
+  const cached = readCached(key, cacheDir, request.cacheNonce ?? '')
   if (cached !== undefined) return { ok: true, report: cached }
 
   const findings: Finding[] = []
+  const manifests: CapabilityManifest[] = []
   let sourceCount = 0
   const deadline = Date.now() + budgetMs(request.files.length, request.timeoutMs)
   for (let i = 0; i < request.files.length; i++) {
@@ -151,7 +181,7 @@ function scanFiles(request: ScanRequest): ScanResponse {
       }
       // R12: Cordis/DSH bundle 契约（P-2 计划项）——入口/patch 声明等确定性检查
       if (request.rules?.['R12'] !== false) {
-        findings.push(...runContract(json, file, request.targetKind))
+        findings.push(...runContract(json, file, request.targetKind, request.scanBasis))
       }
       continue
     }
@@ -168,24 +198,41 @@ function scanFiles(request: ScanRequest): ScanResponse {
       continue
     }
     if (ext === undefined || !SCANNABLE_EXT.has(ext)) continue
+    // 大文件预检（技术债偿还）：readFileSync 前先 stat，超限即 R8-skip（不整读、不 OOM）
+    try {
+      const st = statSync(file)
+      if (st.size > PRE_FILE_SIZE_LIMIT) {
+        findings.push(skipFinding(file))
+        continue
+      }
+    } catch {
+      // stat 失败（文件消失/不可读）：走 readOrDefault 的空串兜底
+    }
     const code = readOrDefault(file)
     if (code === '') continue
     const language = ext === 'ts' ? 'ts' : 'js'
     const sf = parseSource(code, basename(file), language)
+    // N2：解码预处理（每文件独立采集，结果并入 R13/R7/R11 语料）
+    const decodedLiterals = collectDecodedLiterals(sf, basename(file))
     const fileFindings = executeRules(sf, {
       request,
       runtime,
       cliFiles: shape?.cliFiles,
       appShape: shape?.appShape,
+      filePath: file,
+      decodedLiterals,
     })
     for (const f of fileFindings) {
       if (f.file === undefined) f.file = basename(file)
       findings.push(f)
     }
+    // N1：每文件能力提取 → 聚合（files 模式才有插件身份；code 模式不产出）
+    manifests.push(extractCapabilities(sf))
     sourceCount++
   }
-  const report = buildReport(request, findings, sourceCount)
-  writeCached(key, report)
+  const capabilities = aggregateCapabilities(manifests)
+  const report = buildReport(request, findings, sourceCount, capabilities)
+  writeCached(key, report, cacheDir, request.cacheNonce ?? '')
   return { ok: true, report }
 }
 
@@ -204,6 +251,10 @@ export function scan(request: ScanRequest): ScanResponse {
 }
 
 export interface OsvCheckOptions {
+  /** 跨源去重（OSV ↔ upstream-radar 共享）：同漏洞 id 只报一次（曾各自 seenVuln → 重复 finding）。 */
+  seenVuln?: Set<string>
+  /** upstream-radar 实现注入（测试用）：默认走本地 execFile CLI；返回 null 视为未安装/失败降级。 */
+  radarImpl?: (packageRoot: string, timeoutMs: number) => Promise<UpstreamRadarResult | null>
   osvTimeoutMs?: number
   /** P2-10：OSV 总预算（宿主超时余量）。提供时逐查询超时按剩余预算动态收窄且 OSV 总耗时不超过预算，
    * 避免超出宿主 kill 超时 → 子进程被 SIGKILL → 扫描失败（deny 模式 fail-closed 误拦合法包）。
@@ -264,7 +315,7 @@ function directDepsOf(pkg: Record<string, unknown>): { name: string; version?: s
  * 每项独立查询、独立超时，网络失败只跳过该项（静默降级，不影响静态判定）。
  * 间接传递树超出 OSV v1 范围与扫描预算，README 已记录边界。
  */
-async function checkOsv(request: ScanRequest, opts: OsvCheckOptions): Promise<Finding[]> {
+async function checkOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promise<Finding[]> {
   if (request.osv !== true) return []
   const pkgFile = request.files?.find(f => basename(f) === 'package.json')
   if (pkgFile === undefined) return []
@@ -280,7 +331,8 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions): Promise<Fi
     ...directDepsOf(pkg),
   ].filter(t => isExactVersion(t.version)) // filter: only exact versions take part in OSV checks
   const vulns: OsvVuln[] = []
-  const seenVuln = new Set<string>()
+  // 透传的外部集合（checkSupplyChain 跨源共享）或孤立集合——dedup 按 id 生效
+  const seenVuln = opts.seenVuln ?? new Set<string>()
   // P2-10：OSV 总预算（宿主超时余量）——逐查询超时按「剩余预算 / 剩余目标数」动态收窄（下限
   // 500ms、上限 4000ms），并保证 OSV 总耗时不超过预算，提前 break 避免超出宿主 kill 超时
   // 导致子进程被 SIGKILL → 扫描失败（deny 模式 fail-closed 误拦合法包 / report 误报 scan-fail）。
@@ -351,7 +403,7 @@ export async function scanWithOsv(request: ScanRequest, opts: OsvCheckOptions = 
 
 import { execFile } from 'node:child_process'
 
-interface UpstreamRadarResult {
+export interface UpstreamRadarResult {
   vulnerabilities: { id: string; package: string; severity: string; source: string }[]
 }
 
@@ -392,6 +444,11 @@ async function queryUpstreamRadar(
 
 let upstreamRadarWarned = false
 
+/** 单测辅助：重置模块级 warn 标志（进程内测试隔离；生产每次扫描为独立子进程，天然每次只警告一次）。 */
+export function resetUpstreamRadarWarned(): void {
+  upstreamRadarWarned = false
+}
+
 /**
  * 供应链检查：直接依赖 OSV + 传递依赖 upstream-radar。
  */
@@ -400,7 +457,9 @@ async function checkSupplyChain(
   opts: OsvCheckOptions & { transitiveDeps?: boolean }
 ): Promise<Finding[]> {
   // 1. 现有逻辑：插件自身 + 直接依赖 OSV 查询（osvBudgetMs 随 opts 透传，约束 OSV 总预算）
-  const directFindings = await checkOsv(request, opts)
+  //    跨源去重：与 upstream-radar 共享同一 seenVuln，同 id CVE 不重复报告（#8 修复）
+  const crossSourceSeen = new Set<string>()
+  const directFindings = await checkOsv(request, { ...opts, seenVuln: crossSourceSeen })
 
   // 2. 新增：传递依赖扫描（调用 upstream-radar CLI）
   if (request.transitiveDeps !== true) return directFindings
@@ -412,7 +471,9 @@ async function checkSupplyChain(
   const radarTimeout = opts.osvBudgetMs !== undefined
     ? Math.min(opts.osvBudgetMs, opts.osvTimeoutMs ?? 15_000)
     : (opts.osvTimeoutMs ?? 15_000)
-  const radarResult = await queryUpstreamRadar(pkgRoot, radarTimeout)
+  const radarResult = opts.radarImpl !== undefined
+    ? await opts.radarImpl(pkgRoot, radarTimeout)
+    : await queryUpstreamRadar(pkgRoot, radarTimeout)
   if (radarResult === null) {
     // v5 修订（专家2 #9）：首次调用时给出友好提示
     if (!upstreamRadarWarned) {
@@ -428,11 +489,12 @@ async function checkSupplyChain(
   }
 
   const transitiveFindings: Finding[] = []
-  const seenVuln = new Set<string>()
 
+  // 与 OSV 共享去重集合：同一漏洞在 OSV 与 upstream-radar 间只报一条（曾各用各的
+  // seenVuln → 同一 CVE 出 rule=OSV 与 rule=OSV-T 两条 finding）。
   for (const vuln of radarResult.vulnerabilities.slice(0, 20)) {
-    if (seenVuln.has(vuln.id)) continue
-    seenVuln.add(vuln.id)
+    if (crossSourceSeen.has(vuln.id)) continue
+    crossSourceSeen.add(vuln.id)
     transitiveFindings.push({
       rule: 'OSV-T',  // 新规则名：传递依赖已知漏洞
       severity: 'medium',  // v5 修订（专家1 #7 + 专家2 #11）：传递依赖利用面小于直接依赖，权重降为 medium

@@ -15,11 +15,15 @@ dsh-src/
 *.tgz
 # npm pack 本地缓存（不入库）
 node_modules/.npm-cache-local/
+# 批量扫描临时目录（解包包 + npm 缓存，不入库）
+plugin-scan-tmp/
+# glass 效果示例页（临时产物，不入库）
+site/玻璃效果示例.html
 .conv.js
 .locale.js
 .subagent.js
 .index.html
 .npmrc
 
-# 内部方案文档（不入库）
-docs/EVOLUTION-PLAN.md
+# 内部方案文档（不入库，放 docs/local/ 即可自动忽略）
+docs/local/

@@ -91,12 +91,13 @@ function checkProtoMutation(sf: ts.SourceFile, ctx: RuleContext, found: Finding[
       }
       return
     }
-    // defineProperty/defineProperties 形态：Object.defineProperty(X.prototype, 'name', {...})
+    // defineProperty/defineProperties 形态：Object/Reflect.defineProperty(X.prototype, 'name', {...})
     if (ts.isCallExpression(n)) {
       const callee = unwrapParens(n.expression)
       if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'defineProperty' && callee.name.text !== 'defineProperties') return
       const base = unwrapParens(callee.expression)
-      if (!ts.isIdentifier(base) || base.text !== 'Object') return
+      // round-9（0.1.16 加固）：Reflect.defineProperty 是等价原型污染路径，与 Object 同口径
+      if (!ts.isIdentifier(base) || base.text !== 'Object' && base.text !== 'Reflect') return
       const arg0 = n.arguments[0]
       if (arg0 === undefined || !isProtoAccess(arg0)) return
       const owner = hostProtoOwner((unwrapParens(arg0) as ts.PropertyAccessExpression).expression)

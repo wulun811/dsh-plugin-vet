@@ -34,32 +34,50 @@ function overlapsPlaceholder(start: number, end: number, spans: [number, number]
 /**
  * R7 hardcoded secrets. high/likely; placeholders excluded per-segment.
  */
-export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
+/** 对一段文本跑 KEY_PATTERNS（AST 字面量与 N2 解码语料共用判定逻辑）。 */
+function scanText(text: string, decoded = false): Finding[] {
+  const out: Finding[] = []
+  const spans = placeholderSpans(text)
+  for (const p of KEY_PATTERNS) {
+    const re = new RegExp(p.re.source, 'g')
+    let m: RegExpExecArray | null
+    while ((m = re.exec(text)) !== null) {
+      const start = m.index
+      const end = start + m[0].length
+      if (overlapsPlaceholder(start, end, spans)) continue
+      out.push({
+        rule: 'R7',
+        severity: 'high',
+        confidence: 'likely',
+        message: decoded ? `硬编码密钥（经解码还原）：${p.desc}` : `硬编码密钥：${p.desc}`,
+        evidence: text.slice(0, 200),
+      })
+      break // 每个 pattern 每段只报一条
+    }
+  }
+  return out
+}
+
+export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const found: Finding[] = []
   walk(sf, n => {
     if (!ts.isStringLiteral(n) && !ts.isNoSubstitutionTemplateLiteral(n) && !ts.isTemplateExpression(n)) return
     const text = ts.isTemplateExpression(n)
       ? n.head.text + n.templateSpans.map(s => s.literal.text).join('')
       : n.text
-    const spans = placeholderSpans(text)
-    for (const p of KEY_PATTERNS) {
-      const re = new RegExp(p.re.source, 'g')
-      let m: RegExpExecArray | null
-      while ((m = re.exec(text)) !== null) {
-        const start = m.index
-        const end = start + m[0].length
-        if (overlapsPlaceholder(start, end, spans)) continue
-        found.push({
-          rule: 'R7',
-          severity: 'high',
-          confidence: 'likely',
-          message: `硬编码密钥：${p.desc}`,
-          evidence: text.slice(0, 200),
-          line: lineOf(sf, n),
-        })
-        break // 每个 pattern 每段只报一条
-      }
+    for (const f of scanText(text)) {
+      f.line = lineOf(sf, n)
+      found.push(f)
     }
   })
+  // N2：解码语料（还原后的密钥字面量同样判定；message 注明还原来源，保留原始行号）
+  for (const d of ctx.decodedLiterals ?? []) {
+    for (const f of scanText(d.text, true)) {
+      f.decodedFrom = d.method
+      f.line = d.line
+      f.file = d.file
+      found.push(f)
+    }
+  }
   return found
 }

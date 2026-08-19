@@ -64,8 +64,10 @@ function validateYaml(content: string): void {
 function generateYamlFromObject(existingContent: string, enable: boolean): { content: string; repaired: boolean } {
   let entries: unknown[]
   let repaired = false
+  // 只解析一次：entries（待写数组）与 vetEntry（保留非 runtimeGuard 配置）同源于这次解析
+  let parsed: unknown
   try {
-    const parsed = yaml.load(existingContent)
+    parsed = yaml.load(existingContent)
     // cordis.patch.yml 必须是数组（或空/null）
     if (parsed === null || parsed === undefined) {
       entries = []
@@ -88,28 +90,21 @@ function generateYamlFromObject(existingContent: string, enable: boolean): { con
     return id !== PLUGIN_ENTRY_ID && id !== '@jieai/dsh-plugin-vet'
   })
   if (enable) {
-    // 查找现有 vet 条目的 config（保留非 runtimeGuard 键）
-    // 注意：上面已经移除了 vet 条目，这里需要从原始 parsed 里找
-    // 重新解析一次（简单起见）
+    // 查找现有 vet 条目的 config（保留非 runtimeGuard 键）——复用上面的 parsed，不再二次 yaml.load
     let existingVetConfig: Record<string, unknown> = {}
-    try {
-      const parsed = yaml.load(existingContent)
-      if (Array.isArray(parsed)) {
-        const vetEntry = parsed.find((e: unknown) => {
-          if (typeof e !== 'object' || e === null) return false
-          const id = (e as Record<string, unknown>).id
-          return id === PLUGIN_ENTRY_ID || id === '@jieai/dsh-plugin-vet'
-        })
-        if (vetEntry && typeof vetEntry === 'object') {
-          const config = (vetEntry as Record<string, unknown>).config
-          if (config && typeof config === 'object') {
-            existingVetConfig = { ...(config as Record<string, unknown>) }
-            delete existingVetConfig.runtimeGuard
-          }
+    if (Array.isArray(parsed)) {
+      const vetEntry = parsed.find((e: unknown) => {
+        if (typeof e !== 'object' || e === null) return false
+        const id = (e as Record<string, unknown>).id
+        return id === PLUGIN_ENTRY_ID || id === '@jieai/dsh-plugin-vet'
+      })
+      if (vetEntry && typeof vetEntry === 'object') {
+        const config = (vetEntry as Record<string, unknown>).config
+        if (config && typeof config === 'object') {
+          existingVetConfig = { ...(config as Record<string, unknown>) }
+          delete existingVetConfig.runtimeGuard
         }
       }
-    } catch {
-      // 忽略，用空 config
     }
     // 添加新 vet 条目
     entries.push({

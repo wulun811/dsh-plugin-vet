@@ -33,6 +33,12 @@ export interface VetConfig {
   networkEgress: boolean
   /** P1：传递依赖 OSV 核对（默认关闭）：调用 upstream-radar CLI 扫描传递依赖树。需要安装 upstream-radar。 */
   transitiveDeps: boolean
+  /** N7：确认拦截块（0.1.14）：'block'（默认）族 1/2 确认即拦；'alarm' 只报警不拦；'off' 关闭。 */
+  confirmBlock: 'block' | 'alarm' | 'off'
+  /** N7 族 3 覆写（默认 alarm，仅报警）：显式 'block' 才拦截系统持久化/提权面写入（误拦风险自负）。 */
+  confirmBlockFamily3: 'alarm' | 'block'
+  /** N7 族 4 覆写（默认 alarm，仅报警）：显式 'block' 才拦截供应链/安装态写入。 */
+  confirmBlockFamily4: 'alarm' | 'block'
 }
 
 export const VetConfigSchema: z<VetConfig> = z.object({
@@ -58,4 +64,7 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   contentBaseline: z.boolean().default(true),
   networkEgress: z.boolean().default(true),
   transitiveDeps: z.boolean().default(false),
+  confirmBlock: z.union([z.const('block'), z.const('alarm'), z.const('off')]).default('block'),
+  confirmBlockFamily3: z.union([z.const('alarm'), z.const('block')]).default('alarm'),
+  confirmBlockFamily4: z.union([z.const('alarm'), z.const('block')]).default('alarm'),
 })

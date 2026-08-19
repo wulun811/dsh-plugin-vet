@@ -19,6 +19,10 @@ const DOWNLOAD_EXEC: { re: RegExp; desc: string; sev?: 'high' | 'medium' }[] = [
   { re: /\b(IEX|Invoke-Expression)\b/i, desc: 'PowerShell Invoke-Expression' },
   { re: /\b(certutil|bitsadmin|mshta|regsvr32|scrobj|rundll32)\b/i, desc: '系统下载/执行原语' },
   { re: /curl[^\n]*-o\s+\S+/, desc: 'curl 下载落盘', sev: 'medium' },
+  // round-9（0.1.16 加固）：解释器 -c/-e 内联脚本中的网络下载+执行原语
+  { re: /\bpython[0-9]?\s+-[cC]\b[^\n]{0,220}\b(urllib|requests|urlopen|urlretrieve|exec)\b/i, desc: 'Python -c 网络/执行脚本' },
+  { re: /\bruby\s+-[eE]\b[^\n]{0,160}\b(Net::HTTP|open-uri|system|exec)\b/i, desc: 'Ruby -e 网络/执行脚本' },
+  { re: /\bperl\s+-[eE]\b[^\n]{0,160}\b(LWP|HTTP::(Tiny|Request)|system|exec)\b/i, desc: 'Perl -e 网络/执行脚本' },
 ]
 
 /** Script extensions this rule scans (complementary to the AST surface). */

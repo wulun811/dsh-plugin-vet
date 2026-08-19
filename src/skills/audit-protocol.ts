@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
+import { resolvePkgRoot } from '../pkg-root.js'
 
 /**
  * 审计协议 skill（D30 定稿）：把 AUDIT_PROTOCOL.md 注册进 DSH skill 目录。
@@ -10,12 +10,9 @@ import { fileURLToPath } from 'node:url'
  */
 export const AUDIT_PROTOCOL_SKILL_NAME = 'vet-audit-protocol'
 
-/** 从包根读协议正文（与 scanner-bin 同款定位：import.meta.url → 包根）。 */
+/** 从包根读协议正文（向上搜索 package.json 定位，兼容 bundle/逐文件两种形态）。 */
 export function loadAuditProtocolContent(): string {
-  const root = dirname(fileURLToPath(import.meta.url))
-  // lib/skills/audit-protocol.js → 包根是上一级上一级（lib 是编译产物）
-  const pkgRoot = join(root, '..', '..')
-  return readFileSync(join(pkgRoot, 'AUDIT_PROTOCOL.md'), 'utf8')
+  return readFileSync(join(resolvePkgRoot(), 'AUDIT_PROTOCOL.md'), 'utf8')
 }
 
 /** 注册审计协议 skill（apply 时调用；返回 disposer）。 */

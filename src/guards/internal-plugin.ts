@@ -8,8 +8,10 @@ import { listSourceFiles, resolvePackageRoot } from '../scanner/package-sources.
 import { PACKAGE_NAME } from '../invariant.js'
 import { hasAuditRecord, auditRequiredMessage } from '../audit/archive.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
+import { capabilityDiff } from '../guard/capability-diff.js'
+import { recordScan as recordVersionScan, consumeCapabilitiesTamper } from '../guard/version-diff.js'
 import type { VetStatus } from '../guard/status.js'
-import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline } from './content-baseline.js'
+import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline, consumeBaselineTamper } from './content-baseline.js'
 
 /** typert loader 为 Fiber 附加的 entry 元数据（loader.ts:412 同款访问）。 */
 type VetFiber = Fiber & { entry?: { options?: { name?: string } } }
@@ -144,6 +146,48 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       const { verdict, staticScore } = res.report
       ctx.logger.info(`vet: auto-scan ${entryName} → ${verdict} (${staticScore})`)
       status?.noteScan({ pluginName: entryName, verdict, staticScore, at: Date.now() })
+      // N1：注册静态能力清单（声明侧）——T2 观测与此对账，差分出隐藏能力
+      capabilityDiff.registerStatic(entryName, res.report.capabilities)
+      // N6：版本行为差分——同名异版清单对比，新增敏感能力 → yellow/red 报警（首次记录只存不报）
+      const nav = recordVersionScan(entryName, installedVersion, res.report.capabilities)
+      if (nav.alarm !== null) {
+        status?.record({
+          id: 'upgrade-diff:' + entryName + ':' + (nav.from ?? 'cold') + ':' + nav.to,
+          severity: nav.alarm.severity,
+          source: 'scan',
+          kind: nav.alarm.kind,
+          message: nav.alarm.message,
+          target: entryName,
+          pluginHint: entryName,
+          at: Date.now(),
+        })
+      }
+      // M7（0.1.16 加固）：vet 存储被进程内插件改写（capabilities/baseline hash 与自写不符）→ yellow
+      if (consumeCapabilitiesTamper() || consumeBaselineTamper()) {
+        status?.record({
+          id: 'vet-store-tamper',
+          severity: 'yellow',
+          source: 'scan',
+          kind: 'vet-store-tamper',
+          message: 'vet 存储文件被外部改写（capabilities.json/baseline.json 与 vet 自写内容不一致）——疑似进程内插件篡改 vet 状态，升级差分/基线保护可能已失效（M7）',
+          target: '~/.dsh/vet',
+          at: Date.now(),
+        })
+      }
+      // C2（0.1.16 加固）：插件使用内建模块的 ESM 具名导入 → T2 钩子对该绑定不生效（Node 快照互操作），
+      // 运行时防线仅剩 T1 哨兵——显式提示边界，不静默
+      if (res.report.capabilities?.esmNamedBuiltins === true && config.runtimeGuard === 'watch') {
+        status?.record({
+          id: 'esm-guard-coverage:' + entryName,
+          severity: 'yellow',
+          source: 'scan',
+          kind: 'esm-guard-coverage',
+          message: entryName + ' 使用内建模块 ESM 具名导入（fs/child_process/网络）——T2 运行时钩子对该绑定不生效（Node 互操作快照，C2 边界），运行时防线仅剩 T1 哨兵与审计协议',
+          target: entryName,
+          pluginHint: entryName,
+          at: Date.now(),
+        })
+      }
       if (config.mode === 'deny' && RANK[verdict] >= DENY_RANK[config.denyOn]) {
         void fiber.dispose()
         throw new Error(`vet: 拦截 ${entryName}（${verdict}）`)

@@ -24,7 +24,7 @@ const EXFIL_PATTERNS: { re: RegExp; desc: string }[] = [
 /**
  * R13 hardcoded external exfiltration sinks. high/likely; literals only.
  */
-export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
+export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const found: Finding[] = []
   walk(sf, n => {
     if (!ts.isStringLiteral(n) && !ts.isNoSubstitutionTemplateLiteral(n) && !ts.isTemplateExpression(n)) return
@@ -47,5 +47,24 @@ export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
       break // 每个 pattern 每段只报一条
     }
   })
+  // N2：解码语料并入同一模式匹配（base64/hex/charCode/拼接还原的端点）
+  for (const d of ctx.decodedLiterals ?? []) {
+    for (const p of EXFIL_PATTERNS) {
+      const re = new RegExp(p.re.source, p.re.flags)
+      const m = re.exec(d.text)
+      if (m === null) continue
+      found.push({
+        rule: 'R13',
+        severity: 'high',
+        confidence: 'likely',
+        decodedFrom: d.method,
+        message: '硬编码外联端点（经解码还原）：' + p.desc,
+        evidence: d.text.slice(0, 200),
+        file: d.file,
+        line: d.line,
+      })
+      break
+    }
+  }
   return found
 }

@@ -5,6 +5,10 @@
  */
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, lstatSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
+
+/** M7（0.1.16 加固）：基线自写 hash 记录 + 篡改标志（进程内插件改写 baseline.json 的检测）。 */
+const writtenBaselineHashes = new Map<string, string>()
+let baselineTampered = false
 import { homedir } from 'node:os'
 import { join, dirname, relative } from 'node:path'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
@@ -44,10 +48,23 @@ const EXCLUDE_PATTERNS = [
   /^\./,  // 隐藏文件
 ]
 
-/** 基线文件路径：~/.dsh/vet/baseline.json（可通过环境变量覆盖，用于测试）。 */
+/** C3（0.1.16 加固）：模块加载时快照 env（vet 先于第三方插件加载，进程内改 env 无法重定向基线存储）。 */
+const SNAPSHOT_BASELINE_DIR: string | undefined = (() => {
+  const v = process.env.DSH_PLUGIN_VET_BASELINE_DIR
+  return v !== undefined && v !== '' ? v : undefined
+})()
+
+let baselineDirOverride: string | undefined
+
+/** 基线文件路径：~/.dsh/vet/baseline.json（快照 env；测试用 setBaselineDirForTest 覆盖）。 */
 export function baselinePath(): string {
-  const dir = process.env.DSH_PLUGIN_VET_BASELINE_DIR ?? join(homedir(), '.dsh', 'vet')
+  const dir = baselineDirOverride ?? SNAPSHOT_BASELINE_DIR ?? join(homedir(), '.dsh', 'vet')
   return join(dir, 'baseline.json')
+}
+
+/** 测试专用：覆盖快照目录（生产路径不调用）。 */
+export function setBaselineDirForTest(dir?: string): void {
+  baselineDirOverride = dir
 }
 
 /**
@@ -181,17 +198,32 @@ export function recordBaseline(
 export function loadBaseline(): BaselineStore {
   return withVetSelfIo(() => {
     try {
-      const content = readFileSync(baselinePath(), 'utf8')
+      const path = baselinePath()
+      const content = readFileSync(path, 'utf8')
+      const recorded = writtenBaselineHashes.get(path)
+      if (recorded !== undefined && hashOf(content) !== recorded) baselineTampered = true
       const parsed = JSON.parse(content) as { records?: Record<string, BaselineRecord> }
       if (parsed.records !== undefined && typeof parsed.records === 'object') {
         return { records: parsed.records }
       }
       return { records: {} }
     } catch {
+      if (writtenBaselineHashes.has(baselinePath())) baselineTampered = true
       // 文件不存在或损坏：返回空 store，所有包视为首次见到
       return { records: {} }
     }
   })
+}
+
+/** 读取并复位篡改标志（internal/plugin 完成时上报 yellow）。 */
+export function consumeBaselineTamper(): boolean {
+  const t = baselineTampered
+  baselineTampered = false
+  return t
+}
+
+function hashOf(content: string): string {
+  return createHash('sha256').update(content).digest('hex')
 }
 
 /**
@@ -212,8 +244,10 @@ export function saveBaseline(store: BaselineStore): void {
       
       // 原子写：临时文件 + rename
       const tmpPath = path + '.tmp.' + process.pid
-      writeFileSync(tmpPath, JSON.stringify(store, null, 2), { mode: 0o600 })
+      const serialized = JSON.stringify(store, null, 2)
+      writeFileSync(tmpPath, serialized, { mode: 0o600 })
       renameSync(tmpPath, path)
+      writtenBaselineHashes.set(path, hashOf(serialized))
     } catch {
       // 保存失败：静默忽略（下次启动会重新计算）
     }

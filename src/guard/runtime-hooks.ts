@@ -1,10 +1,14 @@
 /**
  * T2 进程内钩子（D22）：在宿主进程内包装 fs / child_process 内置模块导出。
- * 危险操作 → 取栈 → 归因插件包名 → 报警（alarm-only，从不阻断调用）。
+ * 危险操作 → 取栈 → 归因插件包名 → 报警；N7（0.1.14 起）确认破坏类操作
+ * （fs 族 1/2，confirmBlock 默认 block）在调用原函数前抛错拦截（fail-open：异常→放行）。
  * 已知旁路（PLAN §14.5 / README）：ESM 具名导入快照、worker_threads 独立 realm、
  * 原生插件、process.binding。
  */
 export type HookModule = 'fs' | 'child_process'
+
+import type { LedgerFsEvent, LedgerNetEvent } from './exfil-ledger.js'
+import { confirmBlock, BLOCK_FS_OPS, isPersistenceWriteTarget, isInstallWriteTarget, type BlockDecision } from './confirm-block.js'
 
 export interface HookConfig {
   /** 命中即报警的系统目录前缀。 */
@@ -19,6 +23,8 @@ export interface HookConfig {
   shellTokens: string[]
   /** 蜜罐根目录（D27）：命中即按蜜罐报警——触碰任何诱饵路径都是高置信信号。 */
   honeypotRoots: string[]
+  /** 完整性金丝雀路径（N4，仅 ~/.dsh 内）：写/删即 red kind=integrity（与凭据蜜罐语义分离）。 */
+  integrityRoots: string[]
 }
 
 export const DEFAULT_HOOK_CONFIG: HookConfig = {
@@ -32,6 +38,7 @@ export const DEFAULT_HOOK_CONFIG: HookConfig = {
   sensitiveExts: ['.pem', '.key', '.p12', '.pfx', '.keystore', '.jks', '.env'],
   shellTokens: ['sh', 'bash', 'zsh', 'cmd', 'powershell', 'pwsh', 'curl', 'wget', 'nc', 'ncat', 'telnet'],
   honeypotRoots: [],
+  integrityRoots: [],
 }
 
 /** T2 报警候选（at/source 由调用方补全）。 */
@@ -53,20 +60,143 @@ export interface HookOp {
 
 /** 破坏性删除类 fs 操作（red）。 */
 const DESTROY_OPS = new Set(['unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync'])
-/** 写入类 fs 操作（yellow）。 */
-const WRITE_OPS = new Set(['writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync', 'truncate', 'truncateSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync', 'createWriteStream'])
+/** 写入/变更类 fs 操作（yellow）。0.1.16（M5）：补 symlink/link/chmod/chown/mkdir/utimes——
+ * 此前 symlink 落点可绕过敏感路径判定（写 /tmp 符号链接指向 ~/.ssh/authorized_keys）、
+ * chmod 可放宽凭据文件权限、mkdir 可落位 /etc/cron.d 等提权面。 */
+const WRITE_OPS = new Set([
+  'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync',
+  'truncate', 'truncateSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync', 'createWriteStream',
+  'symlink', 'symlinkSync', 'link', 'linkSync', 'chmod', 'chmodSync', 'chown', 'chownSync',
+  'mkdir', 'mkdirSync', 'mkdtemp', 'mkdtempSync', 'utimes', 'utimesSync', 'lutimes', 'lutimesSync',
+])
 /** 读取类 fs 操作（密钥路径 → yellow）。 */
 const READ_OPS = new Set(['readFile', 'readFileSync', 'createReadStream', 'open', 'openSync'])
 /** 侦察类 fs 操作（M7：列目录/stat/access 是凭据狩猎的第一步——readdirSync('~/.ssh') 此前完全不可见）。 */
-const PROBE_OPS = new Set(['readdir', 'readdirSync', 'opendir', 'opendirSync', 'stat', 'statSync', 'access', 'accessSync', 'existsSync', 'readlink', 'readlinkSync', 'realpath', 'realpathSync'])
+// 0.1.16（M5）：lstat 是符号链接侦察的标准原语（stat 跟随链接），补入侦察面
+const PROBE_OPS = new Set(['readdir', 'readdirSync', 'opendir', 'opendirSync', 'stat', 'statSync', 'lstat', 'lstatSync', 'access', 'accessSync', 'existsSync', 'readlink', 'readlinkSync', 'realpath', 'realpathSync'])
 /** child_process 全部操作（spawn 面，yellow）。 */
 const PROC_OPS = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'])
+
+// ── N3 台账观测通道（optional observe：runtime-guard 接线 exfil-ledger；不接线时零开销）──
+
+/** 需要向台账发事件的 fs/子进程操作（删/写/读/spawn 面；PROBE 侦察不参与破坏窗口）。 */
+const FS_LEDGER_OPS = new Set<string>([...DESTROY_OPS, ...WRITE_OPS, ...READ_OPS, ...PROC_OPS])
+
+/** 数据块字节数（Buffer/string/TypedArray/ArrayBuffer；未知返回 0，绝不抛）。 */
+export function chunkBytes(chunk: unknown): number {
+  if (typeof chunk === 'string') return Buffer.byteLength(chunk, 'utf8')
+  if (Buffer.isBuffer(chunk)) return chunk.length
+  if (chunk instanceof Uint8Array) return chunk.byteLength
+  if (typeof chunk === 'object' && chunk !== null && 'byteLength' in chunk) {
+    const n = (chunk as { byteLength?: unknown }).byteLength
+    if (typeof n === 'number') return n
+  }
+  return 0
+}
+
+/** 一次 fs 调用的字节量：读 = 结果长度；写 = 数据参数长度（流操作由流计数器按 chunk 上报）。 */
+function fsOpBytes(opName: string, args: unknown[], result: unknown): number {
+  if (opName === 'readFile' || opName === 'readFileSync') return chunkBytes(result)
+  if (opName === 'writeFile' || opName === 'writeFileSync' || opName === 'appendFile' || opName === 'appendFileSync') {
+    return chunkBytes(args[1])
+  }
+  return 0
+}
+
+const WRITE_COUNTER_FLAG = Symbol('vet-ledger-write-counter')
+const END_COUNTER_FLAG = Symbol('vet-ledger-end-counter')
+const CANARY_FLAG = Symbol('vet-canary-monitor')
+const READ_COUNTER_FLAG = Symbol('vet-ledger-read-counter')
+
+/** 包装可写对象（http.ClientRequest / net.Socket / fs.WriteStream）的 write/end，按 chunk 计数。 */
+export function attachWriteCounter(obj: { write?: unknown; end?: unknown }, onBytes: (n: number) => void): void {
+  const flagged = obj as { [k: symbol]: unknown }
+  const write = obj.write
+  if (typeof write === 'function' && flagged[WRITE_COUNTER_FLAG] !== true) {
+    flagged[WRITE_COUNTER_FLAG] = true
+    const w = write as (...a: unknown[]) => unknown
+    obj.write = function (this: unknown, chunk: unknown, ...rest: unknown[]): unknown {
+      const n = chunkBytes(chunk)
+      if (n > 0) onBytes(n)
+      return w.apply(this, [chunk, ...rest])
+    }
+  }
+  const end = obj.end
+  if (typeof end === 'function' && flagged[END_COUNTER_FLAG] !== true) {
+    flagged[END_COUNTER_FLAG] = true
+    const e = end as (...a: unknown[]) => unknown
+    obj.end = function (this: unknown, chunk: unknown, ...rest: unknown[]): unknown {
+      const n = chunkBytes(chunk)
+      if (n > 0) onBytes(n)
+      return e.apply(this, [chunk, ...rest])
+    }
+  }
+}
+
+/**
+ * N4 金丝雀出站监控：包装请求对象 write/end，把 body 文本按 chunk 累计（跨 chunk 拼接、
+ * 上限 64KB 截尾——canary 每次必然落在尾部窗口内）并调用 onText 回调。幂等（防二次包装）。
+ */
+export function attachCanaryScanner(obj: { write?: unknown; end?: unknown }, onText: (text: string) => void): void {
+  if ((obj as { [k: symbol]: unknown })[CANARY_FLAG] === true) return
+  ;(obj as { [k: symbol]: unknown })[CANARY_FLAG] = true
+  let buf = ''
+  const push = (chunk: unknown): void => {
+    if (typeof chunk === 'string') buf += chunk
+    else {
+      const n = chunkBytes(chunk)
+      if (n === 0) return
+      buf += typeof chunk === 'object' && chunk !== null && 'toString' in chunk ? String(chunk) : ''
+    }
+    if (buf.length > 64 * 1024) buf = buf.slice(buf.length - 64 * 1024)
+    onText(buf)
+  }
+  const write = obj.write
+  if (typeof write === 'function') {
+    const w = write as (...a: unknown[]) => unknown
+    obj.write = function (this: unknown, chunk: unknown, ...rest: unknown[]): unknown {
+      push(chunk)
+      return w.apply(this, [chunk, ...rest])
+    }
+  }
+  const end = obj.end
+  if (typeof end === 'function') {
+    const e = end as (...a: unknown[]) => unknown
+    obj.end = function (this: unknown, chunk: unknown, ...rest: unknown[]): unknown {
+      push(chunk)
+      return e.apply(this, [chunk, ...rest])
+    }
+  }
+}
+
+/** 包装可读流（createReadStream）的 data 处理器：只包第一个 data 监听器，计数每个 chunk 一次。 */
+export function attachReadCounter(stream: { on?: unknown }, onBytes: (n: number) => void): void {
+  const on = stream.on
+  if (typeof on !== 'function' || (stream as { [k: symbol]: unknown })[READ_COUNTER_FLAG] === true) return
+  ;(stream as { [k: symbol]: unknown })[READ_COUNTER_FLAG] = true
+  const orig = on as (event: string, ...rest: unknown[]) => unknown
+  let wrappedFirst = false
+  stream.on = function (this: unknown, event: string, ...rest: unknown[]): unknown {
+    if (event === 'data' && !wrappedFirst && typeof rest[0] === 'function') {
+      wrappedFirst = true
+      const handler = rest[0] as (chunk: unknown) => unknown
+      rest[0] = function (this: unknown, chunk: unknown): unknown {
+        const n = chunkBytes(chunk)
+        if (n > 0) onBytes(n)
+        return handler(chunk)
+      }
+    }
+    return orig.apply(this, [event, ...rest])
+  }
+}
 /** P1-8：破坏性命令词——命中且命令里出现敏感路径（参数或重定向目标）才报警，避免 rm -rf /tmp 这类常规清理误报。 */
 const DESTRUCTIVE_TOKENS = new Set(['rm', 'mv', 'cp', 'dd', 'mkfs', 'mkfs.ext4', 'mkfs.xfs', 'shred', 'truncate'])
 
 /** 关键词边界匹配：须出现在段首或 . _ - 之后（避免 'js-tokens' 这类库名误伤）。 */
 const KEYWORD_REGEX_CACHE = new Map<string, RegExp>()
 function segmentHasKeyword(part: string, keyword: string): boolean {
+  // 上限防护：关键词来自固定配置（理论上限极小），防键注入/异常增长导致无界缓存
+  if (KEYWORD_REGEX_CACHE.size >= 512) KEYWORD_REGEX_CACHE.clear()
   let re = KEYWORD_REGEX_CACHE.get(keyword)
   if (re === undefined) {
     const esc = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -116,6 +246,21 @@ export function withVetSelfIo<T>(fn: () => T): T {
 /** 工具链临时产物后缀（tsc/vitest/esbuild 等）：*.tmpdir / *.tmp / *.temp / *.swp / *.bak / vim ~。 */
 const TRANSIENT_TEMP_SUFFIX = /\.(?:tmp(?:dir)?|temp|swp|bak|orig)$/i
 
+// ── C4 归因链防篡改（0.1.16 加固）───────────────────────────────────
+
+/**
+ * 归因链快照：vet 模块加载先于第三方插件，此刻的 Error.prepareStackTrace 是宿主基线。
+ * 恶意插件可在运行时替换它（伪造栈文本 → 归因到官方包 → 触发官方信任降噪），
+ * 或把 stackTraceLimit 压到 0/1（new Error().stack 无帧 → hint=undefined → N7 族1/2 拦截条件
+ * 不成立、族3/4 报警被抑制）。检测到篡改时归因不可信，操作按"归因污染"处理。
+ */
+const ORIG_PREPARE_STACK_TRACE = Error.prepareStackTrace
+
+/** 归因时栈文本是否不可信（prepareStackTrace 被替换 / stackTraceLimit < 2）。 */
+export function isStackTraceTampered(): boolean {
+  return Error.prepareStackTrace !== ORIG_PREPARE_STACK_TRACE || Error.stackTraceLimit < 2
+}
+
 /**
  * 锁兄弟文件（<file>.lock，@deepseek-ai/dsh-atomic-write 写协议产物）：DSH 对
  * credentials.yaml 等文件的原子写用「wx 创建 <file>.lock（内容仅 PID）→ 写完 finally
@@ -147,6 +292,8 @@ export function isTransientTempPath(p: string): boolean {
  * mode='read' 只看密钥特征（段名/后缀/关键词）——读系统目录下的普通文件（库文件、配置）属正常
  * 操作；枚举目标（/etc/passwd、/etc/shadow）已由精确段名覆盖，不需要系统根。
  */
+/** DSH 安装树豁免正则（~/.dsh/profiles 下 node_modules 依赖树）——高频路径，提为模块常量。 */
+const DASH_PROFILES_NODE_MODULES_RE = /\/\.dsh\/profiles(?:\/[^/]+)?\/node_modules\//
 export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'mutate' = 'mutate'): boolean {
   const norm = p.replace(/\\/g, '/')
   // DSH 安装树豁免：~/.dsh/profiles/**/node_modules/** 是平台自己装的公开依赖树。
@@ -158,7 +305,7 @@ export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'muta
   // (?:/[^/]+)? 可选 profile 名段：per-profile（profiles/web/node_modules）与顶层 hoisted
   // 树（profiles/node_modules，pnpm workspace 根布局）都豁免——旧正则要求中间必须有 profile
   // 名，顶层树不匹配 → 落到 .dsh 敏感段 → DSH 重启重解析插件树时刷出一批 fs-probe 误报。
-  if (/\/\.dsh\/profiles(?:\/[^/]+)?\/node_modules\//.test(norm)) return false
+  if (DASH_PROFILES_NODE_MODULES_RE.test(norm)) return false
   const parts = norm.split('/')
   for (let i = 0; i < parts.length; i++) {
     const low = parts[i].toLowerCase()
@@ -188,12 +335,16 @@ export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'muta
  * 检测路径是否为 DSH 会话日志文件（~/.dsh/sessions/** 下的 .zst/.zstd/.jsonl 等）。
  * 这类文件的删除通常是宿主自身的日志轮换（压缩/整理），非恶意销毁。
  */
+/** DSH 会话目录前缀正则（高频路径，提为模块常量）。 */
+const DSH_SESSIONS_DIR_RE = /\/\.dsh\/sessions\//
+/** 会话日志扩展名（含分片后缀）正则。 */
+const SESSION_LOG_EXT_RE = /\.(zst|zstd|jsonl|log)(?:\.[a-z0-9]+)*(\.tmp)?$/i
 export function isSessionLogFile(path: string): boolean {
   const norm = path.replace(/\\/g, '/')
   // 必须在 ~/.dsh/sessions/ 下
-  if (!/\/\.dsh\/sessions\//.test(norm)) return false
-  // 文件名以压缩/日志扩展名结尾
-  return /\.(zst|zstd|jsonl|log)(\.tmp)?$/.test(norm)
+  if (!DSH_SESSIONS_DIR_RE.test(norm)) return false
+  // 文件名以压缩/日志扩展名结尾；允许分片后缀（如 session.jsonl.zstd.9a3 / .zst.001）
+  return SESSION_LOG_EXT_RE.test(norm)
 }
 
 /** 取第一个字符串参数作为目标（路径/命令）。 */
@@ -254,6 +405,13 @@ function redirectTarget(command: string): string | undefined {
   return m === null ? undefined : m[1].replace(/^['"]|['"]$/g, '').replace(/^~/, '/home')
 }
 
+/** 路径是否为完整性金丝雀文件（精确文件名匹配，N4）。 */
+export function isIntegrityPath(p: string, roots: string[]): boolean {
+  if (roots.length === 0) return false
+  const norm = p.replace(/\\/g, '/')
+  return roots.some(r => norm === r.replace(/\\/g, '/'))
+}
+
 /** 路径是否落在任一蜜罐根下（D27）。 */
 export function isHoneypotPath(p: string, roots: string[]): boolean {
   if (roots.length === 0) return false
@@ -299,6 +457,30 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
     }
   }
   if (module === 'fs') {
+    // N4 完整性金丝雀（仅 ~/.dsh 内）：写/删即 red kind=integrity——勒索加密 profile 目录
+    // （配置/会话/凭据面）的最早触发信号；读不报（内容固定已知，无害）
+    if ((DESTROY_OPS.has(name) || WRITE_OPS.has(name)) && isIntegrityPath(target, cfg.integrityRoots) && !isLockSiblingPath(target)) {
+      return {
+        severity: 'red',
+        kind: 'integrity',
+        message: `完整性金丝雀被写删：${name}(${target.slice(0, 120)}) — ~/.dsh 关键文件被篡改（疑似勒索/破坏，N4）`,
+        target,
+      }
+    }
+    // N7 族 3/4：系统持久化/提权面写入、供应链/安装态篡改 → 报警（写操作判定前，更具体）
+    // cp/rename/copyFile 是成对路径：写目标可能是 dst（覆盖系统文件/落位安装态），两侧都查
+    if (WRITE_OPS.has(name)) {
+      const writeCandidates = (name === 'cp' || name === 'cpSync' || name === 'rename' || name === 'renameSync'
+        || name === 'copyFile' || name === 'copyFileSync') ? allStrings(args) : [target]
+      const persist = writeCandidates.find(isPersistenceWriteTarget)
+      if (persist !== undefined) {
+        return { severity: 'yellow', kind: 'persistence-write', message: `系统持久化/提权面写入（N7 族 3）：${name}(${persist.slice(0, 120)}) — 可恢复，建议核实来源`, target: persist.slice(0, 120) }
+      }
+      const install = writeCandidates.find(isInstallWriteTarget)
+      if (install !== undefined) {
+        return { severity: 'yellow', kind: 'install-write', message: `供应链/安装态篡改（N7 族 4）：${name}(${install.slice(0, 120)}) — 可重装恢复，建议重哈希比对`, target: install.slice(0, 120) }
+      }
+    }
     // isLockSiblingPath：atomic-write 协议锁（<file>.lock）随写随删，豁免；凭据本体照删照报
     if (DESTROY_OPS.has(name) && isSensitivePath(target, cfg, 'mutate') && !isLockSiblingPath(target)) {
       const isSessionLog = isSessionLogFile(target)
@@ -320,9 +502,10 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
     }
     // open/openSync 的 flags 参数带 w/a/+/x → 写意图（fs.open('/etc/passwd','w') 不该按读取报）
     // P1-7：跳过首参（路径本身以 r/w/a 开头会误当 flags，如 open('auth.txt','r')）——
-    // flags 只认短合法形态（r/w/a/x 可带 +，长度 ≤2），且只在首个参数之后的字符串里找。
+    // flags 认 Node 短合法形态：r/w/a/x（x=排他新建）、可带 s（同步）/x/+（rwx/as/ax/wx 等 2-3 字符），
+    // 长度 ≤3；wx+/ax+/as+/rs+ 等复合也要进入写意图判定（旧正则 ^[rwax]\+?$ 漏复合 → 按读报，盲点）。只认首参之后。
     if ((name === 'open' || name === 'openSync') && READ_OPS.has(name)) {
-      const flags = args.slice(1).find((a): a is string => typeof a === 'string' && /^[rwax]\+?$/.test(a))
+      const flags = args.slice(1).find((a): a is string => typeof a === 'string' && /^(?:[rwax]|[rwa][sx]|[rwa][+]|[rwa][sx][+])$/.test(a))
       if (flags !== undefined && /[wax+]/.test(flags) && isSensitivePath(target, cfg, 'mutate')) {
         return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入（open flags=${flags}）：${target.slice(0, 120)}`, target }
       }
@@ -348,14 +531,15 @@ export function pluginFromStack(stack: string | undefined, roots: Map<string, st
   for (const frame of stack.split('\n')) {
     const m = /\((.+?):\d+:\d+\)/.exec(frame) ?? /at (.+?):\d+:\d+/.exec(frame)
     if (m === null) continue
-    let path = m[1]
-    if (path.startsWith('file://')) path = path.slice('file://'.length)
+    let path = m[1].replace(/\\/g, '/')
+    if (path.startsWith('file://')) path = path.slice('file://'.length).replace(/\\/g, '/')
     let best: { len: number; name: string } | undefined
     for (const [root, name] of roots) {
+      const normRoot = root.replace(/\\/g, '/')
       // M4：要求路径边界——/node_modules/foo 不能匹配 /node_modules/foobar/index.js
-      if ((path === root || path.startsWith(root + '/') || path.startsWith(root + '\\'))
-        && (best === undefined || root.length > best.len)) {
-        best = { len: root.length, name }
+      if ((path === normRoot || path.startsWith(normRoot + '/'))
+        && (best === undefined || normRoot.length > best.len)) {
+        best = { len: normRoot.length, name }
       }
     }
     if (best !== undefined) return best.name
@@ -374,6 +558,8 @@ export function patchModule(
   cfg: HookConfig,
   sink: (alarm: HookAlarm) => void,
   rootIndex: () => Map<string, string>,
+  /** N3 台账观测通道（可选）：每个删/写/读/spawn 事件发一份 LedgerFsEvent；不传则零开销。 */
+  observe?: (evt: LedgerFsEvent) => void,
 ): () => void {
   const original = new Map<string, unknown>()
   const allOps = [...DESTROY_OPS, ...WRITE_OPS, ...READ_OPS, ...PROC_OPS, ...PROBE_OPS]
@@ -388,18 +574,91 @@ export function patchModule(
         return (fn as (...a: unknown[]) => unknown).apply(this, args)
       }
       const alarm = classifyOp({ module: moduleName, op: opName, args }, cfg)
-      if (alarm !== null) {
-        // P1-3：归因失败（loader.entries()/ctx.baseUrl 抛错）不能反噬原始调用——报警保留无主，
-        // fs/子进程操作照常执行（归因只是 best-effort 增强，不是调用链的必要环节）
-        let hint: string | undefined
+      const ledgerRelevant = observe !== undefined && FS_LEDGER_OPS.has(opName)
+      const blockRelevant = moduleName === 'fs' && BLOCK_FS_OPS.has(opName) && confirmBlock.mode() === 'block'
+      // C4（0.1.16 加固）：归因链被篡改（prepareStackTrace 替换 / stackTraceLimit<2）时栈文本不可信
+      const stackTampered = isStackTraceTampered()
+      let hint: string | undefined
+      if (alarm !== null || ledgerRelevant || blockRelevant) {
         try {
-          hint = pluginFromStack(new Error().stack ?? undefined, rootIndex())
+          if (stackTampered) {
+            hint = undefined // 归因不可信：不取栈，操作按归因污染处理
+          } else {
+            // P1-3：归因失败不能反噬原始调用——报警保留无主，操作照常执行
+            hint = pluginFromStack(new Error().stack ?? undefined, rootIndex())
+          }
         } catch {
           hint = undefined
         }
-        sink({ ...alarm, pluginHint: hint })
       }
-      return (fn as (...a: unknown[]) => unknown).apply(this, args)
+      // C4：归因被篡改 + 敏感操作 → 独立 red 报警（主动隐藏归因本身就是攻击信号）
+      if (stackTampered && (alarm !== null || blockRelevant)) {
+        const t = firstString(args) ?? ''
+        sink({
+          severity: 'red',
+          kind: 'attribution-tampered',
+          message: '栈归因被篡改（Error.prepareStackTrace/stackTraceLimit 被修改）——敏感操作无法归属，主动隐藏归因疑为攻击（C4）',
+          target: t.slice(0, 120),
+        })
+      }
+      // N7 确认拦截：判定（族 1/2）在调用原函数之前执行——拦截 = 抛错（fail-open：异常 → 放行）
+      // C4：归因被篡改时用哨兵身份（不匹配任何已知插件）参与族 2 凭据本体判定——
+      // 故意隐藏归因的凭据破坏照样拦截；族 1（已确认插件的后续破坏）在归因不可用下降级（记录边界）
+      let block: BlockDecision | null = null
+      const blockIdentity: string | undefined = stackTampered ? '__vet_attribution_tampered__' : hint
+      if (blockRelevant && blockIdentity !== undefined && (stackTampered || !isOfficial(blockIdentity))) {
+        try {
+          block = confirmBlock.decideBlock(blockIdentity, opName, args)
+          // 族 3/4 覆写：用户显式 'block' 才拦（默认 alarm 只报警，零误拦护栏不变——
+          // 仅破坏类操作面、仅该插件归因；appendFile 等可逆写即使升级也不拦）
+          if (block === null && alarm !== null && (alarm.kind === 'persistence-write' || alarm.kind === 'install-write')) {
+            const family = alarm.kind === 'persistence-write' ? 3 : 4
+            if (confirmBlock.familyMode(family) === 'block') {
+              block = { family, reason: alarm.message }
+            }
+          }
+        } catch {
+          block = null
+        }
+      }
+      if (block !== null) {
+        const target = firstString(args) ?? ''
+        sink({
+          severity: 'red',
+          kind: 'n7-block',
+          message: `vet 拦截（N7 族 ${block.family}）：${block.reason}`,
+          target: target.slice(0, 120),
+          pluginHint: hint,
+        })
+        throw new Error('vet 拦截（N7）：' + block.reason + '；如系误判请将 confirmBlock 降为 alarm 后重试')
+      }
+      const result = (fn as (...a: unknown[]) => unknown).apply(this, args)
+      if (observe !== undefined && !rootIndexing && !vetSelfIo && ledgerRelevant) {
+        const target = firstString(args) ?? ''
+        const evt: LedgerFsEvent = {
+          plugin: hint,
+          module: moduleName,
+          op: opName,
+          target,
+          paths: allStrings(args),
+          sensitive: isSensitivePath(target, cfg, 'read'),
+          bytes: fsOpBytes(opName, args, result),
+        }
+        // 流操作：字节走流计数器（同一流对象上挂 chunk 计数，身份不变）
+        if (typeof result === 'object' && result !== null) {
+          if (opName === 'createReadStream') {
+            attachReadCounter(result as { on?: unknown }, (bytes) => observe({ ...evt, bytes }))
+          } else if (opName === 'createWriteStream') {
+            attachWriteCounter(result as { write?: unknown; end?: unknown }, (bytes) => observe({ ...evt, bytes }))
+          } else {
+            observe(evt)
+          }
+        } else {
+          observe(evt)
+        }
+      }
+      if (alarm !== null) sink({ ...alarm, pluginHint: hint })
+      return result
     }
     mod[opName] = wrapped
   }
@@ -444,6 +703,13 @@ const EGRESS_ALLOWLIST = [
   'unpkg.com',
 ]
 
+/** 网络主机是否参与台账/外泄观测（回环/白名单/unix socket 不算——本地与受信服务不计数）。 */
+export function isTrackedNetHost(hostname: string): boolean {
+  const h = hostname.toLowerCase()
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === 'unix-socket') return false
+  return !EGRESS_ALLOWLIST.includes(h)
+}
+
 /**
  * 从网络模块参数中提取目标（hostname, port, path）。
  * 处理多种参数形态：
@@ -478,6 +744,22 @@ export function extractNetworkTarget(args: unknown[]): { hostname: string; port?
       hostname: first.hostname,
       port: first.port ? parseInt(first.port, 10) : undefined,
       path: first.pathname + first.search,
+    }
+  }
+
+  // Request 实例（fetch(new Request(url, init))）——目标取自 .url。此前漏分支：实例落到下方
+  // options 对象判定全 miss → classify/台账/金丝雀全部失明（网络出口盲点）。body 是流不取读
+  // （保持字符串 body 才计字节的既有约定），仅目标必须回到观测面。
+  if (typeof first === 'object' && first !== null && typeof (first as { url?: unknown }).url === 'string') {
+    try {
+      const url = new URL((first as { url: string }).url)
+      return {
+        hostname: url.hostname,
+        port: url.port ? parseInt(url.port, 10) : undefined,
+        path: url.pathname + url.search,
+      }
+    } catch {
+      return null
     }
   }
   
@@ -583,6 +865,10 @@ export function patchNetworkModule(
   cfg: HookConfig,
   sink: (alarm: HookAlarm) => void,
   rootIndex: () => Map<string, string>,
+  /** N3 台账观测通道（可选）：对非白名单主机包装 write/end 按 chunk 上报字节；不传则零开销。 */
+  observe?: (evt: LedgerNetEvent) => void,
+  /** N4 金丝雀扫描（可选）：出站 URL（一次/请求）与 body 文本（按 chunk）回调；不传则零开销。 */
+  canaryScan?: (hint: string | undefined, text: string, where: 'url' | 'body') => void,
 ): () => void {
   const original = new Map<string, unknown>()
   for (const opName of NET_OPS) {
@@ -594,14 +880,53 @@ export function patchNetworkModule(
         return (fn as (...a: unknown[]) => unknown).apply(this, args)
       }
       const alarm = classifyNetworkOp(moduleName, opName, args, cfg)
+      // C4：归因链被篡改 → 网络归因同样不可信（置空归因，操作照报）
+      const stackTampered = isStackTraceTampered()
+      let hint: string | undefined
+      if (alarm !== null || observe !== undefined || canaryScan !== undefined) {
+        try { if (!stackTampered) hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
+      }
+      if (stackTampered && alarm !== null) {
+        sink({
+          severity: 'red',
+          kind: 'attribution-tampered',
+          message: '栈归因被篡改（Error.prepareStackTrace/stackTraceLimit 被修改）——网络操作无法归属，主动隐藏归因疑为攻击（C4）',
+          target: (firstString(args) ?? '').slice(0, 120),
+        })
+      }
+      const result = (fn as (...a: unknown[]) => unknown).apply(this, args)
+      if (observe !== undefined && !rootIndexing && !vetSelfIo) {
+        const target = extractNetworkTarget(args)
+        if (target !== null && isTrackedNetHost(target.hostname)) {
+          const base: LedgerNetEvent = { plugin: hint, module: moduleName, op: opName, hostname: target.hostname, bytes: 0 }
+          const res = result as { write?: unknown } | null | undefined
+          if (typeof res === 'object' && res !== null && typeof res.write === 'function') {
+            // 请求对象上的 write/end 是全量可见的（TLS 加密前，应用层数据）；按 chunk 上报
+            attachWriteCounter(res, (bytes) => observe({ ...base, bytes }))
+          } else {
+            observe(base)
+          }
+        }
+      }
+      if (canaryScan !== undefined && !rootIndexing && !vetSelfIo) {
+        const t = extractNetworkTarget(args)
+        if (t !== null) {
+          const urlText = typeof args[0] === 'string' ? args[0] : t.hostname + t.path
+          canaryScan(hint, urlText, 'url')
+          if (isTrackedNetHost(t.hostname)) {
+            const res = result as { write?: unknown } | null | undefined
+            if (typeof res === 'object' && res !== null && typeof res.write === 'function') {
+              attachCanaryScanner(res, (text) => canaryScan(hint, text, 'body'))
+            }
+          }
+        }
+      }
       if (alarm !== null) {
-        let hint: string | undefined
-        try { hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
         if (hint === undefined || !isOfficial(hint)) {
           sink({ ...alarm, pluginHint: hint })
         }
       }
-      return (fn as (...a: unknown[]) => unknown).apply(this, args)
+      return result
     }
     mod[opName] = wrapped
   }

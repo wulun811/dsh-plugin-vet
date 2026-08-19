@@ -13,6 +13,7 @@ export default defineConfig({
       include: ['lib/**/*.js'],
       exclude: [
         'lib/client.js',              // 浏览器组件：node 环境不渲染，靠 typecheck + 人工验证
+        'lib/index.bundle.js',        // C1（0.1.16）：宿主发布 bundle——单文件内联全部 src，测试面是逐文件 lib（同 src 编译，bundle 冒烟见 test/bundle.test.ts）
         'lib/index.js',               // 装配入口：apply 冒烟覆盖，行级意义小
         'lib/guard/runtime-watch.js', // 哨兵子进程：真实 /proc 集成场景（sidecarMain 不跑）
         'lib/guard/metrics.js',       // 宿主 /proc 读取：依赖真实系统，难稳定 mock

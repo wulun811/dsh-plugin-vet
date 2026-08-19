@@ -10,6 +10,7 @@ import * as secrets from './secrets.js'
 import * as resourceSafety from './resource-safety.js'
 import * as destructiveOps from './destructive-ops.js'
 import * as networkExfil from './network-exfil.js'
+import * as dynamicTargets from './dynamic-targets.js'
 
 export interface Rule {
   id: string
@@ -28,6 +29,7 @@ export const RULES: Rule[] = [
   { id: 'R9', run: resourceSafety.run },
   { id: 'R11', run: destructiveOps.run },
   { id: 'R13', run: networkExfil.run },
+  { id: 'R15', run: dynamicTargets.run },
 ]
 
 /** Execute all enabled rules over one source file. */

@@ -69,6 +69,16 @@ function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, ad
     }
     return
   }
+  // round-9（0.1.16 加固）：间接/前缀形态——globalThis.eval / window.eval /
+  // globalThis['eval'] / (0, eval) 是经典反静态分析惯用法，此前全漏检
+  const indirect = indirectEvalName(callee)
+  if (indirect !== null) {
+    add(n, 'high', 'certain',
+      indirect.name === 'eval'
+        ? '间接 eval 动态执行（' + indirect.what + '，任意代码执行）'
+        : '间接 Function 动态构造（' + indirect.what + '）')
+    return
+  }
   if (name === 'import') {
     add(n, 'medium', 'likely', '动态 import()')
     return
@@ -84,7 +94,11 @@ function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, ad
     // 普通模块（path/fs/自定义包）→ medium（正常 CJS 插件 require 标准库是常规操作，
     // 整体判 suspicious 是误报——R6 已对危险模块单独提示）
     const arg = n.arguments?.[0]
-    const mod = arg !== undefined && (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) ? arg.text : undefined
+    // round-9（0.1.16 加固）：require('child' + '_process') 拼接形态此前漏检（只认字面量）——
+    // stringyValue 常量折叠后按同一口径分级
+    const mod = arg !== undefined
+      ? (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg) ? arg.text : stringyValue(arg, sf)?.text)
+      : undefined
     if (ctx.request.kind === 'files') {
       if (mod !== undefined && /^(node:)?(child_process|vm|worker_threads|cluster|net|dgram|tls|https?|http2)/.test(mod)) {
         add(n, 'high', 'likely', `require('${mod}') 危险内置模块（执行/网络能力触达）`)
@@ -104,6 +118,38 @@ function checkCall(n: ts.CallExpression, sf: ts.SourceFile, ctx: RuleContext, ad
     && VM_EXEC.has(callee.name.text)) {
     add(n, 'high', 'certain', `vm.${callee.name.text}() 沙箱内执行代码`)
   }
+}
+
+/**
+ * 间接/前缀 eval·Function 形态识别（round-9，0.1.16 加固）：
+ * - 属性访问：globalThis.eval / global.eval / window.eval（前缀标识符限定，不含任意对象方法）
+ * - 元素访问：globalThis['eval'] / globalThis['Function']
+ * - 逗号运算符：(0, eval) / (safe, Function)——经典 indirect eval
+ * 返回 { name, what }；非这些形态返回 null。
+ */
+function indirectEvalName(callee: ts.Expression): { name: string; what: string } | null {
+  const isGlobalBase = (id: ts.Identifier): boolean =>
+    id.text === 'globalThis' || id.text === 'global' || id.text === 'window'
+  if (ts.isPropertyAccessExpression(callee)
+    && ts.isIdentifier(callee.expression) && isGlobalBase(callee.expression)
+    && (callee.name.text === 'eval' || callee.name.text === 'Function')) {
+    return { name: callee.name.text, what: callee.expression.text + '.' + callee.name.text }
+  }
+  if (ts.isElementAccessExpression(callee)
+    && ts.isIdentifier(callee.expression) && isGlobalBase(callee.expression)
+    && callee.argumentExpression !== undefined
+    && (ts.isStringLiteral(callee.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(callee.argumentExpression))
+    && (callee.argumentExpression.text === 'eval' || callee.argumentExpression.text === 'Function')) {
+    const nm = callee.argumentExpression.text
+    return { name: nm, what: callee.expression.text + "['" + nm + "']" }
+  }
+  if (ts.isBinaryExpression(callee) && callee.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+    const last = unwrapParens(callee.right)
+    if (ts.isIdentifier(last) && (last.text === 'eval' || last.text === 'Function')) {
+      return { name: last.text, what: '(0, ' + last.text + ')' }
+    }
+  }
+  return null
 }
 
 function checkNew(n: ts.NewExpression, sf: ts.SourceFile, add: (n: ts.Node, sev: Severity, conf: Confidence, msg: string) => void): void {

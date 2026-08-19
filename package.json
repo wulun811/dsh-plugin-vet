@@ -1,7 +1,7 @@
 {
   "name": "@jieai/dsh-plugin-vet",
-  "version": "0.1.12",
-  "description": "Plugin trust pipeline for deepseek-harness (DSH): deterministic static scan, runtime guard (T1 sentinel + T2 hooks), audit protocol skill, GUI shield. Alarm-only monitor, never an enforcer.",
+  "version": "0.1.16",
+  "description": "Plugin trust pipeline for deepseek-harness (DSH): deterministic static scan, runtime guard (T1 sentinel + T2 hooks), audit protocol skill, GUI shield. Alarms by default; N7 confirm-block intercepts confirmed destructive fs ops (family 1/2) by throwing.",
   "license": "MIT",
   "author": {
     "name": "wulun811",
@@ -33,7 +33,7 @@
   "engines": {
     "node": ">=22.19"
   },
-  "main": "lib/index.js",
+  "main": "lib/index.bundle.js",
   "types": "lib/types/index.d.ts",
   "bin": {
     "vet-gate": "lib/gate-cli.js"
@@ -41,7 +41,7 @@
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
-      "import": "./lib/index.js"
+      "import": "./lib/index.bundle.js"
     },
     "./client": {
       "types": "./lib/client.d.ts",
@@ -55,7 +55,14 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
+    "lib/index.bundle.js",
+    "lib/gate.js",
+    "lib/gate-cli.js",
+    "lib/client.js",
+    "lib/client.d.ts",
+    "lib/scanner",
+    "lib/scanner-bin",
+    "lib/types",
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
@@ -78,7 +85,8 @@
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('lib', { recursive: true, force: true })\"",
-    "build": "npm run clean && npm run build:scanner && npm run build:src && npm run build:client",
+    "build": "npm run clean && npm run build:scanner && npm run build:src && npm run bundle:host && npm run build:client",
+    "bundle:host": "node scripts/bundle-host.mjs",
     "build:scanner": "tsc -p tsconfig.scanner.json",
     "build:src": "tsc -p tsconfig.src.json",
     "build:client": "node scripts/build-client.mjs",

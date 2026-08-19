@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import { scan } from '../scanner/client.js'
@@ -9,6 +8,7 @@ import type { ScanRequest } from '../scanner/protocol.js'
 import type { PluginScorecard } from '../report/types.js'
 import { renderScorecard } from '../report/render.js'
 import { PACKAGE_NAME } from '../invariant.js'
+import { resolvePkgRoot } from '../pkg-root.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
 import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline } from '../guards/content-baseline.js'
 
@@ -19,10 +19,10 @@ export interface ScanPluginArgs {
   reason?: string
 }
 
-/** vet 自身包根（lib/tools/scan-plugin.js 上溯两级；realpath 防符号链接绕过）。 */
+/** vet 自身包根（向上搜索 package.json 定位，兼容 bundle/逐文件两种形态；realpath 防符号链接绕过）。 */
 const SELF_ROOT = (() => {
   try {
-    return realpathSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..'))
+    return realpathSync(resolvePkgRoot())
   } catch {
     return ''
   }
@@ -191,6 +191,20 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
               verdict: { type: 'string', required: true },
               staticScore: { type: 'number', required: true },
               findings: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } },
+              capabilities: {
+                type: 'object',
+                additionalProperties: false,
+                description: '插件静态能力清单（N1 能力差分基础）',
+                properties: {
+                  hosts: { type: 'array', items: { type: 'string' } },
+                  fsPaths: { type: 'array', items: { type: 'string' } },
+                  spawnCmds: { type: 'array', items: { type: 'string' } },
+                  imports: { type: 'array', items: { type: 'string' } },
+                  hasNetwork: { type: 'boolean' },
+                  hasExec: { type: 'boolean' },
+                  esmNamedBuiltins: { type: 'boolean' },
+                },
+              },
             },
           },
         },
@@ -218,6 +232,9 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
           staticScore: response.report.staticScore,
           // 输出 schema 推断的 findings 项为开放对象，静态 Finding[] 断言为 JSON 值形状
           findings: response.report.findings as unknown as Record<string, JsonValue>[],
+          // N1 能力清单：插件静态触达面（hosts/fsPaths/spawnCmds/imports/hasNetwork/hasExec）
+          // 供门户/审计工具入库作能力索引；capabilities 缺失时不输出（code 模式无文件上下文）
+          ...(response.report.capabilities !== undefined ? { capabilities: response.report.capabilities } : {}),
         },
       }
     },

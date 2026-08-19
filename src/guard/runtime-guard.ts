@@ -1,10 +1,13 @@
 /**
  * 运行时守卫装配（D22）：runtimeGuard: 'watch' 时启用 T1 哨兵（子进程 /proc 监视）
  * + T2 钩子（进程内包装 fs/child_process）。
- * alarm-only：所有报警进 VetStatus；绝不自动拦截/杀进程（PLAN §2.1 D21）。
+ * 默认 alarm：所有报警进 VetStatus，不拦截；N7（0.1.14 起）对确认破坏类操作
+ * （fs 族 1/2，confirmBlock 默认 block）在钩子侧抛错拦截（PLAN §2.1 D21 修订：
+ * 高置信破坏 ≠ 纯观测；族 3/4 默认仍只报警）。
  */
 import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
+import { resolveVetFile } from '../pkg-root.js'
 import fs from 'node:fs'
 import cp from 'node:child_process'
 import http from 'node:http'
@@ -17,10 +20,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { VetConfig } from '../config.js'
 import { VetStatus, type VetAlarm } from './status.js'
 import type { WatchAlarm } from './runtime-watch.js'
-import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, type HookAlarm } from './runtime-hooks.js'
+import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, extractNetworkTarget, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, chunkBytes, isTrackedNetHost, type HookAlarm } from './runtime-hooks.js'
 import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../invariant.js'
-import { ensureHoneypot } from './honeypot.js'
+import { ensureHoneypot, ensureIntegrityCanaries } from './honeypot.js'
+import { capabilityDiff, diffKindOf } from './capability-diff.js'
+import { exfilLedger, type LedgerAlarm, type LedgerFsEvent, type LedgerNetEvent } from './exfil-ledger.js'
+import { canaryStore } from './canary.js'
+import { confirmBlock } from './confirm-block.js'
 
 /** T1 哨兵是否已启动（invariant 断言用）。 */
 export let sidecarSpawned = false
@@ -56,6 +63,18 @@ export function t2AlarmId(kind: string, target: string | undefined, pluginHint: 
   return `t2:${kind}:${target ?? ''}:${pluginHint ?? ''}`
 }
 
+/**
+ * 0.1.16 修正：未归因的会话日志删除（~/.dsh/sessions 下分片文件轮换）从 red 降到 yellow。
+ * 这类删除是宿主自身运维——宿主不会"攻击自己"；归因到插件的会话日志删除仍保持 red
+ * （可能是插件在销毁证据、规避审计）。其余报警严重度原样透传。
+ */
+export function t2Severity(alarm: HookAlarm, pluginHint: string | undefined): HookAlarm['severity'] {
+  if (alarm.kind === 'fs-destroy' && alarm.sessionLog === true && pluginHint === undefined) {
+    return 'yellow'
+  }
+  return alarm.severity
+}
+
 function envSidecarPid(): number | undefined {
   const raw = process.env[SIDECAR_PID_ENV]
   if (raw === undefined || raw === '') return undefined
@@ -75,17 +94,42 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+/** M9（0.1.16 加固）：/proc/<pid>/cmdline 是否含 vet 侧车标记（Linux）。 */
+export function pidCmdlineIsVetSidecar(pid: number): boolean {
+  try {
+    return readFileSync('/proc/' + pid + '/cmdline').includes(Buffer.from('vet-sidecar'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * M9（0.1.16 加固）：安全终止侧车——先核对 cmdline 再 SIGTERM，防 OS PID 复用误杀无辜进程
+ * （旧实现只看 kill(pid,0) 存活即杀：侧车已退出 + 5s 窗口内 PID 被复用时会把别的进程干掉）。
+ * 非 Linux（无 /proc）回退存活探测；被杀对象身份存疑时不动手并返回 false。
+ */
+export function safeKillSidecar(pid: number, signal: NodeJS.Signals = 'SIGTERM'): boolean {
+  if (!pidAlive(pid)) return false
+  if (process.platform === 'linux' && !pidCmdlineIsVetSidecar(pid)) return false
+  try {
+    process.kill(pid, signal)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** 按 env 注册表 kill 遗留哨兵（关闭守卫时调用）。 */
 function killSidecarFromEnv(logger: { warn: (m: string) => void }): void {
   const pid = envSidecarPid()
   if (pid === undefined) return
-  try {
-    if (pidAlive(pid)) process.kill(pid, 'SIGTERM')
-  } catch {
-    // 已退出
+  const killed = safeKillSidecar(pid)
+  if (!killed && pidAlive(pid)) {
+    // M9：存活但身份存疑（PID 复用/找不到 cmdline）——不再误杀，仅告警
+    logger.warn(`vet: 哨兵 pid=${pid} 存活但身份存疑（可能被 PID 复用），未终止——请人工确认`)
   }
   delete process.env[SIDECAR_PID_ENV]
-  logger.warn(`vet: 运行时守卫关闭，终止哨兵 (pid=${pid})`)
+  if (killed) logger.warn(`vet: 运行时守卫关闭，终止哨兵 (pid=${pid})`)
 }
 
 // P2-5 修复：isOfficial 统一从 runtime-hooks.ts 导入（避免包名变更时一处遗漏）
@@ -200,7 +244,7 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     String(config.runtimeGrowthMb),
     String(config.runtimeGrowthWindowMs),
   ]
-  const sidecarPath = fileURLToPath(new URL('../guard/runtime-watch.js', import.meta.url))
+  const sidecarPath = resolveVetFile('guard/runtime-watch.js')
   let child: ReturnType<typeof spawn> | undefined
   let sidecarAlive = false
   let stopping = false
@@ -222,10 +266,9 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     if (existing !== undefined && pidAlive(existing)) {
       ctx.logger.warn(`vet: 检测到既有哨兵 (pid=${existing})——终止并以新实例接管（旧报警通道不可复用）`)
       delete process.env[SIDECAR_PID_ENV]
-      try {
-        process.kill(existing, 'SIGTERM')
-      } catch {
-        // 已退出
+      // M9：先核对身份再终止（PID 复用保护）
+      if (!safeKillSidecar(existing)) {
+        ctx.logger.warn(`vet: 既有哨兵 pid=${existing} 存活但身份存疑，未终止——按接管流程继续（新实例将接管监控）`)
       }
       sidecarSpawned = false
       sidecarAlive = false
@@ -317,10 +360,9 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     const pid = envSidecarPid()
     if (pid !== undefined && pidAlive(pid)) {
       // 复用模式 child=undefined：走 env 注册表 kill（热重载后旧模块的 child 引用已不可靠）
-      try {
-        process.kill(pid, 'SIGTERM')
-      } catch {
-        // 已退出
+      // M9：先核对 cmdline 再终止（PID 复用保护）
+      if (!safeKillSidecar(pid)) {
+        ctx.logger.warn(`vet: 卸载时哨兵 pid=${pid} 身份存疑，未终止`)
       }
       delete process.env[SIDECAR_PID_ENV]
     } else if (sidecarAlive && child !== undefined) {
@@ -338,10 +380,14 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     // dsh 自身高频读写 ~/.dsh（会话持久化/配置/存储），.dsh 敏感段加入后若只降噪 spawn
     // 会刷屏成永久黄灯。报警面 = 第三方插件与无主操作；第三方无法伪造归因（按真实栈路径判定）。
     if (alarm.pluginHint !== undefined && isOfficial(alarm.pluginHint)) return
+    // N7 族 3/4 报警只对第三方归因有效（宿主/用户自己写 bashrc、npm install 等无主操作不报）
+    if ((alarm.kind === 'persistence-write' || alarm.kind === 'install-write') && alarm.pluginHint === undefined) return
+    // N7 族 1 触发：完整性金丝雀被写删（归因插件）→ 进入拦截名单（后续破坏类操作抛错）
+    if (alarm.kind === 'integrity' && alarm.pluginHint !== undefined) confirmBlock.markFamily1(alarm.pluginHint)
     const entry: VetAlarm = {
       // P1-6：id 拼 pluginHint——两个插件碰同一敏感路径不再同 id 互吞（后到者报警被去重吞掉）
       id: t2AlarmId(alarm.kind, alarm.target, alarm.pluginHint),
-      severity: alarm.severity,
+      severity: t2Severity(alarm, alarm.pluginHint),
       source: 't2',
       kind: alarm.kind,
       message: alarm.message,
@@ -351,6 +397,72 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       at: Date.now(),
     }
     status.record(entry)
+    // N1 差分：敏感操作观测 → 静态能力清单对账（隐藏能力 red/certain；只差分已扫描插件）
+    const kind = diffKindOf(alarm.kind)
+    if (kind !== null && alarm.pluginHint !== undefined && alarm.target !== undefined) {
+      const hidden = capabilityDiff.observeAndCheck({
+        plugin: alarm.pluginHint,
+        kind,
+        value: alarm.target,
+      })
+      if (hidden !== null) {
+        status.record({
+          id: `n1-hidden:${hidden.plugin}:${hidden.kind}`,
+          severity: 'red',
+          source: 't2',
+          kind: 'n1-hidden',
+          message: hidden.message,
+          target: hidden.value,
+          pluginHint: hidden.plugin,
+          at: Date.now(),
+        })
+      }
+    }
+  }
+  // N3 台账接线：T2 观测 → 字节台账 + 破坏签名（官方归因不建桶；报警经同一 sink 去重/归因）
+  const emitLedger = (plugin: string | undefined, alarms: LedgerAlarm[]): void => {
+    for (const a of alarms) {
+      // N7 族 1 触发：N3 破坏签名组合（勒索实锤）→ 拦截名单
+      if (a.kind === 'n3-ransom' && plugin !== undefined) confirmBlock.markFamily1(plugin)
+      sink({ severity: a.severity, kind: a.kind, message: a.message, target: a.target, pluginHint: plugin })
+    }
+  }
+  // N4 金丝雀确认外泄：出站 URL/body/spawn 参数中发现活跃金丝雀 → 100% 外泄确认（red）。
+  // 官方归因降噪；命中同时把该插件台账标记为疑似（阈值降最低，N3）。
+  const recordCanary = (where: 'url' | 'body' | 'spawn', hit: string, plugin: string | undefined): void => {
+    if (plugin !== undefined && isOfficial(plugin)) return
+    if (plugin !== undefined) exfilLedger.markSuspected(plugin)
+    // N7 族 1 触发：canary 泄漏 = 100% 破坏确认 → 拦截名单
+    if (plugin !== undefined) confirmBlock.markFamily1(plugin)
+    status.record({
+      id: `n4-canary:${hit}:${plugin ?? ''}`,
+      severity: 'red',
+      source: 't2',
+      kind: 'canary-leak',
+      message: `蜜罐金丝雀外泄确认：出站${where === 'url' ? 'URL' : where === 'spawn' ? '命令参数' : '数据体'}中发现金丝雀 ${hit.slice(0, 16)}…（${hit.length} 位）——100% 确认外泄（N4；${plugin ?? '无主'}）`,
+      target: hit,
+      pluginHint: plugin,
+      at: Date.now(),
+    })
+  }
+  const ledgerFsObserver = (evt: LedgerFsEvent): void => {
+    if (evt.plugin !== undefined && isOfficial(evt.plugin)) return
+    // N4：spawn 参数匹配金丝雀（命令含 curl/wget/nc 场景；网络体走 netCanaryScan）
+    if (evt.module === 'child_process' && canaryStore.count() > 0) {
+      const hit = canaryStore.match(evt.paths.join(' '))
+      if (hit !== undefined) recordCanary('spawn', hit, evt.plugin)
+    }
+    emitLedger(evt.plugin, exfilLedger.observeFs(evt))
+  }
+  const ledgerNetObserver = (evt: LedgerNetEvent): void => {
+    if (evt.plugin !== undefined && isOfficial(evt.plugin)) return
+    emitLedger(evt.plugin, exfilLedger.observeNet(evt))
+  }
+  const netCanaryScan = (hint: string | undefined, text: string, where: 'url' | 'body'): void => {
+    if (canaryStore.count() === 0) return
+    const hit = canaryStore.match(text)
+    if (hit === undefined) return
+    recordCanary(where, hit, hint)
   }
   const hookCfg = { ...DEFAULT_HOOK_CONFIG }
   // D27 蜜罐：guard watch 时按配置播种诱饵并登记蜜罐根（alarm-only；失败只告警）
@@ -358,21 +470,26 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     const hpRoot = ensureHoneypot(config.honeypot.dir, ctx.logger)
     if (hpRoot !== undefined) hookCfg.honeypotRoots = [hpRoot]
   }
-  disposers.push(patchModule(fs as unknown as Record<string, unknown>, 'fs', hookCfg, sink, rootIndex))
+  // N4 完整性金丝雀（仅 ~/.dsh 内，watch 恒开）：写/删 → red kind=integrity；失败只告警
+  hookCfg.integrityRoots = ensureIntegrityCanaries('', ctx.logger)
+  // N7 确认拦截模式（进程内存；DSH 重启/配置变更重新生效）
+  confirmBlock.setMode(config.confirmBlock)
+  confirmBlock.setFamilyModes(config.confirmBlockFamily3, config.confirmBlockFamily4)
+  disposers.push(patchModule(fs as unknown as Record<string, unknown>, 'fs', hookCfg, sink, rootIndex, ledgerFsObserver))
   // fs.promises 是独立对象（require('fs').promises / node:fs/promises 同一对象），同步包装不覆盖 → 必须单独包装（D26 审核补漏）
   const promisesMod = (fs as unknown as { promises?: Record<string, unknown> }).promises
   if (promisesMod !== undefined) {
-    disposers.push(patchModule(promisesMod, 'fs', hookCfg, sink, rootIndex))
+    disposers.push(patchModule(promisesMod, 'fs', hookCfg, sink, rootIndex, ledgerFsObserver))
   }
-  disposers.push(patchModule(cp as unknown as Record<string, unknown>, 'child_process', hookCfg, sink, rootIndex))
+  disposers.push(patchModule(cp as unknown as Record<string, unknown>, 'child_process', hookCfg, sink, rootIndex, ledgerFsObserver))
 
   // ── 网络出口观测（P1 特性）─────────────────────────────────────
   if (config.networkEgress !== false) {
-    disposers.push(patchNetworkModule(http as unknown as Record<string, unknown>, 'http', hookCfg, sink, rootIndex))
-    disposers.push(patchNetworkModule(https as unknown as Record<string, unknown>, 'https', hookCfg, sink, rootIndex))
-    disposers.push(patchNetworkModule(net as unknown as Record<string, unknown>, 'net', hookCfg, sink, rootIndex))
-    disposers.push(patchNetworkModule(http2 as unknown as Record<string, unknown>, 'http2', hookCfg, sink, rootIndex))
-    disposers.push(patchNetworkModule(tls as unknown as Record<string, unknown>, 'tls', hookCfg, sink, rootIndex))
+    disposers.push(patchNetworkModule(http as unknown as Record<string, unknown>, 'http', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
+    disposers.push(patchNetworkModule(https as unknown as Record<string, unknown>, 'https', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
+    disposers.push(patchNetworkModule(net as unknown as Record<string, unknown>, 'net', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
+    disposers.push(patchNetworkModule(http2 as unknown as Record<string, unknown>, 'http2', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
+    disposers.push(patchNetworkModule(tls as unknown as Record<string, unknown>, 'tls', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
     
     // dgram 需要特殊处理：createSocket() 返回实例，send 是实例方法
     const originalCreateSocket = dgram.createSocket
@@ -385,24 +502,45 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
         // 形态2: socket.send(msg, port, address, callback)
         let port: number | undefined
         let address: string | undefined
+        // 实际发送字节（形态1 = length 切片，不能计整个 buffer）
+        let sentBytes = 0
         
         if (sendArgs.length >= 5 && typeof sendArgs[1] === 'number' && typeof sendArgs[2] === 'number' && typeof sendArgs[3] === 'number' && typeof sendArgs[4] === 'string') {
-          // 形态1: msg, offset, length, port, address
+          // 形态1: msg, offset, length, port, address —— 发送的是 msg[offset..offset+length)，字节=length
           port = sendArgs[3] as number
           address = sendArgs[4] as string
+          sentBytes = Math.max(0, sendArgs[2] as number)
         } else if (sendArgs.length >= 3 && typeof sendArgs[1] === 'number' && typeof sendArgs[2] === 'string') {
-          // 形态2: msg, port, address
+          // 形态2: msg, port, address —— 整块 msg
           port = sendArgs[1] as number
           address = sendArgs[2] as string
+          sentBytes = chunkBytes(sendArgs[0])
         }
         
         if (port !== undefined && address !== undefined) {
           const alarm = classifyNetworkOp('dgram', 'send', [{ host: address, port }], hookCfg)
-          if (alarm !== null && !(isRootIndexing() || isVetSelfIo())) {
+          if (!(isRootIndexing() || isVetSelfIo())) {
             let hint: string | undefined
             try { hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
-            if (hint === undefined || !isOfficial(hint)) {
+            if (alarm !== null && (hint === undefined || !isOfficial(hint))) {
               sink({ ...alarm, pluginHint: hint })
+            }
+            // N3 台账：dgram 写出字节 + NET_WRITE token
+            const host = address.toLowerCase()
+            if (isTrackedNetHost(host) && (hint === undefined || !isOfficial(hint))) {
+              emitLedger(hint, exfilLedger.observeNet({
+                plugin: hint,
+                module: 'dgram',
+                op: 'send',
+                hostname: host,
+                bytes: sentBytes,
+              }))
+            }
+            // N4 金丝雀：dgram 报文体匹配
+            if (canaryStore.count() > 0 && (hint === undefined || !isOfficial(hint))) {
+              const msgText = typeof sendArgs[0] === 'string' ? sendArgs[0] : ''
+              const chit = canaryStore.match(msgText)
+              if (chit !== undefined) recordCanary('body', chit, hint)
             }
           }
         }
@@ -417,11 +555,37 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     if (typeof originalFetch === 'function') {
       globalThis.fetch = function vetFetchWrapper(...args: unknown[]) {
         const alarm = classifyNetworkOp('http', 'fetch', args, hookCfg)
-        if (alarm !== null && !(isRootIndexing() || isVetSelfIo())) {
+        if (!(isRootIndexing() || isVetSelfIo())) {
           let hint: string | undefined
           try { hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
-          if (hint === undefined || !isOfficial(hint)) {
+          if (alarm !== null && (hint === undefined || !isOfficial(hint))) {
             sink({ ...alarm, pluginHint: hint })
+          }
+          // N3 台账：fetch 出站（body 字节仅字符串形态可计，其余 0）
+          const target = extractNetworkTarget(args)
+          if (target !== null && isTrackedNetHost(target.hostname) && (hint === undefined || !isOfficial(hint))) {
+            const body = (args[1] as { body?: unknown } | undefined)?.body
+            const bytes = typeof body === 'string' ? Buffer.byteLength(body, 'utf8') : 0
+            emitLedger(hint, exfilLedger.observeNet({
+              plugin: hint,
+              module: 'fetch',
+              op: 'fetch',
+              hostname: target.hostname,
+              bytes,
+            }))
+          }
+          // N4 金丝雀：fetch URL 与字符串 body 匹配
+          if (canaryStore.count() > 0 && (hint === undefined || !isOfficial(hint))) {
+            const urlText = typeof args[0] === 'string' ? args[0] : (target !== null ? target.hostname + target.path : '')
+            let chit = canaryStore.match(urlText)
+            if (chit !== undefined) {
+              recordCanary('url', chit, hint)
+            } else {
+              const body = (args[1] as { body?: unknown } | undefined)?.body
+              const bodyText = typeof body === 'string' ? body : ''
+              chit = canaryStore.match(bodyText)
+              if (chit !== undefined) recordCanary('body', chit, hint)
+            }
           }
         }
         return (originalFetch as Function).apply(this, args)

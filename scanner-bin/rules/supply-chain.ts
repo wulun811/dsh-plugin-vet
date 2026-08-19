@@ -7,7 +7,8 @@ import type { Finding } from '../protocol.js'
  * is advisory info for the LLM audit round (known-vulnerability matching is
  * deferred: data source selection pending, D15).
  */
-const HOOKS = ['preinstall', 'install', 'postinstall', 'uninstall', 'preuninstall']
+// round-9（0.1.16 加固）：prepare 在本地 npm install（无参）/publish/git 依赖时执行——真实任意代码执行面
+const HOOKS = ['preinstall', 'install', 'postinstall', 'prepare', 'uninstall', 'preuninstall']
 const DEP_KEYS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
 
 /** Parse a package.json manifest; returns R10 findings (invalid JSON -> none). */

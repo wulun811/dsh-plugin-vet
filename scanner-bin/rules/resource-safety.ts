@@ -18,7 +18,8 @@ import { walk, numberyValue, stringyValue, lineOf } from '../ast.js'
  *   in-loop map.set growth signal, in-loop Promise.all concurrency signal.
  */
 const ALLOC_LIMIT = 100_000_000
-const SPAWN_CALLS = new Set(['spawn', 'exec', 'execFile', 'fork'])
+// round-9（0.1.16 加固）：sync 变体同属 fork-bomb 面（while(1){ execSync() } 此前漏检）
+const SPAWN_CALLS = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'])
 const SPAWN_NEWS = new Set(['Worker'])
 /**
  * (a+)+ style ReDoS detection. round-5/6 重写（外部实测驱动）：
@@ -27,12 +28,23 @@ const SPAWN_NEWS = new Set(['Worker'])
  * - round-6：alternation 分支互斥（((?:[^']|'')*)）→ 线性，不报；
  *   分支重叠（(a|aa)+：aa 以 a 开头）→ 指数回溯，报
  */
-function isRedosPattern(pattern: string): boolean {
+/** 位置字符是否被（奇数个）反斜杠转义：\( \) 是字面量括号，不参与组深度计数。 */
+function isEscapedCodePoint(pattern: string, idx: number): boolean {
+  let bs = 0
+  for (let k = idx - 1; k >= 0 && pattern[k] === '\\'; k--) bs++
+  return bs % 2 === 1
+}
+
+export function isRedosPattern(pattern: string): boolean {
   const findClose = (open: number): number => {
     let depth = 0
     for (let j = open; j < pattern.length; j++) {
-      if (pattern[j] === '(') depth++
-      else if (pattern[j] === ')') {
+      const ch = pattern[j]
+      if (ch !== '(' && ch !== ')') continue
+      // round-9（0.1.16 加固）：转义括号不改变组深度
+      if (isEscapedCodePoint(pattern, j)) continue
+      if (ch === '(') depth++
+      else {
         depth--
         if (depth === 0) return j
       }
@@ -50,8 +62,12 @@ function isRedosPattern(pattern: string): boolean {
     let depth = 0
     for (let j = 0; j < body.length; j++) {
       const ch = body[j]
-      if (ch === '(') { depth++; continue }
-      if (ch === ')') { depth--; continue }
+      if (ch === '(' || ch === ')') {
+        if (isEscapedCodePoint(body, j)) continue
+        if (ch === '(') depth++
+        else depth--
+        continue
+      }
       if (depth === 0 && (ch === '*' || ch === '+' || ch === '?')) {
         if (j === 0 || body[j - 1] !== '\\') { hasInnerQuant = true; break }
       }
@@ -73,9 +89,13 @@ function hasAlternation(body: string): boolean {
   let depth = 0
   for (let j = 0; j < body.length; j++) {
     const ch = body[j]
-    if (ch === '(') depth++
-    else if (ch === ')') depth--
-    else if (ch === '|' && depth === 0) return true
+    if (ch === '(' || ch === ')') {
+      if (isEscapedCodePoint(body, j)) continue
+      if (ch === '(') depth++
+      else depth--
+      continue
+    }
+    if (ch === '|' && depth === 0) return true
   }
   return false
 }
@@ -90,8 +110,11 @@ function branchesDisjoint(body: string): boolean {
   let cur = ''
   for (let j = 0; j < body.length; j++) {
     const ch = body[j]
-    if (ch === '(') depth++
-    else if (ch === ')') depth--
+    if (ch === '(' || ch === ')') {
+      if (isEscapedCodePoint(body, j)) continue
+      if (ch === '(') depth++
+      else depth--
+    }
     if (ch === '|' && depth === 0) { branches.push(cur); cur = ''; continue }
     cur += ch
   }
@@ -214,7 +237,9 @@ function unboundedLoop(n: ts.Node): ts.WhileStatement | ts.ForStatement | undefi
 
 /** R9-1 allocation checks: new Array / Array() / Array.from({length}) / Buffer.alloc*. */
 function allocFinding(ruleText: string, n: ts.Node, sf: ts.SourceFile, amount: number): Finding | undefined {
-  if (amount < ALLOC_LIMIT) return undefined
+  // 非有限值防护：Infinity（如 2 ** 1e308）≥ LIMIT 仍正确告警；NaN 会打印 "NaN ≥ ..." 噪音 finding，
+  // 直接跳过（0 幂等边界值不产生无意义告警）。
+  if (Number.isNaN(amount) || amount < ALLOC_LIMIT) return undefined
   return {
     rule: 'R9',
     severity: 'high',

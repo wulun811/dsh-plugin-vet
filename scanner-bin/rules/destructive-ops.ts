@@ -30,7 +30,7 @@ function fsBase(callee: ts.PropertyAccessExpression): string | undefined {
   return undefined
 }
 
-export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
+export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const found: Finding[] = []
   walk(sf, n => {
     if (!ts.isCallExpression(n)) return
@@ -63,5 +63,20 @@ export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
       push('medium', '遍历敏感目录：fs.' + op + '(' + (pathText ?? '?') + ')')
     }
   })
+  // N2：解码语料中的敏感路径（base64/hex/charCode 还原的路径——代码刻意隐藏 fs 目标）
+  for (const d of ctx.decodedLiterals ?? []) {
+    if (SENSITIVE_PATH.test(d.text)) {
+      found.push({
+        rule: 'R11',
+        severity: 'high',
+        confidence: 'likely',
+        decodedFrom: d.method,
+        message: '解码还原的敏感路径（' + d.method + '）：' + d.text.slice(0, 120),
+        evidence: d.text.slice(0, 200),
+        file: d.file,
+        line: d.line,
+      })
+    }
+  }
   return found
 }
