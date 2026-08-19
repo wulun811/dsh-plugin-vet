@@ -8,7 +8,7 @@ import { isSessionLogFile } from '../lib/guard/runtime-hooks.js'
 import { readHostMetrics } from '../lib/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../lib/guard/status-route.js'
-import { decideRespawn, t2AlarmId, t2Severity, installRuntimeGuard, isAttributableEntry } from '../lib/guard/runtime-guard.js'
+import { decideRespawn, t2AlarmId, t2Severity, installRuntimeGuard, isAttributableEntry, isSuppressUnattributedSessionLog } from '../lib/guard/runtime-guard.js'
 import { hasAuditRecord, setArchiveDirForTest } from '../lib/audit/archive.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import fsDefault from 'node:fs'
@@ -402,6 +402,15 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(classifyOp({ module: 'fs', op: 'realpathSync', args: ['/home/user/.dsh/profiles/node_modules/@deepseek-ai/dsh-agent-loop/package.json'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
     expect(classifyOp({ module: 'fs', op: 'realpath', args: ['/home/user/.dsh/profiles/node_modules/@deepseek-ai/dsh-base/package.json'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
     expect(classifyOp({ module: 'fs', op: 'statSync', args: ['/home/user/.dsh/profiles/node_modules/@deepseek-ai/dsh-client/package.json'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // 0.1.19：.dsh 直接放 profile（无 profiles 层）也豁免——用户机实测 DSH 升级安装依赖
+    // （@joplin/turndown-plugin-gfm、@mixmark-io/domino 等）时 realpathSync/readFileSync
+    // 刷出 fs-probe/fs-read 误报。旧正则只豁免 profiles(?:/.+)? 布局
+    expect(isSensitivePath('/home/chenzheng/.dsh/web/node_modules/@joplin/turndown-plugin-gfm/lib/turndown-plugin-gfm.cjs.js', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    expect(isSensitivePath('/home/chenzheng/.dsh/web/node_modules/@mixmark-io/domino/lib/impl.js', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    expect(classifyOp({ module: 'fs', op: 'realpathSync', args: ['/home/chenzheng/.dsh/web/node_modules/@joplin/turndown-plugin-gfm/lib/turndown-plugin-gfm.cjs.js'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/home/chenzheng/.dsh/web/node_modules/@mixmark-io/domino/lib/impl.js'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
+    // 顶层 .dsh/node_modules（hoisted 到 harness 根）同样豁免
+    expect(isSensitivePath('/home/user/.dsh/node_modules/@deepseek-ai/dsh-base/package.json', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
     // 但 ~/.dsh/.credentials.yaml、~/.dsh/sessions/** 等真实凭据面仍正常报警
     expect(isSensitivePath('/home/user/.dsh/.credentials.yaml', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
     expect(isSensitivePath('/home/user/.dsh/sessions/abc/credentials', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
@@ -456,6 +465,18 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(t2Severity({ ...base, sessionLog: undefined }, undefined)).toBe('red')
     // 其它 kind 原样透传（不受会话日志规则影响）
     expect(t2Severity({ ...base, kind: 'fs-write', severity: 'yellow' as const }, undefined)).toBe('yellow')
+  })
+
+  it('isSuppressUnattributedSessionLog: 无主会话日志删除静默（0.1.19 刷屏修复）', () => {
+    // DSH 宿主压缩/轮转会话日志（zstd 删分片）→ 无归因 → 静默，不刷屏
+    expect(isSuppressUnattributedSessionLog('fs-destroy', true, undefined)).toBe(true)
+    // 归因到插件 → 不静默（销毁证据嫌疑，照报）
+    expect(isSuppressUnattributedSessionLog('fs-destroy', true, 'some-plugin')).toBe(false)
+    // 非会话日志敏感删除 → 不静默（如删 .credentials.yaml 本体）
+    expect(isSuppressUnattributedSessionLog('fs-destroy', undefined, undefined)).toBe(false)
+    // 其他类型报警不受影响
+    expect(isSuppressUnattributedSessionLog('fs-write', true, undefined)).toBe(false)
+    expect(isSuppressUnattributedSessionLog('spawn', true, undefined)).toBe(false)
   })
 
   it('A9 集成：包装器在线上报的 realpathSync 场景不再产生任何报警（端到端复刻）', () => {
