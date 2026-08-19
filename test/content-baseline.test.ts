@@ -11,27 +11,22 @@ import {
   getBaseline,
   refreshBaseline,
   baselinePath,
+  setBaselineDirForTest,
   type BaselineStore,
 } from '../src/guards/content-baseline.js'
 
 describe('content-baseline', () => {
   let testDir: string
-  let originalEnv: string | undefined
 
   beforeEach(() => {
     testDir = mkdtempSync(join(tmpdir(), 'vet-baseline-test-'))
-    // 使用临时目录作为基线路径
-    originalEnv = process.env.DSH_PLUGIN_VET_BASELINE_DIR
-    process.env.DSH_PLUGIN_VET_BASELINE_DIR = testDir
+    // C3（0.1.16 加固）：env 已改为模块加载快照，测试改用显式 setter 覆盖目录
+    setBaselineDirForTest(testDir)
     refreshBaseline()
   })
 
   afterEach(() => {
-    if (originalEnv !== undefined) {
-      process.env.DSH_PLUGIN_VET_BASELINE_DIR = originalEnv
-    } else {
-      delete process.env.DSH_PLUGIN_VET_BASELINE_DIR
-    }
+    setBaselineDirForTest(undefined)
     rmSync(testDir, { recursive: true, force: true })
   })
 

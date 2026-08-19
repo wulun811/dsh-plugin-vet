@@ -2,13 +2,13 @@ import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest'
 import { VetStatus } from '../lib/guard/status.js'
 import { analyzeSample, detectGrowth, type ProcSample, type RssSample, type WatchConfig } from '../lib/guard/runtime-watch.js'
 import {
-  classifyOp, isSensitivePath, isTransientTempPath, patchModule, pluginFromStack, setRootIndexing, DEFAULT_HOOK_CONFIG,
+  classifyOp, isSensitivePath, isTransientTempPath, patchModule, pluginFromStack, setRootIndexing, extractNetworkTarget, DEFAULT_HOOK_CONFIG,
 } from '../lib/guard/runtime-hooks.js'
 import { isSessionLogFile } from '../lib/guard/runtime-hooks.js'
 import { readHostMetrics } from '../lib/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../lib/guard/status-route.js'
-import { decideRespawn, t2AlarmId, installRuntimeGuard, isAttributableEntry } from '../lib/guard/runtime-guard.js'
+import { decideRespawn, t2AlarmId, t2Severity, installRuntimeGuard, isAttributableEntry } from '../lib/guard/runtime-guard.js'
 import { hasAuditRecord, setArchiveDirForTest } from '../lib/audit/archive.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import fsDefault from 'node:fs'
@@ -386,7 +386,8 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(classifyOp({ module: 'fs', op: 'statSync', args: ['/home/chen/.dsh/profiles/foo/package.json'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-probe' })
     // mutate 下系统根前缀仍生效：删 /usr/lib/node_modules 下的文件照样报
     expect(isSensitivePath('/usr/lib/node_modules/foo/index.js', DEFAULT_HOOK_CONFIG, 'mutate')).toBe(true)
-    expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/usr/lib/node_modules/foo/index.js', 'x'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // N7 族 4：node_modules 写入 → install-write（不再泛化为 fs-write）
+    expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/usr/lib/node_modules/foo/index.js', 'x'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'install-write' })
     // 豁免只作用于 node_modules 段之后：~/.ssh/node_modules/x 仍命中 .ssh
     expect(isSensitivePath('/home/u/.ssh/node_modules/x', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
     expect(classifyOp({ module: 'fs', op: 'readdirSync', args: ['/home/u/.ssh/node_modules'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-probe' })
@@ -414,6 +415,9 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl')).toBe(true)
     expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.log')).toBe(true)
     expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl.tmp')).toBe(true)
+    // 分片会话文件（DSH 轮换产生的 .zstd.<shard> 等后缀）也应识别，否则丢失降噪标志
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl.zstd.9a3')).toBe(true)
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl.zst.001')).toBe(true)
     // 非会话目录下的日志文件不算
     expect(isSessionLogFile('/home/user/.dsh/profiles/web/session.jsonl.zst')).toBe(false)
     expect(isSessionLogFile('/tmp/session.jsonl.zst')).toBe(false)
@@ -440,6 +444,18 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(alarm2).not.toBeNull()
     expect(alarm2!.kind).toBe('fs-destroy')
     expect(alarm2!.sessionLog).toBeUndefined()
+  })
+
+  it('t2Severity: 未归因会话日志删除 red→yellow；归因插件/非会话日志保持 red', () => {
+    const base = { severity: 'red' as const, kind: 'fs-destroy' as const, message: 'x', target: '/home/user/.dsh/sessions/abc/session.jsonl.zstd.9a3' }
+    // 未归因（宿主自身运维，不会攻击自己）→ 降为 yellow
+    expect(t2Severity({ ...base, sessionLog: true }, undefined)).toBe('yellow')
+    // 归因到插件（可能销毁证据）→ 仍 red
+    expect(t2Severity({ ...base, sessionLog: true }, 'some-plugin')).toBe('red')
+    // 非会话日志的敏感删除（如 .ssh/id_rsa）未归因 → 仍 red
+    expect(t2Severity({ ...base, sessionLog: undefined }, undefined)).toBe('red')
+    // 其它 kind 原样透传（不受会话日志规则影响）
+    expect(t2Severity({ ...base, kind: 'fs-write', severity: 'yellow' as const }, undefined)).toBe('yellow')
   })
 
   it('A9 集成：包装器在线上报的 realpathSync 场景不再产生任何报警（端到端复刻）', () => {
@@ -476,7 +492,8 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(isSensitivePath('/usr/lib/node_modules/foo/index.js', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
     expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/usr/lib/node_modules/foo/index.js'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
     expect(isSensitivePath('/usr/lib/node_modules/foo/index.js', DEFAULT_HOOK_CONFIG, 'mutate')).toBe(true)
-    expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/usr/lib/node_modules/foo/index.js', 'x'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // N7 族 4：node_modules 包文件写入是供应链/安装态篡改信号（kind 更具体，仍是黄）
+    expect(classifyOp({ module: 'fs', op: 'writeFile', args: ['/usr/lib/node_modules/foo/index.js', 'x'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'install-write' })
     // /etc/passwd 由精确段名覆盖，读取仍报（枚举目标不漏）
     expect(classifyOp({ module: 'fs', op: 'readFileSync', args: ['/etc/passwd'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-read' })
     // 新增敏感名：.netrc / .pgpass / .gitconfig
@@ -508,8 +525,8 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(alarm).toMatchObject({ severity: 'red' })
   })
 
-  it('createWriteStream 写敏感路径 → yellow fs-write（D29 补漏：流式写入此前漏报）', () => {
-    expect(classifyOp({ module: 'fs', op: 'createWriteStream', args: ['/home/user/.ssh/authorized_keys'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ severity: 'yellow', kind: 'fs-write' })
+  it('createWriteStream 写敏感路径 → yellow（D29 补漏：流式写入此前漏报；授权密钥属 N7 族 3）', () => {
+    expect(classifyOp({ module: 'fs', op: 'createWriteStream', args: ['/home/user/.ssh/authorized_keys'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ severity: 'yellow', kind: 'persistence-write' })
     expect(classifyOp({ module: 'fs', op: 'createWriteStream', args: ['/home/user/log.txt'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
   })
 
@@ -531,6 +548,23 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(classifyOp({ module: 'fs', op: 'open', args: ['/home/u/.env', 'w'], }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
   })
 
+  it('#17 open 复合写 flags（wx+/ax+/as+）→ fs-write；rs 只读仍 fs-read', () => {
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['/etc/passwd', 'wx+'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    expect(classifyOp({ module: 'fs', op: 'openSync', args: ['/home/u/.env', 'ax+'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['/home/u/.env', 'as+'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // rs 只读同步：不含写意图 → 仍按读报
+    expect(classifyOp({ module: 'fs', op: 'open', args: ['/etc/passwd', 'rs'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-read' })
+  })
+
+  it('#4 fetch(new Request(url, init)) 目标回到观测面（此前 Request 实例全 miss → 网络出口盲点）', () => {
+    const req = new Request('https://evil.example:8443/data?q=1')
+    expect(extractNetworkTarget([req])).toEqual({ hostname: 'evil.example', port: 8443, path: '/data?q=1' })
+    // duck-type（旧 Node 无全局 Request 时等价构造）
+    expect(extractNetworkTarget([{ url: 'https://secret.evil/x' } as never])).toEqual({ hostname: 'secret.evil', port: undefined, path: '/x' })
+    // 非 Request 的 options 对象不受影响（host/port 形态仍按原名判定）
+    expect(extractNetworkTarget([{ hostname: 'api.github.com', port: 443, path: '/v1' }])).toEqual({ hostname: 'api.github.com', port: 443, path: '/v1' })
+  })
+
   it('P1-8：exec 破坏性命令（rm -rf ~/.ssh）→ spawn 报警；常规清理不报', () => {
     expect(classifyOp({ module: 'child_process', op: 'exec', args: ['rm -rf ~/.ssh'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'spawn' })
     expect(classifyOp({ module: 'child_process', op: 'exec', args: ['rm -rf /tmp/x'] }, DEFAULT_HOOK_CONFIG)).toBeNull()
@@ -545,7 +579,8 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     // src 敏感：把 .env 拷出去
     expect(classifyOp({ module: 'fs', op: 'cpSync', args: ['/home/u/.env', '/tmp/stolen'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
     // dest 敏感：把恶意文件覆盖成 /etc/hosts
-    expect(classifyOp({ module: 'fs', op: 'cpSync', args: ['/tmp/evil', '/etc/hosts'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
+    // N7 族 3：cp 覆盖 /etc/hosts（DNS 劫持持久化面）→ persistence-write
+    expect(classifyOp({ module: 'fs', op: 'cpSync', args: ['/tmp/evil', '/etc/hosts'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'persistence-write' })
     // rename 落位系统路径
     expect(classifyOp({ module: 'fs', op: 'rename', args: ['/tmp/evil', '/etc/passwd'] }, DEFAULT_HOOK_CONFIG)).toMatchObject({ kind: 'fs-write' })
     // 普通 cp 不报

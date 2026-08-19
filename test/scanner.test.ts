@@ -174,27 +174,26 @@ describe('protocol', () => {
 describe('cache', () => {
   it('round-trips a report keyed by content hash', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-cache-'))
-    process.env.DSH_PLUGIN_VET_CACHE_DIR = dir
     try {
       const files = [{ path: '/a.js', content: 'const x = 1' }]
       const key = cacheKey(files, undefined)
       const report = { engine: ENGINE_VERSION, sourceCount: 1, findings: [], staticScore: 100, verdict: 'clean' as const }
-      writeCached(key, report)
-      expect(readCached(key)).toEqual(report)
+      writeCached(key, report, dir)
+      expect(readCached(key, dir)).toEqual(report)
       // round-6：旧版本引擎的缓存必须失效（规则变更未递增 ENGINE_VERSION 会缓存中毒——实测发现）
-      writeCached(key, { ...report, engine: 'static-v0' as const })
-      expect(readCached(key)).toBeUndefined()
-      expect(readCached(cacheKey([{ path: '/a.js', content: 'const x = 2' }], undefined))).toBeUndefined()
+      writeCached(key, { ...report, engine: 'static-v0' as const }, dir)
+      expect(readCached(key, dir)).toBeUndefined()
+      expect(readCached(cacheKey([{ path: '/a.js', content: 'const x = 2' }], undefined), dir)).toBeUndefined()
     } finally {
-      delete process.env.DSH_PLUGIN_VET_CACHE_DIR
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
   it('files scan served from cache returns the same report', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-cache2-'))
-    process.env.DSH_PLUGIN_VET_CACHE_DIR = dir
     try {
-      const req: ScanRequest = { kind: 'files', files: [join(FIX, 'secret-in-plugin.js')] }
+      // C3（0.1.16 加固）：目录经 request.cacheDir 显式注入（不再依赖 env）
+      const req: ScanRequest = { kind: 'files', files: [join(FIX, 'secret-in-plugin.js')], cacheDir: dir }
       const a = scan(req)
       const b = scan(req)
       expect(a.ok).toBe(true)
@@ -202,7 +201,7 @@ describe('cache', () => {
       expect(b.report).toEqual(a.report)
       expect(b.report!.verdict).toBe('suspicious')
     } finally {
-      delete process.env.DSH_PLUGIN_VET_CACHE_DIR
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

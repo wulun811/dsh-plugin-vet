@@ -351,7 +351,10 @@ describe('apply 装配', () => {
     const ctx = new FakeCtx()
     ctx.invariants = { register: vi.fn() }
     apply(ctx as never, cfg())
-    expect(ctx.tools.register).toHaveBeenCalledTimes(1)
+    // 0.1.15 (N6)：scan_plugin + vet_diff 两个工具注册
+    expect(ctx.tools.register).toHaveBeenCalledTimes(2)
+    expect(ctx.tools.register).toHaveBeenCalledWith(expect.objectContaining({ name: 'scan_plugin' }))
+    expect(ctx.tools.register).toHaveBeenCalledWith(expect.objectContaining({ name: 'vet_diff' }))
     expect(ctx.handlers.has('internal/plugin')).toBe(true)
     expect(ctx.handlers.has('tools/execute')).toBe(true)
     expect(ctx.invariants!.register).toHaveBeenCalledWith(PACKAGE_NAME, expect.any(Function))
