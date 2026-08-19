@@ -1,6 +1,6 @@
 {
   "name": "@jieai/dsh-plugin-vet",
-  "version": "0.1.16",
+  "version": "0.1.19",
   "description": "Plugin trust pipeline for deepseek-harness (DSH): deterministic static scan, runtime guard (T1 sentinel + T2 hooks), audit protocol skill, GUI shield. Alarms by default; N7 confirm-block intercepts confirmed destructive fs ops (family 1/2) by throwing.",
   "license": "MIT",
   "author": {
@@ -60,6 +60,7 @@
     "lib/gate-cli.js",
     "lib/client.js",
     "lib/client.d.ts",
+    "lib/guard",
     "lib/scanner",
     "lib/scanner-bin",
     "lib/types",
@@ -96,14 +97,14 @@
     "typecheck:client": "tsc -p tsconfig.client.json",
     "test": "npm run build && vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build && node scripts/check-pack-integrity.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.7"
+    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
@@ -112,10 +113,10 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.0",
