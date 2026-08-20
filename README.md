@@ -28,6 +28,19 @@ It does **not** provide a plugin marketplace itself (catalog/distribution).
 
 ---
 
+## Notable changes since 0.1.x
+
+If you're upgrading from 0.1.12 or earlier, here's what changed:
+
+- **0.1.13-0.1.15**: Landed the NEXT-GEN-PLAN (N1-N6): hidden capability detection (N1), upgrade behavioral diff (N6), anti-obfuscation decoding, environment snapshot tamper-proofing.
+- **0.1.16**: Security hardening batch: bundle-ized entry (C1, closes the `require(absolute-path)` attack surface), ESM blind-spot explicit coverage (C2), content-baseline integrity (M7).
+- **0.1.17-0.1.19**: Bug fixes and noise reduction: npm pack integrity check, rc.8 subpath entryName handling, session-log deletion silence, DSH install-tree exemption widened.
+- **0.1.20**: Defense statistics panel (see how many plugins you've protected), startup file existence check, esm-guard-coverage dedup, upgrade-cold linked to audit records, red upgrade-diff now tells you to re-run audit protocol.
+
+**If you were only using static scans before**, enabling `runtimeGuard: watch` now gives you the full defense stack: T1 sentinel (memory/fd/child-process monitoring) + T2 hooks (fs/child_process/network interception) + N7 confirmation blocking.
+
+---
+
 ## Installation
 
 ```sh
