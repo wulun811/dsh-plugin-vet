@@ -365,3 +365,20 @@ it('chunkBytes：string/Buffer/Uint8Array/未知', () => {
     expect(chunkBytes(undefined)).toBe(0)
   })
 })
+describe('N3 台账：n3-exfil 终身误报修复', () => {
+  it('读后远超关联窗口（> exfilAssocWindowMs）再写 → 不再黄', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date(2026, 0, 1, 0, 0, 0))
+      const l = new ExfilLedger()
+      l.observeFs(fsEvt({ plugin: 'a', op: 'readFileSync', bytes: 2048 }))
+      vi.advanceTimersByTime(200_000)
+      const alarms = l.observeNet(netEvt({ plugin: 'a', bytes: 100_000 }))
+      expect(alarms.some(a => a.kind === 'n3-exfil' && a.severity === 'yellow')).toBe(false)
+      expect(alarms.some(a => a.kind === 'n3-seq-read-net')).toBe(false)
+      expect(alarms.some(a => a.kind === 'n3-exfil-match')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
