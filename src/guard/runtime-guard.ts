@@ -25,9 +25,11 @@ import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../invariant.js'
 import { ensureHoneypot, ensureIntegrityCanaries } from './honeypot.js'
 import { capabilityDiff, diffKindOf } from './capability-diff.js'
-import { exfilLedger, type LedgerAlarm, type LedgerFsEvent, type LedgerNetEvent } from './exfil-ledger.js'
+import { exfilLedger, detectKeyLeaks, type LedgerAlarm, type LedgerFsEvent, type LedgerNetEvent } from './exfil-ledger.js'
 import { canaryStore } from './canary.js'
 import { confirmBlock } from './confirm-block.js'
+import { incrementAlarmsRecorded } from './stats.js'
+import { existsSync } from 'node:fs'
 
 /** T1 哨兵是否已启动（invariant 断言用）。 */
 export let sidecarSpawned = false
@@ -61,6 +63,15 @@ export function decideRespawn(
 /** P1-6：T2 报警去重 id——拼 pluginHint，避免不同插件同路径互吞报警。 */
 export function t2AlarmId(kind: string, target: string | undefined, pluginHint: string | undefined): string {
   return `t2:${kind}:${target ?? ''}:${pluginHint ?? ''}`
+}
+
+/** 0.1.20 内容短 hash（密钥外泄报警去重 id 用；FNV-1a 32 位，确定性，不落原文）。 */
+export function hashShort(s: string): string {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 16777619)
+  }
+  return (h >>> 0).toString(36)
 }
 
 /**
@@ -256,6 +267,20 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     String(config.runtimeGrowthWindowMs),
   ]
   const sidecarPath = resolveVetFile('guard/runtime-watch.js')
+  // 0.1.20：启动时文件存在性校验——sidecar 文件缺失时直接报 red vet-self-broken，
+  // 不静默降级（prepublish 检查防打包漏，这里防安装损坏/用户误删）
+  if (!existsSync(sidecarPath)) {
+    status.record({
+      id: 'vet-self-broken:sidecar-missing',
+      severity: 'red',
+      source: 't1',
+      kind: 'vet-self-broken',
+      message: 'vet 哨兵文件缺失：' + sidecarPath + '——T1 运行时监控无法启动。可能原因：安装损坏/文件被误删。建议重装 vet 插件',
+      at: Date.now(),
+    })
+    ctx.logger.error('vet: 哨兵文件缺失，T1 监控无法启动：' + sidecarPath)
+    // 不 return——继续尝试 T2 钩子（进程内防线仍可用）
+  }
   let child: ReturnType<typeof spawn> | undefined
   let sidecarAlive = false
   let stopping = false
@@ -410,9 +435,14 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       target: alarm.target,
       pluginHint: alarm.pluginHint,
       sessionLog: alarm.sessionLog,
+      // 关联签名类（n3-）按 (kind,plugin) 合并去重：跨主机/跨密钥的同类报警折叠为一条、累计次数。
+      // T2 hook 报警（fs-destroy/net 等）不带 mergeKey，保留按精确 id 的原有去重语义。
+      mergeKey: alarm.kind.startsWith('n3-') ? `t2:${alarm.kind}:${alarm.pluginHint}` : undefined,
       at: Date.now(),
     }
     status.record(entry)
+    // 0.1.20：防御统计——每次警报记录时自增
+    incrementAlarmsRecorded()
     // N1 差分：敏感操作观测 → 静态能力清单对账（隐藏能力 red/certain；只差分已扫描插件）
     const kind = diffKindOf(alarm.kind)
     if (kind !== null && alarm.pluginHint !== undefined && alarm.target !== undefined) {
@@ -458,8 +488,42 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       message: `蜜罐金丝雀外泄确认：出站${where === 'url' ? 'URL' : where === 'spawn' ? '命令参数' : '数据体'}中发现金丝雀 ${hit.slice(0, 16)}…（${hit.length} 位）——100% 确认外泄（N4；${plugin ?? '无主'}）`,
       target: hit,
       pluginHint: plugin,
+      mergeKey: `t2:canary-leak:${plugin ?? ''}`,
       at: Date.now(),
     })
+  }
+  // 0.1.20：密钥外泄内容匹配（PEM/AWS key 格式；纯函数 detectKeyLeaks 于 exfil-ledger）
+  const recordKeyLeak = (where: 'url' | 'body', text: string, plugin: string | undefined): void => {
+    if (plugin !== undefined && isOfficial(plugin)) return
+    const leaks = detectKeyLeaks(text)
+    if (leaks.length === 0) return
+    
+    for (const hit of leaks) {
+      const tag = hit.kind === 'pem' ? 'pem' : 'aws'
+      // Issue W 修复：PEM key 按上下文 hash（同类型不同 key 各自报警）
+      // AWS key 按 match hash（key id 唯一，天然去重）
+      let hashInput: string
+      if (hit.kind === 'pem') {
+        // 取匹配前后各 100 字符作为上下文
+        const contextStart = Math.max(0, hit.index - 100)
+        const contextEnd = Math.min(text.length, hit.index + hit.match.length + 100)
+        hashInput = text.slice(contextStart, contextEnd)
+      } else {
+        hashInput = hit.match
+      }
+      
+      status.record({
+        id: `n3-key-leak-${tag}:${plugin ?? ''}:${hashShort(hashInput)}`,
+        severity: 'red',
+        source: 't2',
+        kind: 'n3-key-leak',
+        message: `密钥外泄确认：出站${where === 'url' ? 'URL' : '数据体'}中检测到${hit.kind === 'pem' ? 'PEM 私钥格式' : 'AWS Access Key'}（${hit.match.slice(0, 30)}…）——100% 确认密钥外泄（N3；${plugin ?? '无主'}）`,
+        target: hit.match,
+        pluginHint: plugin,
+        mergeKey: `t2:n3-key-leak:${plugin ?? ''}`,
+        at: Date.now(),
+      })
+    }
   }
   const ledgerFsObserver = (evt: LedgerFsEvent): void => {
     if (evt.plugin !== undefined && isOfficial(evt.plugin)) return
@@ -475,6 +539,8 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     emitLedger(evt.plugin, exfilLedger.observeNet(evt))
   }
   const netCanaryScan = (hint: string | undefined, text: string, where: 'url' | 'body'): void => {
+    // 0.1.20：密钥外泄内容匹配
+    recordKeyLeak(where, text, hint)
     if (canaryStore.count() === 0) return
     const hit = canaryStore.match(text)
     if (hit === undefined) return
@@ -552,9 +618,10 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
                 bytes: sentBytes,
               }))
             }
-            // N4 金丝雀：dgram 报文体匹配
+            // N3/N4：dgram 报文体 = 密钥外泄内容匹配 + 金丝雀匹配
+            const msgText = typeof sendArgs[0] === 'string' ? sendArgs[0] : ''
+            recordKeyLeak('body', msgText, hint)
             if (canaryStore.count() > 0 && (hint === undefined || !isOfficial(hint))) {
-              const msgText = typeof sendArgs[0] === 'string' ? sendArgs[0] : ''
               const chit = canaryStore.match(msgText)
               if (chit !== undefined) recordCanary('body', chit, hint)
             }
@@ -590,19 +657,12 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
               bytes,
             }))
           }
-          // N4 金丝雀：fetch URL 与字符串 body 匹配
-          if (canaryStore.count() > 0 && (hint === undefined || !isOfficial(hint))) {
-            const urlText = typeof args[0] === 'string' ? args[0] : (target !== null ? target.hostname + target.path : '')
-            let chit = canaryStore.match(urlText)
-            if (chit !== undefined) {
-              recordCanary('url', chit, hint)
-            } else {
-              const body = (args[1] as { body?: unknown } | undefined)?.body
-              const bodyText = typeof body === 'string' ? body : ''
-              chit = canaryStore.match(bodyText)
-              if (chit !== undefined) recordCanary('body', chit, hint)
-            }
-          }
+          // N3/N4：fetch URL 与字符串 body 走统一 netCanaryScan（密钥外泄内容匹配 + 金丝雀）
+          const urlText = typeof args[0] === 'string' ? args[0] : (target !== null ? target.hostname + target.path : '')
+          netCanaryScan(hint, urlText, 'url')
+          const body = (args[1] as { body?: unknown } | undefined)?.body
+          const bodyText = typeof body === 'string' ? body : ''
+          netCanaryScan(hint, bodyText, 'body')
         }
         return (originalFetch as Function).apply(this, args)
       }

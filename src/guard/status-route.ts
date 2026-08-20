@@ -16,6 +16,7 @@ import { readHostMetrics } from './metrics.js'
 import { withVetSelfIo } from './runtime-hooks.js'
 import type { VetConfig } from '../config.js'
 import { PLUGIN_ENTRY_ID } from '../invariant.js'
+import { getStats } from './stats.js'
 
 interface WebServerLike {
   register(route: {
@@ -337,7 +338,8 @@ export function registerStatusRouteOnce(
           return
         }
         // M5：运行时配置可能在面板外被改（编辑 cordis.patch.yml），返回文件级实际状态而非内存快照
-        writeJson(res, 200, { ...status.snapshot(), runtimeGuard: readPatchRuntimeGuard(ctx), metrics: readHostMetrics() })
+        // 0.1.20：防御统计——让用户知道"被保护了多少次"
+        writeJson(res, 200, { ...status.snapshot(), runtimeGuard: readPatchRuntimeGuard(ctx), metrics: readHostMetrics(), stats: getStats() })
       },
     }),
     'vet: shield status route',

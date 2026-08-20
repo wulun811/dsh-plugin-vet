@@ -22,6 +22,7 @@ import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import type { CapabilityManifest } from '../scanner/protocol.js'
 import { withVetSelfIo } from './runtime-hooks.js'
+import { hasAuditRecord } from '../audit/archive.js'
 
 export interface CapabilityRecord {
   name: string
@@ -260,8 +261,9 @@ function buildUpgradeAlarm(plugin: string, from: string, to: string, added: Mani
   const severity = upgradeSeverity(added)
   if (severity === null) return null
   const parts = describeDelta(added)
+  // 0.1.20 A 方案：red 级别 → 明确告知用户需要重新审计（审查完成后警报自动解除）
   const suffix = severity === 'red'
-    ? '——已构成 高敏感能力组合（执行+网络 / 敏感路径+网络），升级前请务必审查'
+    ? '——已构成 高敏感能力组合（执行+网络 / 敏感路径+网络），请让 agent 执行 vet-audit-protocol skill 重新审查（审查完成后警报自动解除）'
     : '——升级前请审查（N6）'
   return { kind: 'upgrade-diff', severity, message: '升级行为差分：' + plugin + ' ' + from + ' → ' + to + ' 新增 ' + parts.join('；') + suffix }
 }
@@ -294,8 +296,9 @@ export function recordScan(
       saveCapabilities(store)
       if (prev === null) {
         // 冷启动：只记录；exec + network 双高组合给一条提示，不完全静默
+        // 0.1.20：upgrade-cold 联审计——已有审计档案则不报（用户审查行为有可见回报）
         const alarm: VersionDiffAlarm | null =
-          manifest.hasNetwork === true && manifest.hasExec === true
+          manifest.hasNetwork === true && manifest.hasExec === true && !hasAuditRecord(plugin, version)
             ? {
                 kind: 'upgrade-cold',
                 severity: 'yellow',

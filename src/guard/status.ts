@@ -19,6 +19,14 @@ export interface VetAlarm {
   pluginHint?: string
   /** 目标是否为会话日志文件（用于归因分层文案：无归因 + 会话日志 → 轮换提示）。 */
   sessionLog?: boolean
+  /** 同类报警累计次数（合并去重后展示用；同一 (source,kind,plugin) 跨 target 折叠为一条）。 */
+  count?: number
+  /**
+   * 合并键：显式设置时，VetStatus.record 按 (source,kind,plugin) 聚合该报警，忽略 target。
+   * 用于关联签名类（n3-/canary-leak）——跨主机/跨密钥的同类报警折叠为一条并累计 count，
+   * 防止单个插件刷满 20 槽缓冲（事件风暴降噪）。未设置则退化为精确 id 去重。
+   */
+  mergeKey?: string
   at: number
 }
 
@@ -46,6 +54,13 @@ export interface VetStatusOptions {
   /** 报警有效期 ms（默认 24h，P2-2）：超龄报警从缓冲与盾牌 level 判定中淘汰——
    * 一次误报不再让盾牌永久黄/红；持续攻击会持续产生新报警，天然续期。 */
   alarmTtlMs?: number
+}
+
+/** 序列化前剥离内部合并键（mergeKey 仅用于 VetStatus.record 聚合，不必暴露给盾牌前端）。 */
+function stripMergeKey(a: VetAlarm): VetAlarm {
+  const { mergeKey: _mk, ...rest } = a
+  void _mk
+  return rest
 }
 
 export class VetStatus {
@@ -91,18 +106,32 @@ export class VetStatus {
     return this.dismissedIds.has(id)
   }
 
-  /** 记录一条报警；同 id 在去重窗口内返回 'deduped'。 */
+  /**
+   * 记录一条报警。去重/合并规则：
+   * - 设置了 mergeKey 的关联签名类报警（n3-/canary-leak）按 (source,kind,plugin) 聚合，
+   *   忽略 target——跨主机/跨密钥的同类报警折叠为一条并累计 count（事件风暴降噪）；
+   * - 其余报警仍按精确 id 去重（P2-4：窗口外的同键重发先移除旧副本再入列，避免占满缓冲）。
+   * 返回 'deduped' 表示未新增独立行（被去重或合并进已有行）。
+   */
   record(alarm: VetAlarm): 'new' | 'deduped' {
     const now = Date.now()
     this.expire(now)
-    const recent = this.alarms.find(a => a.id === alarm.id && now - a.at < this.dedupeWindowMs)
-    if (recent !== undefined) return 'deduped'
-    // P2-4：replace 语义——窗口外的同 id 重发时先移除旧副本再入列。旧实现直接 unshift 新副本，
-    // 持续报警（每 ~62s 一次）会把 20 槽环形缓冲占满 → alarmCount 虚高、其他报警被挤出。
-    for (let i = this.alarms.length - 1; i >= 0; i--) {
-      if (this.alarms[i].id === alarm.id) this.alarms.splice(i, 1)
+    const groupKey = alarm.mergeKey ?? alarm.id
+    const matchGroup = (a: VetAlarm): boolean => (a.mergeKey ?? a.id) === groupKey
+    const recent = this.alarms.find(a => matchGroup(a) && now - a.at < this.dedupeWindowMs)
+    if (recent !== undefined) {
+      // 合并：累计次数、刷新时间、严重度取高者、保留最新一次 target 便于查看
+      recent.count = (recent.count ?? 1) + 1
+      recent.at = now
+      if (alarm.severity === 'red') recent.severity = 'red'
+      if (alarm.target !== undefined) recent.target = alarm.target
+      return 'deduped'
     }
-    this.alarms.unshift({ ...alarm })
+    // P2-4：replace 语义——窗口外的同组合重发时先移除旧副本再入列。
+    for (let i = this.alarms.length - 1; i >= 0; i--) {
+      if (matchGroup(this.alarms[i])) this.alarms.splice(i, 1)
+    }
+    this.alarms.unshift({ ...alarm, count: alarm.count ?? 1 })
     if (this.alarms.length > this.alarmMax) this.alarms.length = this.alarmMax
     return 'new'
   }
@@ -126,6 +155,6 @@ export class VetStatus {
       active.some(a => a.severity === 'red') ? 'red'
       : (active.some(a => a.severity === 'yellow') || (lastScan !== undefined && lastScan.verdict !== 'clean')) ? 'yellow'
       : 'green'
-    return { level, alarmCount: active.length, alarms: active, dismissed, lastScan }
+    return { level, alarmCount: active.length, alarms: active.map(stripMergeKey), dismissed: dismissed.map(stripMergeKey), lastScan }
   }
 }

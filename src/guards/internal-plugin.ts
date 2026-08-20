@@ -6,6 +6,7 @@ import type { VetConfig } from '../config.js'
 import { scan, scanSync } from '../scanner/client.js'
 import { listSourceFiles, resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../invariant.js'
+import { incrementScanned, incrementBlocked } from '../guard/stats.js'
 import { hasAuditRecord, auditRequiredMessage } from '../audit/archive.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
 import { capabilityDiff } from '../guard/capability-diff.js'
@@ -98,6 +99,12 @@ function isExempt(packageName: string, packageRoot: string | undefined, config: 
 }
 
 /**
+ * 0.1.20：esm-guard-coverage session 级去重——同一插件只报一次。
+ * ESM 具名导入的 T2 不覆盖是架构性限制（C2 边界），反复提醒只会造成警报疲劳。
+ */
+const esmGuardReported = new Set<string>()
+
+/**
  * internal/plugin 守卫：新装 npm 包自动静态扫描。
  * - dispose 发射（fiber.uid === null）与 entry-less（child/manual）直接忽略（B1）；
  * - report 模式：异步扫描 + 日志；deny 模式：同步扫描（scanSync），命中即同步抛错回滚挂载。
@@ -143,6 +150,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
         at: Date.now(),
       })
       if (config.mode === 'deny') {
+        incrementBlocked()
         void fiber.dispose()
         throw new Error(msg)
       }
@@ -168,6 +176,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           at: Date.now(),
         })
         if (config.mode === 'deny') {
+          incrementBlocked()
           void fiber.dispose()
           throw new Error(`vet: 扫描失败，拒绝加载 ${entryName}（fail-closed）`)
         }
@@ -176,6 +185,8 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       const { verdict, staticScore } = res.report
       ctx.logger.info(`vet: auto-scan ${entryName} → ${verdict} (${staticScore})`)
       status?.noteScan({ pluginName: entryName, verdict, staticScore, at: Date.now() })
+      // 0.1.20：防御统计——扫描计数
+      incrementScanned()
       // N1：注册静态能力清单（声明侧）——T2 观测与此对账，差分出隐藏能力
       capabilityDiff.registerStatic(entryName, res.report.capabilities)
       // N6：版本行为差分——同名异版清单对比，新增敏感能力 → yellow/red 报警（首次记录只存不报）
@@ -206,19 +217,24 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       }
       // C2（0.1.16 加固）：插件使用内建模块的 ESM 具名导入 → T2 钩子对该绑定不生效（Node 快照互操作），
       // 运行时防线仅剩 T1 哨兵——显式提示边界，不静默
+      // 0.1.20：session 级去重——同一插件只报一次（架构性限制，反复提醒=警报疲劳）
       if (res.report.capabilities?.esmNamedBuiltins === true && config.runtimeGuard === 'watch') {
-        status?.record({
-          id: 'esm-guard-coverage:' + entryName,
-          severity: 'yellow',
-          source: 'scan',
-          kind: 'esm-guard-coverage',
-          message: entryName + ' 使用内建模块 ESM 具名导入（fs/child_process/网络）——T2 运行时钩子对该绑定不生效（Node 互操作快照，C2 边界），运行时防线仅剩 T1 哨兵与审计协议',
-          target: entryName,
-          pluginHint: entryName,
-          at: Date.now(),
-        })
+        if (!esmGuardReported.has(entryName)) {
+          esmGuardReported.add(entryName)
+          status?.record({
+            id: 'esm-guard-coverage:' + entryName,
+            severity: 'yellow',
+            source: 'scan',
+            kind: 'esm-guard-coverage',
+            message: entryName + ' 使用内建模块 ESM 具名导入（fs/child_process/网络）——T2 运行时钩子对该绑定不生效（Node 互操作快照，C2 边界），运行时防线仅剩 T1 哨兵与审计协议',
+            target: entryName,
+            pluginHint: entryName,
+            at: Date.now(),
+          })
+        }
       }
       if (config.mode === 'deny' && RANK[verdict] >= DENY_RANK[config.denyOn]) {
+        incrementBlocked()
         void fiber.dispose()
         throw new Error(`vet: 拦截 ${entryName}（${verdict}）`)
       }
