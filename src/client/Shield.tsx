@@ -43,6 +43,8 @@ export interface VetAlarmWire {
   sessionLog?: boolean
   /** 触发告警的目标（主机:端口、文件路径等），见 status.ts VetAlarm.target。 */
   target?: string
+  /** 同类报警合并后的累计次数（跨 target 折叠，见 status.ts VetAlarm.count）。 */
+  count?: number
   at: number
 }
 
@@ -63,6 +65,15 @@ export interface VetMetricsWire {
   at: number
 }
 
+/** 0.1.20：防御统计数据 */
+export interface VetStatsWire {
+  scannedCount: number
+  alarmsRecorded: number
+  blockedCount: number
+  activeDefenseCount: number
+  updatedAt: number
+}
+
 export interface ShieldSnapshotWire {
   level: 'green' | 'yellow' | 'red'
   alarmCount: number
@@ -72,6 +83,8 @@ export interface ShieldSnapshotWire {
   lastScan?: { pluginName: string; verdict: string; staticScore: number; at?: number }
   runtimeGuard?: 'off' | 'watch'
   metrics?: VetMetricsWire
+  /** 0.1.20：防御统计 */
+  stats?: VetStatsWire
 }
 
 const POLL_MS = 5000
@@ -145,11 +158,13 @@ const CARD_BG_LIGHT = 'linear-gradient(180deg, #F5F3ED 0%, #F0EDE6 100%)'
 const CARD_BG_DARK = 'linear-gradient(180deg, rgba(58,56,50,1) 0%, rgba(50,48,43,1) 100%)'
 
 
-/** 介绍栏卖点骨架：标题/正文走 t()，序号是通用符号。 */
-const INTRO_POINTS = [
-  { n: '①', titleKey: 'intro.p1title', bodyKey: 'intro.p1body' },
-  { n: '②', titleKey: 'intro.p2title', bodyKey: 'intro.p2body' },
-  { n: '③', titleKey: 'intro.p3title', bodyKey: 'intro.p3body' },
+/** 介绍栏卖点骨架：5 个分区，每个有图标 + 标题 + 短要点列表。 */
+const INTRO_SECTIONS = [
+  { icon: '🛡', titleKey: 'intro.s1title', bullets: ['intro.s1b1', 'intro.s1b2', 'intro.s1b3'] },
+  { icon: '👁', titleKey: 'intro.s2title', bullets: ['intro.s2b1', 'intro.s2b2', 'intro.s2b3'] },
+  { icon: '🍯', titleKey: 'intro.s3title', bullets: ['intro.s3b1', 'intro.s3b2', 'intro.s3b3'] },
+  { icon: '📋', titleKey: 'intro.s4title', bullets: ['intro.s4b1', 'intro.s4b2', 'intro.s4b3'] },
+  { icon: '🔔', titleKey: 'intro.s5title', bullets: ['intro.s5b1', 'intro.s5b2', 'intro.s5b3'] },
 ]
 
 /* ------------------------- 主题检测 ------------------------- */
@@ -295,11 +310,11 @@ function fmtRam(mb: number): string {
   return Math.round(mb) + ' MB'
 }
 
-/** 右侧介绍栏：绝对定位贴住主面板右缘（主面板位置固定），等高；width 由调用方传入。 */
+/** 右侧介绍栏：外层容器固定边框，内层 aside 滚动内容。 */
 function VetIntroPanel({ pal, width, t, dark }: { pal: MorandiPalette; width: number; t: T; dark: boolean }): ReactNode {
   const [hovered, setHovered] = useState(false)
   return (
-    <aside
+    <div
       role="dialog"
       aria-label={t('intro.aria')}
       onMouseEnter={() => setHovered(true)}
@@ -310,6 +325,14 @@ function VetIntroPanel({ pal, width, t, dark }: { pal: MorandiPalette; width: nu
         bottom: 0,
         left: 'calc(100% + 8px)',
         width,
+        borderRadius: 12,
+        overflow: 'hidden',
+      }}
+    >
+      {/* 背景层 */}
+      <div style={{
+        position: 'absolute',
+        inset: 0,
         background: dark ? 'rgba(30, 28, 24, 0.55)' : 'rgba(180, 180, 180, 0.25)',
         backdropFilter: 'blur(24px) saturate(1.4)',
         WebkitBackdropFilter: 'blur(24px) saturate(1.4)',
@@ -317,14 +340,8 @@ function VetIntroPanel({ pal, width, t, dark }: { pal: MorandiPalette; width: nu
         boxShadow: dark
           ? '0 12px 40px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.3)'
           : '0 10px 40px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 1)',
-        padding: '14px 14px 12px',
-        fontSize: 12,
-        color: pal.ink,
-        lineHeight: 1.6,
-        overflow: 'hidden',
-      }}
-    >
-      {/* Crystal Edge: 渐变边框层 */}
+      }} />
+      {/* Crystal Edge: 渐变边框层（固定在外层容器，不随滚动） */}
       <div style={{
         position: 'absolute',
         inset: 0,
@@ -341,7 +358,7 @@ function VetIntroPanel({ pal, width, t, dark }: { pal: MorandiPalette; width: nu
         transition: 'opacity 0.5s ease',
         opacity: hovered ? 1 : 0.7,
       }} />
-      {/* Crystal Edge: 顶部高光线条 */}
+      {/* Crystal Edge: 顶部高光线条（固定） */}
       <div style={{
         position: 'absolute',
         top: 0,
@@ -354,7 +371,7 @@ function VetIntroPanel({ pal, width, t, dark }: { pal: MorandiPalette; width: nu
         pointerEvents: 'none',
         zIndex: 10,
       }} />
-      {/* Mirror Sheen: 散光层（默认）→ 聚光层（hover） */}
+      {/* Mirror Sheen: 散光层（固定） */}
       <div style={{
         position: 'absolute',
         top: 0,
@@ -379,52 +396,76 @@ function VetIntroPanel({ pal, width, t, dark }: { pal: MorandiPalette; width: nu
         transition: 'opacity 0.4s ease',
         opacity: hovered ? 0.5 : 0,
       }} />
-      <div style={{ position: 'relative', zIndex: 2, height: '100%', overflowY: 'auto' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-        <ShieldIcon level="green" color={pal.sage} size={16} />
-        <span style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.02em' }}>{t('intro.title')}</span>
+      {/* 可滚动内容层 */}
+      <aside
+        style={{
+          position: 'relative',
+          zIndex: 2,
+          height: '100%',
+          overflowY: 'auto',
+          padding: '14px 14px 24px',
+          fontSize: 12,
+          color: pal.ink,
+          lineHeight: 1.6,
+        }}
+        className="vet-scrollbar"
+      >
+      <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <ShieldIcon level="green" color={pal.sage} size={18} />
+        <span style={{ fontWeight: 800, fontSize: 15, letterSpacing: '0.02em' }}>{t('intro.title')}</span>
       </div>
-      <div style={{ fontSize: 10.5, color: pal.faint, marginBottom: 8 }}>
+      <div style={{ fontSize: 12, color: pal.faint, marginBottom: 10 }}>
         @jieai/dsh-plugin-vet v{typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'}
       </div>
 
-      <div style={{ fontWeight: 800, fontSize: 11.5, color: pal.ink, marginBottom: 6 }}>
+      <div style={{ fontWeight: 800, fontSize: 13, color: pal.ink, marginBottom: 8 }}>
         {t('intro.lines')}
       </div>
 
-      <div style={{ background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 8, padding: '7px 10px', marginBottom: 10, fontSize: 11, color: pal.muted, boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
+      <div style={{ background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 8, padding: '8px 12px', marginBottom: 12, fontSize: 12, color: pal.muted, boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
         <div>
           <b style={{ color: pal.ink }}>{t('intro.stat1')}</b>
           {t('intro.stat1b')}
         </div>
-        <div style={{ marginTop: 1 }}>
+        <div style={{ marginTop: 2 }}>
           <b style={{ color: pal.ink }}>{t('intro.stat2')}</b>
           {t('intro.stat2b')}
         </div>
-        <div style={{ marginTop: 1 }}>
+        <div style={{ marginTop: 2 }}>
           <b style={{ color: pal.ink }}>{t('intro.stat3')}</b>
           {t('intro.stat3b')}
         </div>
       </div>
 
-      {INTRO_POINTS.map(p => (
-        <div key={p.n} style={{ marginBottom: 10 }}>
-          <div style={{ fontWeight: 700 }}>
-            <span style={{ color: pal.sage }}>{p.n}</span> {t(p.titleKey)}
+      {INTRO_SECTIONS.map(s => (
+        <div key={s.titleKey} style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
+            <span style={{ marginRight: 6 }}>{s.icon}</span>
+            <span style={{ color: pal.ink }}>{t(s.titleKey)}</span>
           </div>
-          <div style={{ color: pal.muted, marginTop: 2 }}>{t(p.bodyKey)}</div>
+          <div style={{ paddingLeft: 24 }}>
+            {s.bullets.map(b => (
+              <div key={b} style={{ color: pal.muted, fontSize: 12, lineHeight: 1.6, marginTop: 2 }}>
+                <span style={{ color: pal.faint, marginRight: 6 }}>·</span>{t(b)}
+              </div>
+            ))}
+          </div>
         </div>
       ))}
 
-      <div style={{ background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 8, padding: '6px 10px', fontWeight: 700, color: pal.ink, margin: '8px 0 10px', boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
+      <div style={{ background: dark ? CARD_BG_DARK : CARD_BG_LIGHT, borderRadius: 8, padding: '10px 14px', fontWeight: 700, fontSize: 13, color: pal.ink, margin: '16px 0 12px', boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)') }}>
         {t('intro.tagline')}
       </div>
 
-      <div style={{ fontSize: 10.5, color: pal.faint, borderTop: '1px solid ' + pal.borderSoft, paddingTop: 8 }}>
+      <div style={{ fontSize: 12, color: pal.faint, borderTop: '1px solid ' + pal.borderSoft, paddingTop: 10 }}>
         {t('intro.cost')}
       </div>
+      {/* 底部空白，确保内容可以完全滚动显示 */}
+      <div style={{ height: '20px' }}></div>
       </div>
-    </aside>
+      </aside>
+    </div>
   )
 }
 
@@ -633,6 +674,9 @@ function VetAlarmPanel({ pal, width, t, alarms, dismissed, dark, onDismiss, onRe
                   </span>
                   {a.pluginHint !== undefined && (
                     <span style={{ fontSize: 10.5, color: pal.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>@{a.pluginHint}</span>
+                  )}
+                  {a.count !== undefined && a.count > 1 && (
+                    <span style={{ fontSize: 10, fontWeight: 700, color: pal.rose, borderRadius: 4, padding: '0 5px', background: dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)' }}>×{a.count}</span>
                   )}
                   <span style={{ fontSize: 10, color: pal.faint, flexShrink: 0 }}>{fmtTime(a.at)}</span>
                   <button
@@ -934,6 +978,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   const lastScan = snap?.lastScan
   const metrics = snap?.metrics
   const guard = snap?.runtimeGuard ?? 'off'
+  const stats = snap?.stats
 
   // 「?」右侧介绍栏：悬停 400ms 或点击打开；弹层内部移动不误关（容器级 mouseleave 才关）。
   const cancelHelpClose = (): void => {
@@ -1047,7 +1092,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
           }}
         >
           <div 
-            style={{...panelStyle(pal, dark), position: 'relative', overflow: 'hidden'}}
+            style={{...panelStyle(pal, dark), position: 'relative', overflowY: 'auto'}}
             role="dialog" 
             aria-label={t('panel.label')}
             onMouseEnter={() => setPanelHovered(true)}
@@ -1319,6 +1364,36 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
             </>
           )}
 
+          {/* 0.1.20：防御统计——让用户知道"被保护了多少次"（始终显示，0 也展示） */}
+          {stats !== undefined && (
+            <>
+              <SectionLabel pal={pal}>{t('stats.title')}</SectionLabel>
+              <div style={{
+                background: dark ? CARD_BG_DARK : CARD_BG_LIGHT,
+                borderRadius: 8,
+                boxShadow: 'inset 0 1px 0 ' + (dark ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,1)'),
+                padding: '8px 10px',
+                display: 'grid',
+                gridTemplateColumns: 'repeat(3, 1fr)',
+                gap: 8,
+                textAlign: 'center',
+              }}>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: pal.sage }}>{stats.scannedCount}</div>
+                  <div style={{ fontSize: 10, color: pal.faint, marginTop: 2 }}>{t('stats.scanned')}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: pal.ochre }}>{stats.alarmsRecorded}</div>
+                  <div style={{ fontSize: 10, color: pal.faint, marginTop: 2 }}>{t('stats.alarms')}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: pal.rose }}>{stats.blockedCount}</div>
+                  <div style={{ fontSize: 10, color: pal.faint, marginTop: 2 }}>{t('stats.blocked')}</div>
+                </div>
+              </div>
+            </>
+          )}
+
           {/* 底部 */}
           <div style={{ display: 'flex', alignItems: 'center', marginTop: 12, paddingTop: 8, borderTop: '1px solid ' + pal.borderSoft }}>
             {loadedAt > 0 && (
@@ -1345,7 +1420,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
           </div>
         </div>
 
-        {helpOpen && <VetIntroPanel pal={pal} width={280} t={t} dark={dark} />}
+        {helpOpen && <VetIntroPanel pal={pal} width={340} t={t} dark={dark} />}
         {alarmPanelOpen && <VetAlarmPanel pal={pal} width={340} t={t} alarms={alarms} dismissed={snap?.dismissed ?? []} dark={dark} onDismiss={dismissAlarm} onRestore={restoreAlarm} />}
         </div>
         ,
