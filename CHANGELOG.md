@@ -3,6 +3,13 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.2.5] - 2026-08-22
+
+User-reported false alarm: saving `~/.dsh/settings.yaml` (manual edit picked up by the host, or saved by DSH itself) raised unattributed red `fs-destroy` / yellow `fs-probe` on `.settings.yaml.<pid>.<uuid>.tmpdir`.
+
+### Fixed
+- **Exempt host atomic-write staging dirs from unattributed fs alarms**: DSH's `writeFileAtomic` stages every save in a `.<name>.<pid>.<uuid>.tmpdir` dir next to the target, then always removes it — pure housekeeping, but the existing exemption only covered `~/.dsh/web/`. Now matched at segment level anywhere under `~/.dsh/`, still only when unattributed + stack untampered; honeypot/integrity kinds, plugin-attributed ops, the real config files, and credential-face temps (`<file>.<hex12>.tmp`, a different protocol) keep alarming.
+
 ## [0.2.4] - 2026-08-21
 
 User-reported regression fixes (@dsh-traffic-light scan-fail alarm):
