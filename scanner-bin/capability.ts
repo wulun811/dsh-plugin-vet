@@ -14,6 +14,26 @@ const URL_HOST_RE = /(?:https?|wss?):\/\/([^/\s'")\]]+)/gi
 /** 捕获 host 的收尾清理：剥掉遗留引号/括号/反引号。 */
 const TRIM_TAIL_RE = /['"`)\].,;:]+$/
 
+/** 0.1.21 降噪：host 形状校验——拒绝模板拼接残片（如 "["）、纯路径段等非主机名 token。
+ * 单标签仅放行 localhost；其余要求含点（域名/IPv4）或为方括号 IPv6。 */
+const HOST_SHAPE_RE = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/
+const IPV6_SHAPE_RE = /^\[[a-f0-9:]+\](?::\d{1,5})?$/
+function looksLikeHost(host: string): boolean {
+  const bare = host.replace(/:\d{1,5}$/, "")
+  if (bare === "localhost" || bare === "[::1]") return true
+  return (HOST_SHAPE_RE.test(host) && host.includes(".")) || IPV6_SHAPE_RE.test(host)
+}
+
+/** 经典 realm 探测 shim：Function("return this") / new Function("return this")——无动态执行语义。 */
+function isRealmShimArgs(args: readonly ts.Expression[]): boolean {
+  if (args.length !== 1) return false
+  const t = literalText(args[0])
+  return t !== undefined && /^\s*return\s+this\s*$/.test(t)
+}
+
+/** 0.1.21 降噪：相对模块引用（./api.ts、../rpc.js）不是文件系统能力足迹。 */
+const REL_MODULE_REF_RE = /^\.{1,2}\/.*\.(?:js|mjs|cjs|ts|tsx|jsx|json)$/i
+
 /** 敏感段名（与 T2 sensitiveSegments 对齐的保守子集 + R11 路径正则里有的段）。 */
 const SENSITIVE_SEGMENTS = [
   ".ssh", ".aws", ".dsh", ".gnupg", ".npmrc", ".env", ".netrc", ".pgpass",
@@ -174,12 +194,19 @@ export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
         let host = m[1].toLowerCase().replace(TRIM_TAIL_RE, "")
         const cut = host.search(/[/?#]/)
         if (cut !== -1) host = host.slice(0, cut)
+        if (!looksLikeHost(host)) continue
         PUSH_UNIQ(out.hosts, host, HOST_CAP)
       }
       for (const w of commandWords(text)) {
         PUSH_UNIQ(out.spawnCmds, w, CMD_CAP)
       }
-      if (looksLikePath(text)) PUSH_UNIQ(out.fsPaths, text, FS_CAP)
+      // 0.1.21 降噪：裸字面量的 fsPath 提取收紧为「路径前缀开头且无空白且非相对模块引用」，
+      // 并跳过模板拼接片段——注释样文本（// ...）、报错文案、import 规格符不再入清单。
+      // fs 调用实参位仍走结构化提取（isFsBase 分支），保留完整 looksLikePath 语义（含敏感段）。
+      if (!ts.isTemplateExpression(n) && !/\s/.test(text)
+        && /^(?:\/|~\/|\.\/|\.\.\/)/.test(text) && !REL_MODULE_REF_RE.test(text)) {
+        PUSH_UNIQ(out.fsPaths, text, FS_CAP)
+      }
     }
     if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier)) {
       const spec = n.moduleSpecifier.text
@@ -207,8 +234,11 @@ export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
       }
       if (ts.isIdentifier(callee)) {
         if (callee.text === "fetch" || callee.text === "WebSocket") out.hasNetwork = true
-        if (callee.text === "eval" || callee.text === "Function") out.hasExec = true
-        if (EXEC_IDENTS.has(callee.text)) out.hasExec = true
+        if (callee.text === "eval") out.hasExec = true
+        if (callee.text === "Function" && !isRealmShimArgs(n.arguments)) out.hasExec = true
+        // 0.1.21 降噪：裸 spawn/exec/fork 标识符仅在文件确实引用 child_process 时计为执行能力
+        // （bundle 内自带同名辅助函数不再误报“执行”、进而误触 upgrade-cold 双高提示）
+        if (EXEC_IDENTS.has(callee.text) && cpRefs.size > 0) out.hasExec = true
         if (fsRefs.has(callee.text) && FS_OPS.has(callee.text)) {
           const arg = n.arguments[0]
           if (arg !== undefined) {
@@ -249,7 +279,7 @@ export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
     if (ts.isNewExpression(n)) {
       const expr = n.expression
       if (ts.isIdentifier(expr)) {
-        if (expr.text === "Function") out.hasExec = true
+        if (expr.text === "Function" && !(n.arguments !== undefined && isRealmShimArgs(n.arguments))) out.hasExec = true
         if (expr.text === "WebSocket") out.hasNetwork = true
       }
     }

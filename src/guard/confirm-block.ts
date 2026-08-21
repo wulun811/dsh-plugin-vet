@@ -131,10 +131,6 @@ export class ConfirmBlockStore {
     if (plugin !== '') this.f1Blocked.add(plugin)
   }
 
-  isFamily1Blocked(plugin: string): boolean {
-    return this.f1Blocked.has(plugin)
-  }
-
   decideBlock(plugin: string, opName: string, args: unknown[]): BlockDecision | null {
     if (this.modeLocal !== 'block') return null
     try {

@@ -37,6 +37,12 @@ function validCapabilities(c: unknown): boolean {
   }
   // C2（0.1.16）：esmNamedBuiltins 可选布尔（旧条目无此字段也合法；形状校验不拒绝未知键）
   if (m.esmNamedBuiltins !== undefined && typeof m.esmNamedBuiltins !== 'boolean') return false
+  // P0-2 #9（round-11，0.1.21）：ghostDeps/zombieDeps 可选字符串数组（旧条目无此字段也合法）
+  for (const key of ['ghostDeps', 'zombieDeps'] as const) {
+    if (m[key] !== undefined) {
+      if (!Array.isArray(m[key]) || !(m[key] as unknown[]).every(v => typeof v === 'string')) return false
+    }
+  }
   return typeof m.hasNetwork === 'boolean' && typeof m.hasExec === 'boolean'
 }
 
@@ -68,10 +74,10 @@ function validReport(report: unknown): report is ScanReport {
 export function cacheKey(
   files: CachedFile[],
   rules: Record<string, boolean> | undefined,
-  context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm' } = {},
+  context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm'; deps?: string } = {},
 ): string {
   const body = files.map(f => `${f.path}\u0000${f.content}`).join('\u0001')
-  const ctx = `tk:${context.targetKind ?? ''}|rt:${context.runtime ?? ''}|sb:${context.scanBasis ?? ''}`
+  const ctx = `tk:${context.targetKind ?? ''}|rt:${context.runtime ?? ''}|sb:${context.scanBasis ?? ''}|deps:${context.deps ?? ''}`
   return createHash('sha256').update(`${ENGINE_VERSION}|${ctx}|${JSON.stringify(rules ?? {})}|${body}`).digest('hex')
 }
 

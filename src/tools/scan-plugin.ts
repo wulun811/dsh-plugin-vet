@@ -11,12 +11,17 @@ import { PACKAGE_NAME } from '../invariant.js'
 import { resolvePkgRoot } from '../pkg-root.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
 import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline } from '../guards/content-baseline.js'
+import { annotateSelfScan, type SelfScanInfo } from '../report/self-scan.js'
+import { hashScanFiles, pinStateFor, loadSelfPins } from '../report/self-pin.js'
+import { listSelfSourceFiles } from '../report/self-scope.js'
 
 export interface ScanPluginArgs {
   target: 'dynamic-code' | 'package' | 'file'
   source?: string
   packagePath?: string
   reason?: string
+  /** 扫描基础（协议已支持，P0-3 接线到工具面）：'git' = 仅源码仓（通常不提交构建产物，R12 入口/patch 缺失降 info）；'npm' = registry tarball 真实发布物（默认）。 */
+  scanBasis?: 'git' | 'npm'
 }
 
 /** vet 自身包根（向上搜索 package.json 定位，兼容 bundle/逐文件两种形态；realpath 防符号链接绕过）。 */
@@ -148,7 +153,9 @@ export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; plug
     if (typeof args.packagePath !== 'string') throw new Error('vet: package 需要 packagePath')
     const packagePath = args.packagePath // 闭包内 TS 不保留属性 narrowing（同 status-route 修法）
     // P2-2：列目录/读 package.json 属 vet 审计操作——vetSelfIo 直通，.dsh 下不自报警
-    const files = withVetSelfIo(() => listSourceFiles(packagePath))
+    // vet 本体自扫：用权威自扫范围（排除 lib/dsh-src/plugin-scan-tmp 等非本体目录），
+    // 与钉扎/门禁同集——否则 pin 算不一致、豁免失效（普通插件仍全量扫安装产物）。
+    const files = withVetSelfIo(() => (isSelfPackage(packagePath) ? listSelfSourceFiles(packagePath) : listSourceFiles(packagePath)))
     if (files.length === 0) throw new Error('vet: ' + packagePath + ' 下没有可扫描的源码')
     return {
       pluginName: basename(packagePath),
@@ -173,6 +180,7 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
       source: { type: 'string', description: 'dynamic-code 的源码字符串 / file 的文件路径' },
       packagePath: { type: 'string', description: 'package 的插件包目录（绝对路径）' },
       reason: { type: 'string', description: '扫描原因（审计留痕）' },
+      scanBasis: { type: 'string', description: '扫描基础：git（仅源码仓——通常不提交 lib/ 构建产物，R12 入口/patch 缺失降 info 不误报）| npm（registry tarball 真实发布物，默认，R12 按发布物校验）' },
     },
     output: {
       // schema 内联以保留字面量推断（repo 约定，tool-skill 同款）
@@ -203,8 +211,24 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
                   hasNetwork: { type: 'boolean' },
                   hasExec: { type: 'boolean' },
                   esmNamedBuiltins: { type: 'boolean' },
+                  ghostDeps: { type: 'array', items: { type: 'string' } },
+                  zombieDeps: { type: 'array', items: { type: 'string' } },
                 },
               },
+            },
+          },
+          selfScan: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'vet 本体自扫注解（仅被扫目标 realpath 确认为 vet 自身时输出）',
+            properties: {
+              isTrustLayer: { type: 'boolean', required: true },
+              version: { type: 'string' },
+              pin: { type: 'string', required: true },
+              declared: { type: 'object', additionalProperties: true },
+              annotation: { type: 'object', additionalProperties: true },
+              verdict: { type: 'string', required: true },
+              staticScore: { type: 'number', required: true },
             },
           },
         },
@@ -215,6 +239,8 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
       const { request, pluginName, pluginVersion } = buildRequest(args as unknown as ScanPluginArgs)
       request.osv = config.osvCheck === true
       request.transitiveDeps = config.transitiveDeps === true
+      // P0-3：scanBasis 接线（协议已支持——git 源码仓回扫不误报 R12 入口缺失）
+      if (args.scanBasis === 'git' || args.scanBasis === 'npm') request.scanBasis = args.scanBasis
       // P2-1 系列：工具超时与 internal/plugin 同公式（按文件数放大、60s 封顶），配合 engine
       // 预算对齐（budget=min(files×2s, timeout-1.5s)），大包走 R8-skip 而不是被 kill 报错
       const fileCount = request.files?.length ?? 0
@@ -223,8 +249,16 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
       if (!response.ok || response.report === undefined) {
         throw new Error('vet: 扫描失败 ' + (response.error ?? 'unknown'))
       }
+      // vet 本体自扫（①+②）：realpath 身份判定 → 版本钉扎 → 声明能力注解（有界豁免）。
+      // 非本体一律不产 selfScan——普通插件走原静态判定路径，行为零变化。
+      let selfScan: SelfScanInfo | undefined
+      if (args.target === 'package' && typeof args.packagePath === 'string' && isSelfPackage(args.packagePath) && request.files !== undefined) {
+        const pin = pinStateFor(loadSelfPins(), pluginVersion, hashScanFiles(request.files, args.packagePath))
+        selfScan = annotateSelfScan(response.report.findings, { pin, ...(pluginVersion !== undefined ? { version: pluginVersion } : {}) })
+      }
       return {
         pluginName,
+        ...(selfScan !== undefined ? { selfScan } : {}),
         ...(pluginVersion !== undefined ? { pluginVersion } : {}),
         scannedAt: new Date().toISOString(),
         static: {

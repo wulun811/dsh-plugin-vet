@@ -25,6 +25,8 @@ function renderDiff(value: VersionDiffHistory): string {
     for (const f of value.diff.added.fsPaths) added.push('+ 敏感路径 ' + f)
     for (const s of value.diff.added.spawnCmds) added.push('+ 子进程 ' + s)
     for (const i of value.diff.added.imports) added.push('+ 新依赖 ' + i + '（能力未知）')
+    for (const i of value.diff.added.ghostDeps) added.push('+ 幽灵依赖 ' + i + '（未声明）')
+    for (const i of value.diff.added.zombieDeps) added.push('+ 僵尸依赖 ' + i + '（声明但未安装）')
     if (value.diff.added.hasNetwork) added.push('+ 网络能力')
     if (value.diff.added.hasExec) added.push('+ 执行能力')
     const removed: string[] = []
@@ -32,6 +34,8 @@ function renderDiff(value: VersionDiffHistory): string {
     for (const f of value.diff.removed.fsPaths) removed.push('- 敏感路径 ' + f)
     for (const s of value.diff.removed.spawnCmds) removed.push('- 子进程 ' + s)
     for (const i of value.diff.removed.imports) removed.push('- 依赖 ' + i)
+    for (const i of value.diff.removed.ghostDeps) removed.push('- 幽灵依赖 ' + i)
+    for (const i of value.diff.removed.zombieDeps) removed.push('- 僵尸依赖 ' + i)
     if (value.diff.removed.hasNetwork) removed.push('- 网络能力')
     if (value.diff.removed.hasExec) removed.push('- 执行能力')
     if (added.length > 0) lines.push(...added)

@@ -63,16 +63,6 @@ export class CapabilityDiffStore {
     this.staticByPlugin.set(plugin, manifest)
   }
 
-  /** 该插件是否有静态清单（可差分）。 */
-  hasStatic(plugin: string): boolean {
-    return this.staticByPlugin.has(plugin)
-  }
-
-  /** 取静态清单（只读快照）。 */
-  staticOf(plugin: string): CapabilityManifest | undefined {
-    return this.staticByPlugin.get(plugin)
-  }
-
   /**
   * 观测推进 + 差分：记录一次敏感操作，若静态清单已注册且未声明该类能力 → 隐藏能力。
   * 无静态清单（从未扫描/官方豁免）→ 返回 null（不差分）。
@@ -126,10 +116,4 @@ export function diffKindOf(alarmKind: string): ObservedKind | null {
     case "fs-destroy": return "fsMutate"
     default: return null
   }
-}
-
-/** 单测辅助：清空全部状态（fixture 隔离）。 */
-export function resetCapabilityDiff(): void {
-  capabilityDiff["staticByPlugin"].clear()
-  capabilityDiff["observedByPlugin"].clear()
 }

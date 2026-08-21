@@ -4,7 +4,7 @@
  * @module dsh-plugin-vet/scanner-engine
  */
 import { readFileSync, statSync } from 'node:fs'
-import { basename, dirname } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { parseSource } from './ast.js'
 import { extractCapabilities, aggregateCapabilities } from './capability.js'
@@ -42,6 +42,109 @@ function readOrDefault(file: string): string {
 
 /** R8-skip 触发后仍需时间写出报告并退出——必须早于宿主 kill 的余量。 */
 const ENGINE_KILL_MARGIN_MS = 1500
+
+// ── P0-2 #9（R16）：幽灵/僵尸依赖健康审计 ──────────────────────────────────
+// 依赖声明（package.json）↔ 代码引用（capabilities.imports）↔ 实际安装（node_modules）三方对账：
+// - 幽灵依赖（ghost）：代码引用但 package.json 未声明——靠传递依赖提升侥幸可解析，升级即可能断供/换源；
+// - 僵尸依赖（zombie）：package.json 声明但 node_modules 找不到——陈旧/伪造声明，运行到即崩溃。
+// 纪律（产品红线）：info 级观测（WEIGHTS.info=0 不扣分）、heuristic 置信（不改 verdict）、零出站；
+// @deepseek-ai/* 宿主信任边界两端都不列（与 OSV 直接依赖核对的跳过规则一致，避免 DSH 插件宿主 SDK 误报）。
+const R16_DEP_CAP = 20
+/** 从包根向上的 node_modules 查找层数上限（npm hoisting/工作区常见 2-4 层；8 层已超出常规 monorepo）。 */
+const R16_ROOT_WALK = 8
+
+export interface DepsInfo {
+  /** 声明侧直接依赖（dependencies/devDependencies/peerDependencies/optionalDependencies；去 @deepseek-ai/*、排序去重）。 */
+  declared: string[]
+  /** declared 中实际安装的子集；null = 本地无 node_modules，僵尸判定不可用。 */
+  installed: string[] | null
+  /** 参与缓存 key 的指纹（声明/node_modules 变化 → 缓存失效重扫，保证幽灵/僵尸结果不陈旧）。 */
+  fingerprint: string
+}
+
+function declaredDepsOf(pkg: Record<string, unknown>): string[] {
+  const out = new Set<string>()
+  for (const key of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const) {
+    const deps = pkg[key]
+    if (typeof deps !== 'object' || deps === null) continue
+    for (const name of Object.keys(deps as Record<string, unknown>)) {
+      if (name.startsWith('@deepseek-ai/')) continue
+      out.add(name)
+    }
+  }
+  return [...out].sort()
+}
+
+/** 从包根向上（含本层）收集现有 node_modules 目录（hoisting 到工作区根的情况也能找到）。 */
+function nodeModulesRoots(pkgRoot: string): string[] {
+  const roots: string[] = []
+  let dir = pkgRoot
+  for (let i = 0; i <= R16_ROOT_WALK; i++) {
+    try {
+      if (statSync(join(dir, 'node_modules')).isDirectory()) roots.push(join(dir, 'node_modules'))
+    } catch {
+      // 无此目录/不可读：跳过该层
+    }
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return roots
+}
+
+/** 某依赖是否在任一 node_modules 根下实际安装（scoped 包拆两段路径）。 */
+function isInstalledDep(name: string, roots: string[]): boolean {
+  const parts = name.split('/')
+  for (const root of roots) {
+    const p = parts.length === 2 ? join(root, parts[0], parts[1]) : join(root, name)
+    try {
+      if (statSync(p).isDirectory()) return true
+    } catch {
+      // 缺失：继续找下一个根
+    }
+  }
+  return false
+}
+
+/** 构建依赖健康审计上下文（无 package.json / 坏 package.json → null，静默跳过）。 */
+export function buildDepsInfo(files: string[] | undefined): DepsInfo | null {
+  if (files === undefined) return null
+  const pkgFile = files.find(f => basename(f) === 'package.json')
+  if (pkgFile === undefined) return null
+  let pkg: Record<string, unknown>
+  try {
+    pkg = JSON.parse(readOrDefault(pkgFile)) as Record<string, unknown>
+  } catch {
+    return null
+  }
+  const declared = declaredDepsOf(pkg)
+  const roots = nodeModulesRoots(dirname(pkgFile))
+  if (roots.length === 0) {
+    return { declared, installed: null, fingerprint: JSON.stringify({ declared }) }
+  }
+  const installed = declared.filter(d => isInstalledDep(d, roots))
+  return { declared, installed, fingerprint: JSON.stringify({ declared, installed }) }
+}
+
+/** R16 info 观测（不给分、不改 verdict——WEIGHTS.info=0 & heuristic 恒 0.5 但 info 权重为 0）。 */
+function depsFindings(ghost: string[], zombie: string[]): Finding[] {
+  const out: Finding[] = []
+  for (const d of ghost) {
+    out.push({
+      rule: 'R16', severity: 'info', confidence: 'heuristic',
+      message: '幽灵依赖：代码引用 ' + d + ' 但 package.json 未声明（靠传递依赖提升侥幸可解析，升级可能断供/换源）',
+      evidence: d, file: 'package.json',
+    })
+  }
+  for (const d of zombie) {
+    out.push({
+      rule: 'R16', severity: 'info', confidence: 'heuristic',
+      message: '僵尸依赖：package.json 声明了 ' + d + ' 但 node_modules 中不存在（陈旧/伪造声明，运行到即失败）',
+      evidence: d, file: 'package.json',
+    })
+  }
+  return out
+}
 
 /**
  * 从 package.json 内容解析包形态（round-7，P4）：bin 声明（字符串或对象）→ 应用型包
@@ -141,6 +244,8 @@ function scanFiles(request: ScanRequest): ScanResponse {
   // round-7：package.json 内容参与缓存 hash（bin 形态变化 → 缓存自然失效），无需额外 context
   const pkgJson = request.files.find(f => basename(f) === 'package.json')
   const shape = pkgJson === undefined ? undefined : packageShape(readOrDefault(pkgJson))
+  // P0-2 #9（R16）：依赖健康上下文（幽灵/僵尸对账 + 缓存指纹）
+  const depsInfo = buildDepsInfo(request.files)
   // R8-skip 先于缓存散列：超过 PRE_FILE_SIZE_LIMIT 的文件不会进入扫描循环（stat 先行跳过），
   // 缓存 key 不再整读它们——旧实现 key 阶段对全部文件 readOrDefault，大文件被全量读入 → 内存峰值。
   // 超限文件用 stat 尺寸做 key 占位（超大文件内容从不参与判定，尺寸即"未扫描"的充分表示）。
@@ -155,7 +260,13 @@ function scanFiles(request: ScanRequest): ScanResponse {
       return { path: file, content: readOrDefault(file) }
     }),
     request.rules,
-    { targetKind: request.targetKind, runtime, scanBasis: request.scanBasis },
+    {
+      targetKind: request.targetKind,
+      runtime,
+      scanBasis: request.scanBasis,
+      // P0-2 #9（R16）：声明/node_modules 变化 → key 变化 → 缓存失效重扫；规则关掉则不参与 key
+      deps: request.rules?.['R16'] === false ? undefined : depsInfo?.fingerprint,
+    },
   )
   // C3（0.1.16 加固）：目录与 nonce 均来自宿主注入（cacheDirFor 缺省回退 env/tmpdir）
   const cacheDir = cacheDirFor(request.cacheDir)
@@ -231,6 +342,21 @@ function scanFiles(request: ScanRequest): ScanResponse {
     sourceCount++
   }
   const capabilities = aggregateCapabilities(manifests)
+  // P0-2 #9（R16）：幽灵/僵尸依赖三方对账——写入能力清单 + info 观测（files 模式 + 有 package.json 才生效；
+  // info/heuristic 不计分不改 verdict，纯数据面与提示面）
+  if (depsInfo !== null && request.rules?.['R16'] !== false) {
+    const declaredSet = depsInfo.declared
+    const ghost = capabilities.imports
+      .filter(i => !i.startsWith('@deepseek-ai/') && !declaredSet.includes(i))
+      .slice(0, R16_DEP_CAP)
+    const installed = depsInfo.installed
+    const zombie = installed === null
+      ? []
+      : declaredSet.filter(d => !installed.includes(d)).slice(0, R16_DEP_CAP)
+    if (ghost.length > 0) capabilities.ghostDeps = ghost
+    if (zombie.length > 0) capabilities.zombieDeps = zombie
+    findings.push(...depsFindings(ghost, zombie))
+  }
   const report = buildReport(request, findings, sourceCount, capabilities)
   writeCached(key, report, cacheDir, request.cacheNonce ?? '')
   return { ok: true, report }

@@ -38,12 +38,16 @@ export function hasAuditRecord(pluginName: string, version?: string): boolean {
   return withVetSelfIo(() => {
     const dir = archiveDir()
     if (!existsSync(dir)) return false
-    // 时间戳尾：-8位日期-6位时刻.md（字符类写法，避免反斜杠）
-    const tsRe = /-[0-9]{8}-[0-9]{6}[.]md$/
     try {
       return readdirSync(dir).some(name => {
-        if (!tsRe.test(name)) return false
-        const prefix = name.slice(0, name.length - 19) // 去掉 -yyyyMMdd-HHmmss.md
+        // 时间戳尾兼容两种格式：
+        //   v0.2.1 规范：-yyyyMMdd-HHmmss.md（19 字符，中间有 -）
+        //   旧格式兼容：-yyyyMMddHHmmss.md（15 字符，无中间 -）——升级后不误报 audit-required
+        let tsLen = 0
+        if (/-[0-9]{8}-[0-9]{6}[.]md$/.test(name)) tsLen = 19
+        else if (/-[0-9]{14}[.]md$/.test(name)) tsLen = 18 // -yyyyMMddHHmmss.md（1+14+3）
+        if (tsLen === 0) return false
+        const prefix = name.slice(0, name.length - tsLen)
         if (version !== undefined) return prefix === esc + '-' + version
         // 宽松：版本段必须以数字开头（保持 M1 反前缀伪造——lodash-foo-… 不命中 lodash）
         if (!prefix.startsWith(esc + '-')) return false

@@ -75,10 +75,17 @@ export interface CapabilityManifest {
   hasExec: boolean
   /** C2（0.1.16 加固）：是否含内建危险模块的 ESM 具名/命名空间导入（Node 互操作快照，T2 钩子盲区）。 */
   esmNamedBuiltins?: boolean
+  /** P0-2（round-11，0.1.21）：代码引用但 package.json 未声明的"幽灵依赖"（靠传递依赖提升侥幸可解析，
+   * 升级即可能断供/换源）。仅 files 模式 + 存在可读 package.json 时产出（R16 门控）；
+   * @deepseek-ai/* 宿主信任边界不列。 */
+  ghostDeps?: string[]
+  /** P0-2（round-11，0.1.21）：package.json 声明但 node_modules 缺失的"僵尸依赖"（陈旧/伪造声明）；
+   * 仅本地能定位到 node_modules 时才能判定（无 node_modules 则不设此字段）。 */
+  zombieDeps?: string[]
 }
 
 export interface ScanReport {
-  engine: 'static-v12'
+  engine: 'static-v13'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -93,11 +100,14 @@ export interface ScanResponse {
   report?: ScanReport
 }
 
-/** 规则/引擎实现变更必须递增此版本——cache key 与缓存有效性校验都依赖它（round-6：R1 new 形态、R9 ReDoS 判定变更后未递增导致旧缓存中毒；round-7：R2 括号形态/R4 原型污染/R6 组合证据/R9 判定/R3 形态降级；round-7.1：R3 只读成员分类/R4 generic 不再降 info；round-7.2：R2 new X.constructor 复用 isConstructorCapture base 校验/R9 带标签 break 出口语义；round-8：新增 R13 网络外泄端点/R14 非 JS 脚本下载即执行；round-8.1：R14 大小写不敏感（PowerShell/cmd 命令不分大小写）、curl -o 落盘降 medium、flags 传播修复；round-9（0.1.15）：新增 R15 动态网络目标（N5，信息级观测）；round-10（0.1.16 加固批次）：R2 间接/前缀 eval·Function（globalThis.eval/(0,eval)）与 require 拼接折叠、R3 global.*process* 前缀形态（此前漏检为 info）、R4 Reflect.defineProperty、R9 sync 子进程变体与转义括号深度计数、R10 prepare 钩子、R14 python/ruby/perl 下载即执行模式、R15 undici sink。 */
-export const ENGINE_VERSION = 'static-v12' as const
+/** 规则/引擎实现变更必须递增此版本——cache key 与缓存有效性校验都依赖它（round-6：R1 new 形态、R9 ReDoS 判定变更后未递增导致旧缓存中毒；round-7：R2 括号形态/R4 原型污染/R6 组合证据/R9 判定/R3 形态降级；round-7.1：R3 只读成员分类/R4 generic 不再降 info；round-7.2：R2 new X.constructor 复用 isConstructorCapture base 校验/R9 带标签 break 出口语义；round-8：新增 R13 网络外泄端点/R14 非 JS 脚本下载即执行；round-8.1：R14 大小写不敏感（PowerShell/cmd 命令不分大小写）、curl -o 落盘降 medium、flags 传播修复；round-9（0.1.15）：新增 R15 动态网络目标（N5，信息级观测）；round-10（0.1.16 加固批次）：R2 间接/前缀 eval·Function（globalThis.eval/(0,eval)）与 require 拼接折叠、R3 global.*process* 前缀形态（此前漏检为 info）、R4 Reflect.defineProperty、R9 sync 子进程变体与转义括号深度计数、R10 prepare 钩子、R14 python/ruby/perl 下载即执行模式、R15 undici sink。
+ * round-11（0.1.21，P0-2 #9）：新增 R16 幽灵/僵尸依赖健康审计（声明 vs 代码引用 vs 实际安装的确定性观测；
+ * info 级不扣分不改 verdict；capabilities 增 ghostDeps/zombieDeps）。 */
+export const ENGINE_VERSION = 'static-v13' as const
 
-/** The rules of static-v12. R8 is a meta finding emitted by the engine (scan timeout skip). */
-export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15'] as const
+/** The rules of static-v13. R8 is a meta finding emitted by the engine (scan timeout skip); R16 is a
+ * project-scope dep-consistency audit (emitted by the engine, not a per-file AST rule). */
+export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16'] as const
 
 /** Shared context handed to every rule. */
 export interface RuleContext {
