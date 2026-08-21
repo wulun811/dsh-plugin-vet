@@ -8,8 +8,9 @@ import { isSessionLogFile } from '../lib/guard/runtime-hooks.js'
 import { readHostMetrics } from '../lib/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
 import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../lib/guard/status-route.js'
-import { decideRespawn, t2AlarmId, t2Severity, installRuntimeGuard, isAttributableEntry, isSuppressUnattributedSessionLog } from '../lib/guard/runtime-guard.js'
+import { decideRespawn, t2AlarmId, t2Severity, installRuntimeGuard, isAttributableEntry, isSuppressUnattributedSessionLog, sidecarSupportedOn } from '../lib/guard/runtime-guard.js'
 import { hasAuditRecord, setArchiveDirForTest } from '../lib/audit/archive.js'
+import { setDismissedFileForTest } from '../lib/guard/dismissed-alerts.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import fsDefault from 'node:fs'
 import { join } from 'node:path'
@@ -19,6 +20,10 @@ import { fileURLToPath } from 'node:url'
 import * as yaml from 'js-yaml'
 
 const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512, growthMb: 256, growthWindowMs: 600_000 }
+
+// 0.2.1：dismiss/restore 会写持久化文件——测试必须隔离，避免污染用户真实的忽略记录
+const TMP_DISMISS = join(tmpdir(), 'vet-test-dismiss-' + Date.now())
+setDismissedFileForTest(TMP_DISMISS)
 
 function sample(partial: Partial<ProcSample>): ProcSample {
   return { rssKb: 512 * 1024, childCount: 0, fdCount: 10, at: Date.now(), ...partial }
@@ -120,16 +125,17 @@ describe('VetStatus（盾牌聚合器）', () => {
     expect(snap.dismissed).toHaveLength(0)
   })
 
-  it('忽略状态随报警过期自动清除（将来复发重新可见，可再忽略）', () => {
+  it('忽略状态持久化：记录过期后忽略仍保持（0.2.1：用户忽略后不再反复报警）', () => {
     const s = new VetStatus({ alarmTtlMs: 100, dedupeWindowMs: 0 })
     s.record({ id: 'a', severity: 'red', source: 't1', kind: 'mem', message: 'x', at: Date.now() - 500 })
     s.dismiss('a')
     expect(s.snapshot().alarms).toHaveLength(0) // 记录已 TTL 过期
-    expect(s.isDismissed('a')).toBe(false)       // 无存活记录 → 忽略自动清除
-    // 同 id 再触发 → 重新可见
+    // 0.2.1：持久化忽略不随记录过期清除——用户忽略后跨 session 保持
+    expect(s.isDismissed('a')).toBe(true)
+    // 同 id 再触发 → 仍被忽略，不再重新可见
     s.record({ id: 'a', severity: 'red', source: 't1', kind: 'mem', message: 'x', at: Date.now() })
-    expect(s.snapshot().alarmCount).toBe(1)
-    expect(s.snapshot().level).toBe('red')
+    expect(s.snapshot().alarmCount).toBe(0)
+    expect(s.snapshot().level).toBe('green')
   })
 
   it('P3-2：lastScan 按 TTL 过期——一次 suspicious 不永久黄，过期回 green', () => {
@@ -213,6 +219,22 @@ describe('decideRespawn / t2AlarmId（P0-2/P1-6 判定逻辑）', () => {
     // 全部帧都是 vet 自身 → 归因落空（无主），不栽赃
     const vetOnly = 'Error\n    at wrapped (/app/node_modules/@jieai/dsh-plugin-vet/lib/guard/runtime-hooks.js:306:20)'
     expect(pluginFromStack(vetOnly, roots)).toBeUndefined()
+  })
+})
+
+describe('P0-6：sidecarSupportedOn 平台门（Windows/macOS 显式跳过 T1）', () => {
+  it('linux → true（唯一支持的平台）', () => {
+    expect(sidecarSupportedOn('linux')).toBe(true)
+    expect(sidecarSupportedOn(process.platform)).toBe(process.platform === 'linux')
+  })
+
+  it('win32 / darwin / freebsd 等 → false（不拉哨兵，避免"首轮 exit→重拉×5"噪音）', () => {
+    expect(sidecarSupportedOn('win32')).toBe(false)
+    expect(sidecarSupportedOn('darwin')).toBe(false)
+    expect(sidecarSupportedOn('freebsd')).toBe(false)
+    expect(sidecarSupportedOn('sunos')).toBe(false)
+    expect(sidecarSupportedOn('openbsd')).toBe(false)
+    expect(sidecarSupportedOn('aix')).toBe(false)
   })
 })
 

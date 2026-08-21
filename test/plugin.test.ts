@@ -135,6 +135,14 @@ describe('scan_plugin tool', () => {
     expect(value.static.verdict).toBe('critical')
   })
 
+  it('scanBasis 参数接线：git 语义的 package 扫描照常出评分卡（R12 降级由引擎层覆盖）', async () => {
+    const tool = createScanPluginTool()
+    const value = await tool.execute({ target: 'package', packagePath: EVIL_PKG, scanBasis: 'git' }, fakeExec('scan_plugin', {}) as never)
+    expect(value.static.verdict).toBe('critical')
+    // 能力块经 output schema 校验（additionalProperties: false + 新字段必须显式声明，R16 字段在列）
+    expect(value.static.capabilities).toBeDefined()
+  })
+
   it('render 输出评分卡文本', () => {
     const text = renderScorecard({
       pluginName: 'x', scannedAt: 'now',
@@ -351,10 +359,11 @@ describe('apply 装配', () => {
     const ctx = new FakeCtx()
     ctx.invariants = { register: vi.fn() }
     apply(ctx as never, cfg())
-    // 0.1.15 (N6)：scan_plugin + vet_diff 两个工具注册
-    expect(ctx.tools.register).toHaveBeenCalledTimes(2)
+    // 0.1.15 (N6)：scan_plugin + vet_diff；0.1.21 (M2)：+ vet_label —— 三个工具注册
+    expect(ctx.tools.register).toHaveBeenCalledTimes(3)
     expect(ctx.tools.register).toHaveBeenCalledWith(expect.objectContaining({ name: 'scan_plugin' }))
     expect(ctx.tools.register).toHaveBeenCalledWith(expect.objectContaining({ name: 'vet_diff' }))
+    expect(ctx.tools.register).toHaveBeenCalledWith(expect.objectContaining({ name: 'vet_label' }))
     expect(ctx.handlers.has('internal/plugin')).toBe(true)
     expect(ctx.handlers.has('tools/execute')).toBe(true)
     expect(ctx.invariants!.register).toHaveBeenCalledWith(PACKAGE_NAME, expect.any(Function))

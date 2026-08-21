@@ -18,10 +18,11 @@ function r15sOf(report: { findings: Finding[] }): Finding[] {
 }
 
 describe('N5 R15 dynamic-string provenance (网络目标动态构造)', () => {
-  it('规则已注册：RULES 含 R15，RULE_IDS 含 R15，ENGINE_VERSION 递增为 static-v12（缓存失效）', () => {
+  it('规则已注册：RULES 含 R15，RULE_IDS 含 R15，ENGINE_VERSION 递增为 static-v13（缓存失效）', () => {
     expect(RULES.some(r => r.id === 'R15')).toBe(true)
     expect(RULE_IDS).toContain('R15')
-    expect(ENGINE_VERSION).toBe('static-v12')
+    expect(RULE_IDS).toContain('R16')
+    expect(ENGINE_VERSION).toBe('static-v13')
   })
 
   it('fetch(动态拼接) → R15 info/heuristic', () => {
