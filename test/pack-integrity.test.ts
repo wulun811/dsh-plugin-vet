@@ -17,6 +17,8 @@ describe('check-pack-integrity 发布门禁（五轮审查回归）', () => {
     })
     expect(out).toContain('完整性检查通过')
     expect(out).toContain('相对引用全部闭合')
+    // 0.2.4 回归：裸导入闭包检查必须真实运行并通过（typescript 误删事故即从此盲区穿过）
+    expect(out).toContain('裸导入闭包通过')
     expect(out).not.toContain('✗')
   })
 })
