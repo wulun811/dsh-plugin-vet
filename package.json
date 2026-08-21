@@ -63,15 +63,7 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/index.bundle.js",
-    "lib/gate.js",
-    "lib/gate-cli.js",
-    "lib/client.js",
-    "lib/client.d.ts",
-    "lib/guard",
-    "lib/scanner",
-    "lib/scanner-bin",
-    "lib/types",
+    "lib",
     "cordis.patch.yml",
     "vet-self-pins.json",
     "README.md",

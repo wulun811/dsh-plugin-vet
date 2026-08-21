@@ -6,6 +6,7 @@ versioning follows [SemVer](https://semver.org/).
 ## [0.2.2] - 2026-08-21
 
 ### Fixed
+- **npm 包 files 白名单漏收散件目录（发布阻断）**：files 原只列 index.bundle/gate/gate-cli/client + guard/scanner/scanner-bin/types，漏了 lib/tools、lib/audit、lib/guards、lib/pkg-root.js、lib/invariant.js 等编译产物——npm 包内 gate.js（→ ../tools/scan-plugin.js）、runtime-guard.js（→ ../pkg-root.js + ../invariant.js）、version-diff.js（→ ../audit/archive.js）会 ERR_MODULE_NOT_FOUND，散件入口一装就崩（主 bundle 因内联侥幸可用）。现 files 改为收全整个 lib 目录，tarball 相对 import 全部闭合，gate/bundle/gate-cli 加载验证通过。
 - **fetch 包装器 Request 形态 body 盲点（二轮审查 #1/#6）**：fetch(new Request(url, { body })) 时 body 在 Request 内部，原实现三路观测（字节台账/金丝雀扫描/密钥外泄匹配）全部失效。现在同步 clone（不消费原流）后异步补观测，字符串 body 与 Request body 统一走金丝雀/密钥扫描；body 表达式只计算一次。
 - **持久化忽略热路径同步读盘（二轮审查 #2）**：isPersistentlyDismissed 原实现每次 record()（每次 T2 报警收口）都 readFileSync 读盘——报警风暴时叠加大量同步 I/O。现改为内存缓存 Set（O(1) 查询），dismiss/restore 同步更新缓存。
 - **saveDismissed 目录硬编码（二轮审查 #3）**：原实现写 ~/.dsh/vet/ 而非 dirname(DISMISSED_FILE)——测试自定义路径（setDismissedFileForTest）时会建错目录。现以 dirname(DISMISSED_FILE) 为准。
@@ -15,6 +16,7 @@ versioning follows [SemVer](https://semver.org/).
 ### Changed
 - **依赖范围升至 ^0.1.1-rc.1（DSH 0.1.1 兼容）**：peer/dev 中 @deepseek-ai/dsh-invariants/llm/session/tools 从 ^0.1.0-rc.8 升到 ^0.1.1-rc.1——semver 预发布规则下 ^0.1.0-rc.8 不满足 0.1.1-rc.1，不升级会在 DSH 0.1.1 环境报 peer 冲突。API 面已验证零差异（lib 全量 diff 空）。
 - **路径模式匹配正则缓存（二轮审查 #4）**：patternMatchPath 含通配符模式每次调用都 new RegExp，现按规范模式缓存编译结果。
+- **发布完整性检查增强（check-pack-integrity）**：原来只校验 resolveVetFile/resolvePkgRoot 引用的文件在 files 覆盖内，这次 files 白名单漏目录它没拦住。现新增四道检查——(1) lib/** 全部相对 import/export/require 在发布集内闭合；(2) bin 与 exports 声明的入口全部可达（package.json 等 npm 强制随包文件豁免）；(3) 发布集边界：禁止 src/、scripts/、test/、scanner-bin/*.ts 等非发布物混入；(4) files 条目不存在时报错（防手误）。prepublishOnly 门禁在发布前强制运行。
 
 ## [0.2.1] - 2026-08-21
 
