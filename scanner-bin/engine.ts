@@ -4,7 +4,7 @@
  * @module dsh-plugin-vet/scanner-engine
  */
 import { readFileSync, statSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, sep } from 'node:path'
 import { createRequire } from 'node:module'
 import { parseSource } from './ast.js'
 import { extractCapabilities, aggregateCapabilities } from './capability.js'
@@ -536,19 +536,24 @@ export interface UpstreamRadarResult {
 // 创建 require 函数（ESM 模块中需要 createRequire）
 const require = createRequire(import.meta.url)
 
-// v5 修订（专家1 #5）：不使用 npx 自动安装，先探测本地安装路径
-async function queryUpstreamRadar(
+// v5 修订（专家1 #5）：不使用 npx 自动安装，先探测本地安装路径。
+// 导出仅供测试（三轮审查 R18 加固回归）：生产路径经 checkSupplyChain 调用。
+export async function queryUpstreamRadar(
   packageRoot: string,
   timeoutMs: number = 15_000
 ): Promise<UpstreamRadarResult | null> {
-  // 优先使用本地安装的 upstream-radar（避免 npx 自动安装的供应链风险）
+  // 三轮审查加固：只在 vet 自身模块树内解析（不带 paths 参数，起点=本编译文件所在目录向上）。
+  // 此前 { paths: [packageRoot] } 会优先命中被扫描包自带/伪造的 node_modules/upstream-radar——
+  // 恶意包塞同名假包即可让 execFile 在 scanner 子进程里执行不可信代码，破坏“静态分析、
+  // 不执行被扫代码”的核心隔离承诺。未安装 → 静默降级（与原行为一致）。
   let radarPath: string | null = null
   try {
-    radarPath = require.resolve('upstream-radar/bin/upstream-radar.js', { paths: [packageRoot] })
+    radarPath = require.resolve('upstream-radar/bin/upstream-radar.js')
   } catch {
-    // 未安装：静默降级
     return null
   }
+  // 纵深防御：解析结果即使落在被扫包目录内也拒绝执行
+  if (radarPath.startsWith(packageRoot + sep)) return null
   
   return new Promise((resolve) => {
     execFile(radarPath!, ['scan', packageRoot, '--json'], {

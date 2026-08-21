@@ -96,6 +96,22 @@ export function isTransientTempPath(p: string): boolean {
   const last = norm.slice(norm.lastIndexOf('/') + 1)
   return last !== '' && TRANSIENT_TEMP_SUFFIX.test(last)
 }
+
+/** DSH web 状态目录正则（覆盖 ~/.dsh/web 与 ~/.dsh/profiles/web 两种布局，高频路径提为常量）。 */
+const DSH_WEB_STATE_DIR_RE = /\/\.dsh\/(?:profiles\/)?web\//
+/**
+ * DSH web 状态临时产物（五轮用户反馈降噪）：宿主 web 层保存 UI 状态（.shortcut-bar.json 等）
+ * 走原子写协议——高频创建/清理 `.名.json.<pid>.<uuid>.tmpdir`，lstat+rmdir 成对出现；栈里只有
+ * 宿主帧 → 无归因 → 每次保存都刷 red fs-destroy / yellow fs-probe。判定纯名字/目录形状。
+ * 刻意收窄到 web/ 目录：凭据面（.credentials.yaml 原子写临时件）、sessions/**、完整性金丝雀、
+ * 蜜罐不在此列，其上任何操作照旧报警。是否豁免由调用方结合归因决定（插件碰它=信号，照报）。
+ */
+export function isDshWebTempArtifact(p: string): boolean {
+  const norm = p.replace(/\\/g, '/')
+  if (!DSH_WEB_STATE_DIR_RE.test(norm)) return false
+  const last = norm.slice(norm.lastIndexOf('/') + 1)
+  return last !== '' && TRANSIENT_TEMP_SUFFIX.test(last)
+}
 /**
  * 归一化路径并判断是否敏感。
  * mode='mutate'（写/删）额外计入系统根前缀（/etc /usr /var …：写删系统文件=篡改/破坏）；

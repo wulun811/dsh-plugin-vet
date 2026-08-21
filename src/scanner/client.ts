@@ -36,11 +36,19 @@ async function withScanSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
   return new Promise<T>((resolve, reject) => {
     scanQueue.push(() => {
+      // 三轮审查修复（并发记账）：排队路径必须自己增减 activeScans 并在完成后 pump。
+      // 此前只跑 fn 不记账：pump 的 while 条件看不到新任务占位，一口气放空整个队列，
+      // 真实并发远超 MAX_CONCURRENT_SCANS（8 任务仿真峰值实测 7），首次启动批量加载
+      // 恰是该上限要防的 spawn 风暴场景。
       void (async () => {
+        activeScans++
         try {
           resolve(await fn())
         } catch (error) {
           reject(error)
+        } finally {
+          activeScans--
+          pumpScanQueue()
         }
       })()
     })
@@ -58,6 +66,9 @@ function pumpScanQueue(): void {
 export interface ScanOptions {
   timeoutMs?: number
 }
+
+/** 导出仅供测试（并发上限回归）：生产代码一律走 scan/scanSync。 */
+export const _withScanSlotForTest = withScanSlot
 
 /** 异步扫描：spawn scanner-bin，请求-响应式，超时 kill（不伪造 verdict）。 */
 export async function scan(request: ScanRequest, options: ScanOptions = {}): Promise<ScanResponse> {

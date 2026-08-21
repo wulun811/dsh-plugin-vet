@@ -6,7 +6,7 @@ import { DESTROY_OPS, WRITE_OPS, READ_OPS, PROBE_OPS, PROC_OPS, FS_LEDGER_OPS } 
 import type { HookModule, HookConfig, HookAlarm } from './runtime-ops.js'
 import type { LedgerFsEvent, LedgerNetEvent } from './exfil-ledger.js'
 import { confirmBlock, BLOCK_FS_OPS, type BlockDecision } from './confirm-block.js'
-import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath } from './runtime-denoise.js'
+import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact } from './runtime-denoise.js'
 import { classifyOp } from './runtime-classify.js'
 import { classifyNetworkOp, extractNetworkTarget, isTrackedNetHost, NET_OPS } from './runtime-net.js'
 import { fsOpBytes, attachWriteCounter, attachCanaryScanner, attachReadCounter } from './runtime-count.js'
@@ -39,7 +39,7 @@ export function patchModule(
       if (isRootIndexing() || isVetSelfIo()) {
         return (fn as (...a: unknown[]) => unknown).apply(this, args)
       }
-      const alarm = classifyOp({ module: moduleName, op: opName, args }, cfg)
+      let alarm = classifyOp({ module: moduleName, op: opName, args }, cfg)
       const ledgerRelevant = observe !== undefined && FS_LEDGER_OPS.has(opName)
       const blockRelevant = moduleName === 'fs' && BLOCK_FS_OPS.has(opName) && confirmBlock.mode() === 'block'
       // C4（0.1.16 加固）：归因链被篡改（prepareStackTrace 替换 / stackTraceLimit<2）时栈文本不可信
@@ -66,6 +66,17 @@ export function patchModule(
           message: '栈归因被篡改（Error.prepareStackTrace/stackTraceLimit 被修改）——敏感操作无法归属，主动隐藏归因疑为攻击（C4）',
           target: t.slice(0, 120),
         })
+      }
+      // 五轮用户反馈降噪：DSH web 状态临时产物（UI 原子写 `.x.json.<pid>.<uuid>.tmpdir` 的
+      // lstat/rmdir 清理）——宿主自身高频家务操作，栈里只有宿主帧 → 无归因 → 每次保存刷
+      // red fs-destroy / yellow fs-probe。仅在「无归因 + 归因链未被篡改」时按宿主自身豁免；
+      // 插件归因的同类操作照报（碰宿主状态=信号），蜜罐/完整性金丝雀类不受此豁免。
+      if (
+        alarm !== null && hint === undefined && !stackTampered &&
+        alarm.kind !== 'honeypot' && alarm.kind !== 'integrity' &&
+        isDshWebTempArtifact(firstString(args) ?? '')
+      ) {
+        alarm = null
       }
       // N7 确认拦截：判定（族 1/2）在调用原函数之前执行——拦截 = 抛错（fail-open：异常 → 放行）
       // C4：归因被篡改时用哨兵身份（不匹配任何已知插件）参与族 2 凭据本体判定——

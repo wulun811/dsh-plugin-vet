@@ -18,7 +18,9 @@ function renderDiff(value: VersionDiffHistory): string {
   if (value.records.length > 0) {
     lines.push('  历史版本: ' + value.records.map(r => r.version).join(' → '))
   }
-  if (value.diff !== null) {
+  // 三轮审查修复：与 vet_label 同款——单记录时 execute 省略 diff 键，此处收到 undefined，
+  // `!== null` 判断穿透后读 .from 抛 TypeError。null/undefined 一并拦截。
+  if (value.diff !== null && value.diff !== undefined) {
     lines.push('  行为差分 ' + value.diff.from + ' → ' + value.diff.to + ':')
     const added: string[] = []
     for (const h of value.diff.added.hosts) added.push('+ 网络主机 ' + h)

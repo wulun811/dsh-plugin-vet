@@ -41,7 +41,14 @@ async function doVerify(name: string, version: string, timeoutMs: number): Promi
     const meta = await metaRes.json() as { dist?: { tarball?: unknown } }
     const tarball = meta.dist?.tarball
     if (typeof tarball !== 'string' || tarball === '') return { status: 'unavailable', detail: 'packument 无 dist.tarball' }
-    const tgzRes = await fetch(tarball, { signal: AbortSignal.timeout(timeoutMs) })
+    // 三轮审查加固：dist.tarball 是 registry 返回的任意字符串——钉死到本函数的 registry 源，
+    // 防止被诱导 fetch 任意外部 URL（SSRF 面）。npm 官方 packument 的 dist.tarball 恒为本源主机。
+    let tarballUrl: URL
+    try { tarballUrl = new URL(tarball) } catch { return { status: 'unavailable', detail: 'dist.tarball 非合法 URL' } }
+    if (tarballUrl.origin !== new URL(REGISTRY_HOST).origin) {
+      return { status: 'unavailable', detail: `dist.tarball 主机越界: ${tarballUrl.origin}` }
+    }
+    const tgzRes = await fetch(tarballUrl, { signal: AbortSignal.timeout(timeoutMs) })
     if (!tgzRes.ok) return { status: 'unavailable', detail: `tarball HTTP ${tgzRes.status}` }
     const buf = Buffer.from(await tgzRes.arrayBuffer())
     const officialHash = await hashPackTarball(buf)
@@ -58,6 +65,20 @@ export async function hashPackTarball(buf: Buffer): Promise<string | null> {
   try {
     const tgzPath = join(dir, 'pkg.tgz')
     writeFileSync(tgzPath, buf)
+    // 三轮审查加固：解包前先列成员并校验——拒绝绝对路径 / '..' / 盘符 / 反斜杠成员。
+    // GNU tar 默认不拦 '..' 成员，恶意 tarball 可借其把文件写出 tmpdir 之外；反斜杠在
+    // GNU tar 里是字面字符，但 Windows bsdtar 会当路径分隔符转换（四轮审查补口）。
+    // npm 官方 pack 归一化路径分隔符，正常 tarball 不含反斜杠成员，误杀风险为零。
+    // 残留限制（记录）：符号链接成员仍可能指向目录外；registry 走 TLS 属可信源，此为纵深防御而非边界。
+    const listed = await execFileAsync('tar', ['-tzf', tgzPath])
+    for (const raw of listed.stdout.split('\n')) {
+      const entry = raw.trim()
+      if (entry === '') continue
+      if (
+        entry.startsWith('/') || entry.includes('../') || entry.endsWith('/..') ||
+        /^[a-zA-Z]:/.test(entry) || entry.includes('\\')
+      ) return null
+    }
     await execFileAsync('tar', ['-xzf', tgzPath, '-C', dir])
     const r = computePackageHash(join(dir, 'package'), { maxFiles: 1000, maxSizeBytes: 50 * 1024 * 1024, timeoutMs: 10_000 })
     return r?.hash ?? null

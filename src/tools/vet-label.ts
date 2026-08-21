@@ -22,10 +22,13 @@ function renderLabel(value: CapabilityLabel): string {
     lines.push('  ' + (value.note ?? '无记录'))
     return lines.join('\n')
   }
-  if (value.latest !== null) lines.push('  版本: ' + value.latest)
+  if (value.latest !== null && value.latest !== undefined) lines.push('  版本: ' + value.latest)
   const m = value.manifest
-  if (m === null) {
-    if (value.note !== null) lines.push('  ' + value.note)
+  // 四轮审查加固（与三轮 DSH.SO bug 同族，渲染层数据健壮性）：loadCapabilities 对单条记录
+  // 零结构校验——残缺存储（手改/半写/旧版升级遗留）可让 manifest 经 execute 键省略 + JSON 往返
+  // 变成 undefined（`=== null` 判断穿透后在 m.hasNetwork 崩溃），或缺数组字段（m.hosts.length 崩）。
+  if (m === null || m === undefined) {
+    if (value.note !== null && value.note !== undefined) lines.push('  ' + value.note)
     return lines.join('\n')
   }
   const flags: string[] = []
@@ -34,13 +37,17 @@ function renderLabel(value: CapabilityLabel): string {
   if (m.esmNamedBuiltins === true) flags.push('⚠️ ESM 具名导入盲区')
   lines.push('  能力: ' + (flags.length > 0 ? flags.join(' / ') : '（无网络/执行声明）'))
 
-  if (m.hosts.length > 0) lines.push('  网络主机:', ...m.hosts.map(h => '    · ' + h))
-  if (m.fsPaths.length > 0) {
+  const hosts = Array.isArray(m.hosts) ? m.hosts : []
+  const fsPaths = Array.isArray(m.fsPaths) ? m.fsPaths : []
+  const spawnCmds = Array.isArray(m.spawnCmds) ? m.spawnCmds : []
+  const imports = Array.isArray(m.imports) ? m.imports : []
+  if (hosts.length > 0) lines.push('  网络主机:', ...hosts.map(h => '    · ' + h))
+  if (fsPaths.length > 0) {
     lines.push('  敏感路径:')
-    for (const fp of m.fsPaths) lines.push('    · ' + fp + (isSensitiveFsPath(fp) ? '' : '（常规）'))
+    for (const fp of fsPaths) lines.push('    · ' + fp + (isSensitiveFsPath(fp) ? '' : '（常规）'))
   }
-  if (m.spawnCmds.length > 0) lines.push('  子进程:', ...m.spawnCmds.map(s => '    · ' + s))
-  if (m.imports.length > 0) lines.push('  依赖（能力未知，保守视作任意能力）:', ...m.imports.map(i => '    · ' + i))
+  if (spawnCmds.length > 0) lines.push('  子进程:', ...spawnCmds.map(s => '    · ' + s))
+  if (imports.length > 0) lines.push('  依赖（能力未知，保守视作任意能力）:', ...imports.map(i => '    · ' + i))
   if (m.ghostDeps !== undefined && m.ghostDeps.length > 0) {
     lines.push('  ⚠️ 幽灵依赖（代码引用但 package.json 未声明，靠传递依赖提升侥幸可解析）:')
     for (const d of m.ghostDeps) lines.push('    · ' + d)
@@ -49,15 +56,18 @@ function renderLabel(value: CapabilityLabel): string {
     lines.push('  ⚠️ 僵尸依赖（package.json 声明但 node_modules 缺失，运行到即失败）:')
     for (const d of m.zombieDeps) lines.push('    · ' + d)
   }
-  if (m.hosts.length === 0 && m.fsPaths.length === 0 && m.spawnCmds.length === 0 && m.imports.length === 0) {
+  if (hosts.length === 0 && fsPaths.length === 0 && spawnCmds.length === 0 && imports.length === 0) {
     lines.push('  （无静态敏感足迹）')
   }
-  if (value.diffSummary !== null && value.diffSummary.from !== value.diffSummary.to) {
-    const added0 = value.diffSummary.added
-    lines.push('  最近升级 ' + value.diffSummary.from + ' → ' + value.diffSummary.to + ':')
+  // 三轮审查修复（DSH.SO 反馈 bug）：execute 对 null 字段整键省略，JSON 往返后这里是 undefined
+  // 而非 null——单条版本记录时上一版代码 `!== null` 判断穿透，读 .from 抛 TypeError 导致渲染失败。
+  const ds: { from?: unknown; to?: unknown; added?: string[] } | null | undefined = value.diffSummary
+  if (ds !== null && ds !== undefined && ds.from !== ds.to) {
+    const added0 = Array.isArray(ds.added) ? ds.added : []
+    lines.push('  最近升级 ' + String(ds.from) + ' → ' + String(ds.to) + ':')
     lines.push('    ' + (added0.length > 0 ? '新增 ' + added0.join('；') : '无新增能力'))
   }
-  if (value.note !== null) lines.push('  ' + value.note)
+  if (value.note !== null && value.note !== undefined) lines.push('  ' + value.note)
   return lines.join('\n')
 }
 
