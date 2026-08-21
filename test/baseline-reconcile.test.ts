@@ -133,7 +133,7 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
       const u = String(url)
       if (u.endsWith(`/${VERSION}`)) {
-        return new Response(JSON.stringify({ dist: { tarball: 'https://registry.example/x.tgz' } }))
+        return new Response(JSON.stringify({ dist: { tarball: 'https://registry.npmjs.org/x.tgz' } }))
       }
       return new Response(new Uint8Array(tgz))
     }))
@@ -154,7 +154,7 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
       const u = String(url)
       if (u.endsWith(`/${VERSION}`)) {
-        return new Response(JSON.stringify({ dist: { tarball: 'https://registry.example/x.tgz' } }))
+        return new Response(JSON.stringify({ dist: { tarball: 'https://registry.npmjs.org/x.tgz' } }))
       }
       return new Response(new Uint8Array(officialSnapshot))
     }))
