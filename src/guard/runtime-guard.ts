@@ -4,9 +4,18 @@
  * 默认 alarm：所有报警进 VetStatus，不拦截；N7（0.1.14 起）对确认破坏类操作
  * （fs 族 1/2，confirmBlock 默认 block）在钩子侧抛错拦截（PLAN §2.1 D21 修订：
  * 高置信破坏 ≠ 纯观测；族 3/4 默认仍只报警）。
+ *
+ * P0-4 结构债拆分：T1 哨兵生命周期 → runtime-sidecar.ts；T2 报警/台账/金丝雀/密钥/
+ * 取证管道 → runtime-sink.ts。本文件保留 installRuntimeGuard 装配、栈归因映射构建、
+ * 归因排除，并对拆出模块的公共符号做再导出（外部 import 路径与符号不变）。
  */
+
+// re-export：T1 哨兵公共 API（外部直连 runtime-guard.js 的测试/宿主仍可 import）
+export { sidecarSpawned, decideRespawn, sidecarSupportedOn, pidCmdlineIsVetSidecar, safeKillSidecar } from './runtime-sidecar.js'
+// re-export：T2 报警/降级公共 API
+export { t2AlarmId, t2Severity, isSuppressUnattributedSessionLog, hashShort } from './runtime-sink.js'
+
 import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
 import { resolveVetFile } from '../pkg-root.js'
 import fs from 'node:fs'
 import cp from 'node:child_process'
@@ -16,145 +25,22 @@ import net from 'node:net'
 import http2 from 'node:http2'
 import tls from 'node:tls'
 import dgram from 'node:dgram'
+import { existsSync, readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { VetConfig } from '../config.js'
-import { VetStatus, type VetAlarm } from './status.js'
+import { VetStatus } from './status.js'
 import type { WatchAlarm } from './runtime-watch.js'
-import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, extractNetworkTarget, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, chunkBytes, isTrackedNetHost, type HookAlarm } from './runtime-hooks.js'
+import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, extractNetworkTarget, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, chunkBytes, isTrackedNetHost, hookHeartbeat, registerHookTarget, brandVetHook } from './runtime-hooks.js'
+import { isStackTraceTampered } from './runtime-denoise.js'
 import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../invariant.js'
 import { ensureHoneypot, ensureIntegrityCanaries } from './honeypot.js'
-import { capabilityDiff, diffKindOf } from './capability-diff.js'
-import { exfilLedger, detectKeyLeaks, type LedgerAlarm, type LedgerFsEvent, type LedgerNetEvent } from './exfil-ledger.js'
+import { exfilLedger } from './exfil-ledger.js'
 import { canaryStore } from './canary.js'
 import { confirmBlock } from './confirm-block.js'
-import { incrementAlarmsRecorded } from './stats.js'
-import { existsSync } from 'node:fs'
-
-/** T1 哨兵是否已启动（invariant 断言用）。 */
-export let sidecarSpawned = false
-
-/**
- * D30 修漏：哨兵 pid 注册表（process.env，跨模块热重载保留）。
- * dsh 配置热重载会重新 apply vet 插件 → module 级变量（child/sidecarAlive）全部重置，
- * 但 process.env 保留。用 env 记当前哨兵 pid：
- * - watch 分支 spawn 前查 env：已有存活哨兵 → 复用不重复 spawn（根治重复 apply 叠加）；
- * - off 分支查 env：kill 遗留哨兵（关闭守卫必须真正停掉监控）。
- * sidecar 崩溃退出后 env 里的 pid 存活检查失败 → 下次 apply 重新 spawn。
- */
-const SIDECAR_PID_ENV = 'DSH_VET_SIDECAR_PID'
-
-/**
- * P0-2：哨兵意外退出后是否重拉（纯函数，可测）。
- * 条件：env 注册表仍指向本哨兵（mine）+ 非 stopping + 未达上限。
- * 旧实现先删 env 再比较 → 恒 false，respawn 死代码；这里由调用方传入注册表 pid，判定与清理解耦。
- */
-export function decideRespawn(
-  registeredPid: number | undefined,
-  childPid: number | undefined,
-  stopping: boolean,
-  respawnCount: number,
-  maxRespawn: number,
-): boolean {
-  // 两边都要有值才判 mine——undefined === undefined 是「spawn 失败/无注册」不是「本哨兵」
-  return registeredPid !== undefined && registeredPid === childPid && !stopping && respawnCount < maxRespawn
-}
-
-/** P1-6：T2 报警去重 id——拼 pluginHint，避免不同插件同路径互吞报警。 */
-export function t2AlarmId(kind: string, target: string | undefined, pluginHint: string | undefined): string {
-  return `t2:${kind}:${target ?? ''}:${pluginHint ?? ''}`
-}
-
-/** 0.1.20 内容短 hash（密钥外泄报警去重 id 用；FNV-1a 32 位，确定性，不落原文）。 */
-export function hashShort(s: string): string {
-  let h = 2166136261
-  for (let i = 0; i < s.length; i++) {
-    h = Math.imul(h ^ s.charCodeAt(i), 16777619)
-  }
-  return (h >>> 0).toString(36)
-}
-
-/**
- * 0.1.16 修正：未归因的会话日志删除（~/.dsh/sessions 下分片文件轮换）从 red 降到 yellow。
- * 0.1.19 起：无主会话日志删除完全静默（见 isSuppressUnattributedSessionLog）——DSH 宿主压缩
- * 会话日志（zstd 删分片）是无归因高频运维，每次降级 yellow 仍刷屏；归因到插件的会话日志
- * 删除仍保持 red（可能是插件在销毁证据、规避审计）。其余报警严重度原样透传。
- */
-export function t2Severity(alarm: HookAlarm, pluginHint: string | undefined): HookAlarm['severity'] {
-  if (alarm.kind === 'fs-destroy' && alarm.sessionLog === true && pluginHint === undefined) {
-    return 'yellow'
-  }
-  return alarm.severity
-}
-
-/**
- * 无主会话日志删除是否静默（0.1.19）：DSH 宿主压缩/轮转 ~/.dsh/sessions 会话日志
- * （zstd 产生 session.jsonl.zstd.xxx 分片后删除）是无归因高频运维——每次压缩都报 yellow
- * 会刷屏淹没真报警。仅当 kind=fs-destroy + sessionLog=true + 无插件归因时静默；
- * 归因到插件的会话日志删除仍是 red（插件销毁证据），无归因的非会话日志敏感删除照报。
- */
-export function isSuppressUnattributedSessionLog(kind: string | undefined, sessionLog: boolean | undefined, pluginHint: string | undefined): boolean {
-  return kind === 'fs-destroy' && sessionLog === true && pluginHint === undefined
-}
-
-function envSidecarPid(): number | undefined {
-  const raw = process.env[SIDECAR_PID_ENV]
-  if (raw === undefined || raw === '') return undefined
-  const pid = Number(raw)
-  if (!Number.isInteger(pid) || pid <= 0) return undefined
-  return pid
-}
-
-/** pid 是否存活（kill(0) 探测；EPERM 也视为存活——存在但不是我们的子进程）。 */
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    return code === 'EPERM'
-  }
-}
-
-/** M9（0.1.16 加固）：/proc/<pid>/cmdline 是否含 vet 侧车标记（Linux）。 */
-export function pidCmdlineIsVetSidecar(pid: number): boolean {
-  try {
-    return readFileSync('/proc/' + pid + '/cmdline').includes(Buffer.from('vet-sidecar'))
-  } catch {
-    return false
-  }
-}
-
-/**
- * M9（0.1.16 加固）：安全终止侧车——先核对 cmdline 再 SIGTERM，防 OS PID 复用误杀无辜进程
- * （旧实现只看 kill(pid,0) 存活即杀：侧车已退出 + 5s 窗口内 PID 被复用时会把别的进程干掉）。
- * 非 Linux（无 /proc）回退存活探测；被杀对象身份存疑时不动手并返回 false。
- */
-export function safeKillSidecar(pid: number, signal: NodeJS.Signals = 'SIGTERM'): boolean {
-  if (!pidAlive(pid)) return false
-  if (process.platform === 'linux' && !pidCmdlineIsVetSidecar(pid)) return false
-  try {
-    process.kill(pid, signal)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/** 按 env 注册表 kill 遗留哨兵（关闭守卫时调用）。 */
-function killSidecarFromEnv(logger: { warn: (m: string) => void }): void {
-  const pid = envSidecarPid()
-  if (pid === undefined) return
-  const killed = safeKillSidecar(pid)
-  if (!killed && pidAlive(pid)) {
-    // M9：存活但身份存疑（PID 复用/找不到 cmdline）——不再误杀，仅告警
-    logger.warn(`vet: 哨兵 pid=${pid} 存活但身份存疑（可能被 PID 复用），未终止——请人工确认`)
-  }
-  delete process.env[SIDECAR_PID_ENV]
-  if (killed) logger.warn(`vet: 运行时守卫关闭，终止哨兵 (pid=${pid})`)
-}
-
-// P2-5 修复：isOfficial 统一从 runtime-hooks.ts 导入（避免包名变更时一处遗漏）
+import { createT2Sink, type ContractResolver } from './runtime-sink.js'
+import { loadContract } from './contract.js'
+import { SIDECAR_PID_ENV, envSidecarPid, pidAlive, safeKillSidecar, killSidecarFromEnv, sidecarSkippedWarned, setSidecarSpawned, setSidecarSkippedWarned, decideRespawn, sidecarSupportedOn } from './runtime-sidecar.js'
 
 /**
  * A9 归因排除：vet 自身不参与 T2 栈归因。包装器帧（runtime-hooks.js）永远是报警栈的栈顶，
@@ -226,10 +112,6 @@ let prevGuardDisposer: (() => void) | undefined
 /** H2：守卫已关闭（off/dispose）——pending 的 respawn 定时器检查此标志，禁止复活孤儿哨兵。 */
 let guardDisabled = false
 
-/** 守卫当前是否禁用（供 respawn 定时器/外部查询）。 */
-export function isGuardDisabled(): boolean {
-  return guardDisabled
-}
 
 export function installRuntimeGuard(ctx: Context, config: VetConfig, status: VetStatus): () => void {
   // 先卸载上一个实例（热重载/重复 apply 场景：旧钩子/旧哨兵必须清理，否则叠加）
@@ -256,7 +138,32 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   // spawnSidecar 的 fresh-spawn 分支检查 guardDisabled，不复位则哨兵永不启动且无任何日志/报警
   guardDisabled = false
   const disposers: (() => void)[] = []
+  // T1 哨兵：子进程 /proc 监视（stdout JSON 行 → status.record；重拉起 + 卸载清理）
+  disposers.push(installSidecar(ctx, config, status))
+  // T2 钩子 + 网络出口观测：fs/child_process/http*/dgram/fetch 进程内包装
+  installT2(ctx, config, status, disposers)
+  // 钩子完整性心跳：周期复查 T2 包装品牌，被剥离即 yellow（alarm-only）
+  installHookHeartbeat(ctx, config, status, disposers)
+  // 幂等：ctx.on('dispose') 与 prevGuardDisposer 都可能触发同一 disposer（重载时旧 ctx
+  // 先 dispose、新 apply 再调 prevGuardDisposer）——先到者生效，重复执行是 no-op。
+  let disposed = false
+  const disposer = (): void => {
+    if (disposed) return
+    disposed = true
+    for (const dispose of disposers) {
+      try {
+        dispose()
+      } catch {
+        // 恢复/终止失败不阻断卸载
+      }
+    }
+  }
+  prevGuardDisposer = disposer
+  return disposer
+}
 
+/** T1 哨兵装配：spawn sidecar 子进程 + stdout JSON 行解析 + respawn 管理与卸载清理。 */
+function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () => void {
   // ── T1 哨兵 ─────────────────────────────────────────────
   const watchArgs = [
     String(config.runtimeIntervalMs),
@@ -292,6 +199,19 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     if (stopping) return
     // H2：守卫已关（off/dispose）→ 不复活哨兵（pending respawn 定时器触发时走到这里）
     if (guardDisabled) return
+    // P0-6：T1 依赖 /proc（Linux 专有）。非 Linux 显式跳过——不拉哨兵、不进 respawn 循环、
+    // 清 env 注册表；避免"首轮 exit(0) → 意外退出 → 重拉×5"的空转与 sentinel-down 噪音。
+    // T2 钩子不受影响（进程内防线照常装配）。
+    if (!sidecarSupportedOn(process.platform)) {
+      setSidecarSpawned(false)
+      sidecarAlive = false
+      delete process.env[SIDECAR_PID_ENV]
+      if (!sidecarSkippedWarned) {
+        setSidecarSkippedWarned(true)
+        ctx.logger.info('vet: T1 哨兵依赖 /proc（仅 Linux），当前平台跳过——内存/子进程/fd 监控不生效；T2 钩子与静态扫描不受影响')
+      }
+      return
+    }
     // env 注册表：已有存活哨兵（热重载前的实例/重复安装的旧副本）
     // P1-2：不能复用——旧哨兵的 stdout 管道属于旧模块实例的 child 句柄，新实例没有它的
     // 监听器；复用 = 哨兵继续跑但 T1 报警全部写进已废弃的旧 VetStatus（热重载后静默丢失）。
@@ -306,14 +226,14 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       if (!safeKillSidecar(existing)) {
         ctx.logger.warn(`vet: 既有哨兵 pid=${existing} 存活但身份存疑，未终止——按接管流程继续（新实例将接管监控）`)
       }
-      sidecarSpawned = false
+      setSidecarSpawned(false)
       sidecarAlive = false
     }
     child = spawn(process.execPath, [sidecarPath, '--vet-sidecar', ...watchArgs], {
       stdio: ['ignore', 'pipe', 'inherit'],
     })
     process.env[SIDECAR_PID_ENV] = String(child.pid ?? '')
-    sidecarSpawned = true
+    setSidecarSpawned(true)
     sidecarAlive = true
     child.stdout?.setEncoding('utf8')
     // L2：JSON 行可能跨 chunk 截断——累积行缓冲，只在遇到完整换行时解析
@@ -337,7 +257,7 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       // P2-3：spawn 失败（EACCES/无效路径等）不能无监听——未捕获 'error' 事件会崩宿主。
       // 置为未存活并清掉残留 env（从未活过的 pid），不抛不 respawn（下次 apply 重新尝试）。
       sidecarAlive = false
-      sidecarSpawned = false
+      setSidecarSpawned(false)
       if (envSidecarPid() === child?.pid) delete process.env[SIDECAR_PID_ENV]
       ctx.logger.error(`vet: T1 哨兵启动失败：${String(err)}`)
       status.record({
@@ -391,7 +311,7 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     })
   }
   spawnSidecar()
-  disposers.push(() => {
+  return () => {
     stopping = true
     const pid = envSidecarPid()
     if (pid !== undefined && pidAlive(pid)) {
@@ -404,148 +324,24 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     } else if (sidecarAlive && child !== undefined) {
       child.kill()
     }
-  })
+  }
+}
 
-  // ── T2 钩子 ─────────────────────────────────────────────
+/** T2 钩子 + 网络出口观测装配：fs/child_process patch + http/https/net/http2/tls/dgram/fetch 包装。 */
+function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers: (() => void)[]): void {
+// ── T2 钩子 ─────────────────────────────────────────────
   // A9 归因映射（root→包名）只建一次并缓存：每个被分类的 fs 调用都会走归因，重建=每条
   // 报警 N×require.resolve 的 CPU 空转（报警风暴时放大）；热重载会重新 apply 生成新闭包，
   // 天然重建，无需失效机制。
   const rootIndex = createRootIndex(ctx)
-  const sink = (alarm: HookAlarm): void => {
-    // 官方包信任（能力授权，P2-6）：官方归因的报警全部降噪——官方包是平台本体，
-    // dsh 自身高频读写 ~/.dsh（会话持久化/配置/存储），.dsh 敏感段加入后若只降噪 spawn
-    // 会刷屏成永久黄灯。报警面 = 第三方插件与无主操作；第三方无法伪造归因（按真实栈路径判定）。
-    if (alarm.pluginHint !== undefined && isOfficial(alarm.pluginHint)) return
-    // N7 族 3/4 报警只对第三方归因有效（宿主/用户自己写 bashrc、npm install 等无主操作不报）
-    if ((alarm.kind === 'persistence-write' || alarm.kind === 'install-write') && alarm.pluginHint === undefined) return
-    // 无主会话日志删除静默（isSuppressUnattributedSessionLog）：DSH 宿主压缩/轮转会话日志
-    // （zstd 会产生 session.jsonl.zstd.xxx 分片后删除）是无归因高频运维——每次压缩都报 yellow
-    // 会刷屏淹没真报警。归因到插件的会话日志删除仍是 red（插件销毁证据）；无归因的非会话日志
-    // 敏感删除（如删 .credentials.yaml 本体）照报。
-    if (isSuppressUnattributedSessionLog(alarm.kind, alarm.sessionLog, alarm.pluginHint)) return
-    // N7 族 1 触发：完整性金丝雀被写删（归因插件）→ 进入拦截名单（后续破坏类操作抛错）
-    if (alarm.kind === 'integrity' && alarm.pluginHint !== undefined) confirmBlock.markFamily1(alarm.pluginHint)
-    const entry: VetAlarm = {
-      // P1-6：id 拼 pluginHint——两个插件碰同一敏感路径不再同 id 互吞（后到者报警被去重吞掉）
-      id: t2AlarmId(alarm.kind, alarm.target, alarm.pluginHint),
-      severity: t2Severity(alarm, alarm.pluginHint),
-      source: 't2',
-      kind: alarm.kind,
-      message: alarm.message,
-      target: alarm.target,
-      pluginHint: alarm.pluginHint,
-      sessionLog: alarm.sessionLog,
-      // 关联签名类（n3-）按 (kind,plugin) 合并去重：跨主机/跨密钥的同类报警折叠为一条、累计次数。
-      // T2 hook 报警（fs-destroy/net 等）不带 mergeKey，保留按精确 id 的原有去重语义。
-      mergeKey: alarm.kind.startsWith('n3-') ? `t2:${alarm.kind}:${alarm.pluginHint}` : undefined,
-      at: Date.now(),
-    }
-    status.record(entry)
-    // 0.1.20：防御统计——每次警报记录时自增
-    incrementAlarmsRecorded()
-    // N1 差分：敏感操作观测 → 静态能力清单对账（隐藏能力 red/certain；只差分已扫描插件）
-    const kind = diffKindOf(alarm.kind)
-    if (kind !== null && alarm.pluginHint !== undefined && alarm.target !== undefined) {
-      const hidden = capabilityDiff.observeAndCheck({
-        plugin: alarm.pluginHint,
-        kind,
-        value: alarm.target,
-      })
-      if (hidden !== null) {
-        status.record({
-          id: `n1-hidden:${hidden.plugin}:${hidden.kind}`,
-          severity: 'red',
-          source: 't2',
-          kind: 'n1-hidden',
-          message: hidden.message,
-          target: hidden.value,
-          pluginHint: hidden.plugin,
-          at: Date.now(),
-        })
-      }
-    }
-  }
-  // N3 台账接线：T2 观测 → 字节台账 + 破坏签名（官方归因不建桶；报警经同一 sink 去重/归因）
-  const emitLedger = (plugin: string | undefined, alarms: LedgerAlarm[]): void => {
-    for (const a of alarms) {
-      // N7 族 1 触发：N3 破坏签名组合（勒索实锤）→ 拦截名单
-      if (a.kind === 'n3-ransom' && plugin !== undefined) confirmBlock.markFamily1(plugin)
-      sink({ severity: a.severity, kind: a.kind, message: a.message, target: a.target, pluginHint: plugin })
-    }
-  }
-  // N4 金丝雀确认外泄：出站 URL/body/spawn 参数中发现活跃金丝雀 → 100% 外泄确认（red）。
-  // 官方归因降噪；命中同时把该插件台账标记为疑似（阈值降最低，N3）。
-  const recordCanary = (where: 'url' | 'body' | 'spawn', hit: string, plugin: string | undefined): void => {
-    if (plugin !== undefined && isOfficial(plugin)) return
-    if (plugin !== undefined) exfilLedger.markSuspected(plugin)
-    // N7 族 1 触发：canary 泄漏 = 100% 破坏确认 → 拦截名单
-    if (plugin !== undefined) confirmBlock.markFamily1(plugin)
-    status.record({
-      id: `n4-canary:${hit}:${plugin ?? ''}`,
-      severity: 'red',
-      source: 't2',
-      kind: 'canary-leak',
-      message: `蜜罐金丝雀外泄确认：出站${where === 'url' ? 'URL' : where === 'spawn' ? '命令参数' : '数据体'}中发现金丝雀 ${hit.slice(0, 16)}…（${hit.length} 位）——100% 确认外泄（N4；${plugin ?? '无主'}）`,
-      target: hit,
-      pluginHint: plugin,
-      mergeKey: `t2:canary-leak:${plugin ?? ''}`,
-      at: Date.now(),
-    })
-  }
-  // 0.1.20：密钥外泄内容匹配（PEM/AWS key 格式；纯函数 detectKeyLeaks 于 exfil-ledger）
-  const recordKeyLeak = (where: 'url' | 'body', text: string, plugin: string | undefined): void => {
-    if (plugin !== undefined && isOfficial(plugin)) return
-    const leaks = detectKeyLeaks(text)
-    if (leaks.length === 0) return
-    
-    for (const hit of leaks) {
-      const tag = hit.kind === 'pem' ? 'pem' : 'aws'
-      // Issue W 修复：PEM key 按上下文 hash（同类型不同 key 各自报警）
-      // AWS key 按 match hash（key id 唯一，天然去重）
-      let hashInput: string
-      if (hit.kind === 'pem') {
-        // 取匹配前后各 100 字符作为上下文
-        const contextStart = Math.max(0, hit.index - 100)
-        const contextEnd = Math.min(text.length, hit.index + hit.match.length + 100)
-        hashInput = text.slice(contextStart, contextEnd)
-      } else {
-        hashInput = hit.match
-      }
-      
-      status.record({
-        id: `n3-key-leak-${tag}:${plugin ?? ''}:${hashShort(hashInput)}`,
-        severity: 'red',
-        source: 't2',
-        kind: 'n3-key-leak',
-        message: `密钥外泄确认：出站${where === 'url' ? 'URL' : '数据体'}中检测到${hit.kind === 'pem' ? 'PEM 私钥格式' : 'AWS Access Key'}（${hit.match.slice(0, 30)}…）——100% 确认密钥外泄（N3；${plugin ?? '无主'}）`,
-        target: hit.match,
-        pluginHint: plugin,
-        mergeKey: `t2:n3-key-leak:${plugin ?? ''}`,
-        at: Date.now(),
-      })
-    }
-  }
-  const ledgerFsObserver = (evt: LedgerFsEvent): void => {
-    if (evt.plugin !== undefined && isOfficial(evt.plugin)) return
-    // N4：spawn 参数匹配金丝雀（命令含 curl/wget/nc 场景；网络体走 netCanaryScan）
-    if (evt.module === 'child_process' && canaryStore.count() > 0) {
-      const hit = canaryStore.match(evt.paths.join(' '))
-      if (hit !== undefined) recordCanary('spawn', hit, evt.plugin)
-    }
-    emitLedger(evt.plugin, exfilLedger.observeFs(evt))
-  }
-  const ledgerNetObserver = (evt: LedgerNetEvent): void => {
-    if (evt.plugin !== undefined && isOfficial(evt.plugin)) return
-    emitLedger(evt.plugin, exfilLedger.observeNet(evt))
-  }
-  const netCanaryScan = (hint: string | undefined, text: string, where: 'url' | 'body'): void => {
-    // 0.1.20：密钥外泄内容匹配
-    recordKeyLeak(where, text, hint)
-    if (canaryStore.count() === 0) return
-    const hit = canaryStore.match(text)
-    if (hit === undefined) return
-    recordCanary(where, hit, hint)
-  }
+  // T2 报警/台账/金丝雀/密钥/取证管道（P0-4：自 runtime-sink.ts 装配；行为与内联版完全一致）
+  // M1 契约解析器（record 档）：仅当 config.contract.enabled 且目录可读时启用；无契约文件 = 每插件零开销
+  const contractResolver: ContractResolver | undefined = config.contract?.enabled !== false
+    ? (plugin) => loadContract(plugin, (path) => {
+        try { return readFileSync(path, 'utf8') } catch { return undefined }
+      }, config.contract?.dir || undefined)
+    : undefined
+  const { sink, emitLedger, recordCanary, recordKeyLeak, ledgerFsObserver, ledgerNetObserver, netCanaryScan } = createT2Sink(status, contractResolver)
   const hookCfg = { ...DEFAULT_HOOK_CONFIG }
   // D27 蜜罐：guard watch 时按配置播种诱饵并登记蜜罐根（alarm-only；失败只告警）
   if (config.honeypot.enabled) {
@@ -564,8 +360,7 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     disposers.push(patchModule(promisesMod, 'fs', hookCfg, sink, rootIndex, ledgerFsObserver))
   }
   disposers.push(patchModule(cp as unknown as Record<string, unknown>, 'child_process', hookCfg, sink, rootIndex, ledgerFsObserver))
-
-  // ── 网络出口观测（P1 特性）─────────────────────────────────────
+// ── 网络出口观测（P1 特性）─────────────────────────────────────
   if (config.networkEgress !== false) {
     disposers.push(patchNetworkModule(http as unknown as Record<string, unknown>, 'http', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
     disposers.push(patchNetworkModule(https as unknown as Record<string, unknown>, 'https', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
@@ -631,7 +426,13 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       }
       return socket
     }
-    disposers.push(() => { dgram.createSocket = originalCreateSocket })
+    // #9（0.2.2 注释）：disposer 只恢复 createSocket 导出——已创建的 socket 实例上的 send
+    // 包装无法被统一恢复（vet 无法枚举所有已创建的实例）。这是设计限制：vet 卸载后，
+    // 早先创建的 socket 仍走包装（观测写入已拆卸的 sink，写盘/报警均失败静默，无害）；
+    // 新创建 socket 走原始路径。与 patchModule 恢复模块导出同理，实例级恢复不支持。
+    // P0-2 #2：dgram 包装参与钩子完整性心跳（patchModule/patchNetworkModule 之外的手工包装单独登记 + 打品牌）
+    registerHookTarget('dgram', dgram as unknown as Record<string, unknown>, ['createSocket'])
+    brandVetHook(dgram.createSocket as unknown as (...a: unknown[]) => unknown)
     
     // fetch 是 globalThis 上的，需要单独处理
     const originalFetch = globalThis.fetch
@@ -639,16 +440,51 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
       globalThis.fetch = function vetFetchWrapper(...args: unknown[]) {
         const alarm = classifyNetworkOp('http', 'fetch', args, hookCfg)
         if (!(isRootIndexing() || isVetSelfIo())) {
+          // C4（0.1.16 加固，fetch 分支补齐，与 patchNetworkModule 行为一致）：归因链被篡改
+          // （prepareStackTrace 替换 / stackTraceLimit<2）时栈文本不可信 → 取不到 hint，
+          // 但敏感出口必须显式报警（主动隐藏归因疑为攻击），不能静默降级为无主。
+          const stackTampered = isStackTraceTampered()
           let hint: string | undefined
-          try { hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
+          try {
+            if (!stackTampered) hint = pluginFromStack(new Error().stack ?? undefined, rootIndex())
+          } catch {}
+          if (stackTampered && alarm !== null) {
+            const t = typeof args[0] === 'string' ? args[0] : extractNetworkTarget(args)?.hostname ?? ''
+            sink({
+              severity: 'red',
+              kind: 'attribution-tampered',
+              message: '栈归因被篡改（Error.prepareStackTrace/stackTraceLimit 被修改）——fetch 网络出口无法归属，主动隐藏归因疑为攻击（C4）',
+              target: t.slice(0, 120),
+            })
+          }
           if (alarm !== null && (hint === undefined || !isOfficial(hint))) {
             sink({ ...alarm, pluginHint: hint })
           }
-          // N3 台账：fetch 出站（body 字节仅字符串形态可计，其余 0）
           const target = extractNetworkTarget(args)
-          if (target !== null && isTrackedNetHost(target.hostname) && (hint === undefined || !isOfficial(hint))) {
-            const body = (args[1] as { body?: unknown } | undefined)?.body
-            const bytes = typeof body === 'string' ? Buffer.byteLength(body, 'utf8') : 0
+          // #1/#6 修复：fetch body 提取归一（一次计算，两处复用）。
+          // 形态 1：fetch(url, init) —— body 在 init.body（字符串直接可读）。
+          // 形态 2：fetch(new Request(url, { body })) —— body 在 Request 内部：
+          //   - Node 的 Request.body 是 ReadableStream，同步不可读；
+          //   - 但 clone() 不消费原流：同步 clone 后异步 .text()，观测不阻塞原调用。
+          //   拿到文本后补跑金丝雀/密钥扫描（异步观测 = 出站后确认，同网络模块 chunk 语义）。
+          const initBody = (args[1] as { body?: unknown } | undefined)?.body
+          const stringBody = typeof initBody === 'string' ? initBody : undefined
+          let requestBodyPromise: Promise<string> | undefined
+          const first = args[0]
+          if (stringBody === undefined && typeof first === 'object' && first !== null &&
+              typeof (first as { bodyUsed?: unknown }).bodyUsed === 'boolean') {
+            try {
+              const req = first as Request
+              if (!req.bodyUsed && typeof req.clone === 'function') {
+                requestBodyPromise = req.clone().text()
+              }
+            } catch {
+              requestBodyPromise = undefined
+            }
+          }
+          const tracked = target !== null && isTrackedNetHost(target.hostname) && (hint === undefined || !isOfficial(hint))
+          if (tracked) {
+            const bytes = stringBody !== undefined ? Buffer.byteLength(stringBody, 'utf8') : 0
             emitLedger(hint, exfilLedger.observeNet({
               plugin: hint,
               module: 'fetch',
@@ -657,33 +493,69 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
               bytes,
             }))
           }
-          // N3/N4：fetch URL 与字符串 body 走统一 netCanaryScan（密钥外泄内容匹配 + 金丝雀）
+          // N3/N4：fetch URL 与 body 走统一 netCanaryScan（密钥外泄内容匹配 + 金丝雀）
           const urlText = typeof args[0] === 'string' ? args[0] : (target !== null ? target.hostname + target.path : '')
           netCanaryScan(hint, urlText, 'url')
-          const body = (args[1] as { body?: unknown } | undefined)?.body
-          const bodyText = typeof body === 'string' ? body : ''
-          netCanaryScan(hint, bodyText, 'body')
+          if (stringBody !== undefined) {
+            netCanaryScan(hint, stringBody, 'body')
+          } else if (requestBodyPromise !== undefined) {
+            // Request 形态：body 异步补观测（clone 已隔离，不消费原流；失败静默——观测是增强不是防线）
+            requestBodyPromise.then((text) => {
+              if (text === '') return
+              netCanaryScan(hint, text, 'body')
+              if (tracked) {
+                emitLedger(hint, exfilLedger.observeNet({
+                  plugin: hint,
+                  module: 'fetch',
+                  op: 'fetch',
+                  hostname: target?.hostname ?? '',
+                  bytes: Buffer.byteLength(text, 'utf8'),
+                }))
+              }
+            }).catch(() => {})
+          }
         }
         return (originalFetch as Function).apply(this, args)
       }
       disposers.push(() => { globalThis.fetch = originalFetch })
+      // P0-2 #2：fetch 包装参与钩子完整性心跳
+      registerHookTarget('fetch', globalThis as unknown as Record<string, unknown>, ['fetch'])
+      brandVetHook(globalThis.fetch as unknown as (...a: unknown[]) => unknown)
     }
   }
+}
 
-  // 幂等：ctx.on('dispose') 与 prevGuardDisposer 都可能触发同一 disposer（重载时旧 ctx
-  // 先 dispose、新 apply 再调 prevGuardDisposer）——先到者生效，重复执行是 no-op。
-  let disposed = false
-  const disposer = (): void => {
-    if (disposed) return
-    disposed = true
-    for (const dispose of disposers) {
-      try {
-        dispose()
-      } catch {
-        // 恢复/终止失败不阻断卸载
-      }
+/** 钩子完整性心跳：周期复查 T2 包装品牌标记，被剥离即 yellow（alarm-only）。 */
+function installHookHeartbeat(ctx: Context, config: VetConfig, status: VetStatus, disposers: (() => void)[]): void {
+// ── P0-2 #2：钩子完整性心跳 ─────────────────────────────────────
+  // T2 包装被剥离/替换（插件改 require.cache 后覆盖导出，或直接写回原始函数）是绕过进程内防线唯一
+  // 的 in-process 向量；周期复查品牌标记 → 失守即 yellow（alarm-only）。零配置、零出站、确定性。
+  const HOOK_HEARTBEAT_FACTOR = 4 // 比 T1 轮询稀疏：默认 runtimeIntervalMs×4 = 8s 一次
+  const heartbeatMs = Math.max(5000, config.runtimeIntervalMs * HOOK_HEARTBEAT_FACTOR)
+  const runHookHeartbeat = (): void => {
+    if (guardDisabled) return
+    let result
+    try {
+      result = hookHeartbeat()
+    } catch {
+      return
     }
+    if (result.ok) return
+    const stripped = result.checks.filter(c => !c.intact).map(c => c.module + '.' + c.op).join('，')
+    ctx.logger.warn('vet: 钩子完整性心跳失败——T2 挂钩被剥离/替换：' + stripped + '；运行时观测已降级（alarm-only 提示，请检查是否有插件篡改内置模块）')
+    status.record({
+      id: 't2:hook-heartbeat',
+      severity: 'yellow',
+      source: 't2',
+      kind: 'hook-heartbeat',
+      message: '钩子完整性心跳失败：T2 包装被剥离/替换（' + stripped + '）——运行时观测降级，疑似插件篡改内置模块',
+      target: stripped.slice(0, 120),
+      at: Date.now(),
+    })
   }
-  prevGuardDisposer = disposer
-  return disposer
+  const heartbeatTimer = setInterval(runHookHeartbeat, heartbeatMs)
+  heartbeatTimer.unref?.()
+  disposers.push(() => clearInterval(heartbeatTimer))
+  // 安装时立即基线一次（此刻钩子全新，理应完好；后续周期复查才是报警面）
+  runHookHeartbeat()
 }
