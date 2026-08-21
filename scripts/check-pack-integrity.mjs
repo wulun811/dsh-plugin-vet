@@ -15,6 +15,7 @@
 import { execSync } from 'node:child_process'
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
+import { builtinModules } from 'node:module'
 
 const ROOT = process.cwd()
 
@@ -54,6 +55,27 @@ const REL_REF_RE =
   const probe = "import { a } from './a.js'; export * from '../b/c.js'; const r = require('./d.json')"
   if ([...probe.matchAll(REL_REF_RE)].length !== 3) {
     console.error('  ✗ 相对引用提取正则自检失败（REL_REF_RE 零/错位匹配，闭合检查将空转）')
+    process.exit(1)
+  }
+}
+
+// ── 裸导入提取（import/export from + side-effect import + require + 动态 import）──
+// 首字符限定 @/字母 → 相对（./ ../）与绝对（/）引用天然不命中，交给上面的闭合检查。
+const BARE_REF_RE =
+  /(?:import|export)\s+(?:[^'"]*?\s+from\s*)?['"]([@a-zA-Z][^'"]*)['"]|require\(\s*['"]([@a-zA-Z][^'"]+)['"]\s*\)|import\(\s*['"]([@a-zA-Z][^'"]+)['"]\s*\)/g
+{
+  // 自检：4 处裸引用（typescript、@scope/pkg/sub、node:fs、side-effect-only），
+  // 相对引用 ./rel.js 必须不命中。正则退化即 exit(1)，闭包检查绝不静默空转。
+  const probe = [
+    "import ts from 'typescript'",
+    "export { x } from '@scope/pkg/sub'",
+    "const r = require('node:fs')",
+    "await import('./rel.js')",
+    "import 'side-effect-only'",
+  ].join('; ')
+  const raw = [...probe.matchAll(BARE_REF_RE)].map(m => m[1] ?? m[2] ?? m[3])
+  if (raw.length !== 4 || !raw.includes('typescript') || !raw.includes('@scope/pkg/sub') || raw.some(s => s.startsWith('.'))) {
+    console.error('  ✗ 裸导入提取正则自检失败（BARE_REF_RE 零/错位匹配，闭包检查将空转）')
     process.exit(1)
   }
 }
@@ -173,6 +195,51 @@ if (forbidden.length === 0) {
   console.error('  ✗ 发布集混入 ' + forbidden.length + ' 个非发布文件：')
   for (const f of forbidden.slice(0, 10)) console.error('    ' + f)
   hasError = true
+}
+
+// 6) lib/** 裸导入闭包（0.2.4 新增）：0.2.3 把 typescript 误判僵尸依赖删除——相对引用
+// 检查（#3）只看 ./ ../，裸包名完全不在视野，事故从盲区穿过（开发机 devDep 兜底全绿，
+// 用户机仅装生产依赖，扫描子进程启动即崩）。现裸导入必须落在声明依赖 ∪ node 内建。
+console.log('\n📦 lib/** 裸导入闭包（0.2.4 新增）：')
+{
+  const pkgJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const allowedDeps = new Set([
+    ...Object.keys(pkgJson.dependencies || {}),
+    ...Object.keys(pkgJson.peerDependencies || {}),
+    ...Object.keys(pkgJson.optionalDependencies || {}),
+  ])
+  const builtinNames = new Set(builtinModules)
+  function barePackageName(spec) {
+    // node: 前缀与任意 scheme 形态（data: 等）不是包名
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(spec)) return null
+    const parts = spec.split('/')
+    return spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+  }
+  const violations = []
+  let hitCount = 0
+  for (const file of libFiles) {
+    const src = readFileSync(join(ROOT, file), 'utf8')
+    for (const m of src.matchAll(BARE_REF_RE)) {
+      const spec = m[1] ?? m[2] ?? m[3]
+      if (!spec) continue
+      hitCount++
+      const name = barePackageName(spec)
+      if (name === null) continue
+      if (allowedDeps.has(name) || allowedDeps.has(spec)) continue
+      // 浏览器侧例外：lib/client.js 在 DSH web 壳内执行，react/react-dom 由宿主 GUI 提供，
+      // 不走 node_modules 解析——不属于「用户机缺依赖即崩」类。名单保持极小并逐一注释。
+      if (name === 'react' || name === 'react-dom') continue
+      if (builtinNames.has(name) || builtinNames.has(spec)) continue
+      violations.push({ from: file, spec })
+    }
+  }
+  if (violations.length === 0) {
+    console.log('  ✓ 裸导入闭包通过：' + hitCount + ' 处裸引用全部落在 dependencies/peerDependencies/optionalDependencies ∪ node 内建')
+  } else {
+    console.error('  ✗ ' + violations.length + ' 处裸导入未声明为运行时依赖（用户机仅装生产依赖时会启动即崩）：')
+    for (const v of violations.slice(0, 20)) console.error('    ' + v.from + ' -> ' + v.spec)
+    hasError = true
+  }
 }
 
 if (hasError) {

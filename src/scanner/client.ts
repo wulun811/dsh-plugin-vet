@@ -70,6 +70,27 @@ export interface ScanOptions {
 /** 导出仅供测试（并发上限回归）：生产代码一律走 scan/scanSync。 */
 export const _withScanSlotForTest = withScanSlot
 
+/**
+ * scanner 子进程启动即崩的可读化诊断（0.2.4 用户机回归）：子进程在 import 阶段崩溃时
+ * stdout 为空，上层只能报 JSON 解析错（Unexpected end of JSON input），真因埋在 stderr
+ * 尾部。对已知崩溃形态给出点名结论（缺哪个依赖、怎么处置），原始信息保留在后。
+ * 导出仅供测试断言，生产代码经 withCrashDiag 使用。
+ */
+export function describeScannerCrash(stderr: string): string | undefined {
+  const missing = /Cannot find package '([^']+)'/.exec(stderr)
+  if (missing !== null) {
+    return `scanner crashed on startup: missing runtime dependency '${missing[1]}' (reinstall @jieai/dsh-plugin-vet)`
+  }
+  if (/Cannot find module/.test(stderr)) {
+    return 'scanner crashed on startup: module resolution failed (installation incomplete? reinstall @jieai/dsh-plugin-vet)'
+  }
+  return undefined
+}
+
+function withCrashDiag(diag: string | undefined, message: string): string {
+  return diag === undefined ? message : `${diag}; ${message}`
+}
+
 /** 异步扫描：spawn scanner-bin，请求-响应式，超时 kill（不伪造 verdict）。 */
 export async function scan(request: ScanRequest, options: ScanOptions = {}): Promise<ScanResponse> {
   return withScanSlot(() => scanInner(request, options))
@@ -107,14 +128,15 @@ async function scanInner(request: ScanRequest, options: ScanOptions = {}): Promi
     child.on('error', err => finish({ ok: false, error: String(err) }))
     child.on('close', () => {
       const line = stdout.trim().split('\n').pop()
+      const diag = describeScannerCrash(stderr)
       if (line === undefined) {
-        finish({ ok: false, error: `scanner produced no output; stderr: ${stderr.slice(0, 200)}` })
+        finish({ ok: false, error: withCrashDiag(diag, `scanner produced no output; stderr: ${stderr.slice(0, 200)}`) })
         return
       }
       try {
         finish(JSON.parse(line) as ScanResponse)
       } catch (err) {
-        finish({ ok: false, error: `scanner invalid output: ${String(err)}; stderr: ${stderr.slice(0, 200)}` })
+        finish({ ok: false, error: withCrashDiag(diag, `scanner invalid output: ${String(err)}; stderr: ${stderr.slice(0, 200)}`) })
       }
     })
     // scanner-bin 启动失败时 stdin 流可能已销毁：write 抛错/EPIPE 必须兜住，不能崩宿主
@@ -156,7 +178,11 @@ export function scanSync(request: ScanRequest, options: ScanOptions = {}): ScanR
     return { ok: false, error: `scanner spawnSync failed: ${String(error)}` }
   }
   if (result.status !== 0) {
-    return { ok: false, error: `scanner exit ${result.status}: ${String(result.stderr).slice(0, 200)}` }
+    const stderrText = String(result.stderr)
+    return {
+      ok: false,
+      error: withCrashDiag(describeScannerCrash(stderrText), `scanner exit ${result.status}: ${stderrText.slice(0, 200)}`),
+    }
   }
   try {
     return JSON.parse(result.stdout.trim()) as ScanResponse
