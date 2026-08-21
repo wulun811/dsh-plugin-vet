@@ -41,6 +41,10 @@ export interface ManifestDelta {
   fsPaths: string[]
   spawnCmds: string[]
   imports: string[]
+  /** P0-2 #9：幽灵依赖变化（代码引用但未声明；subset of imports——展示用，不单独抬级报警）。 */
+  ghostDeps: string[]
+  /** P0-2 #9：僵尸依赖变化（声明但 node_modules 缺失；展示/审计用，不单独抬级报警）。 */
+  zombieDeps: string[]
   hasNetwork: boolean
   hasExec: boolean
 }
@@ -219,14 +223,18 @@ export function diffManifests(prev: CapabilityManifest, next: CapabilityManifest
   const fsPaths = arrayDelta(prev.fsPaths ?? [], next.fsPaths ?? [])
   const spawnCmds = arrayDelta(prev.spawnCmds ?? [], next.spawnCmds ?? [])
   const imports = arrayDelta(prev.imports ?? [], next.imports ?? [])
+  const ghostDeps = arrayDelta(prev.ghostDeps ?? [], next.ghostDeps ?? [])
+  const zombieDeps = arrayDelta(prev.zombieDeps ?? [], next.zombieDeps ?? [])
   return {
     added: {
       hosts: hosts.added, fsPaths: fsPaths.added, spawnCmds: spawnCmds.added, imports: imports.added,
+      ghostDeps: ghostDeps.added, zombieDeps: zombieDeps.added,
       hasNetwork: (prev.hasNetwork === false || prev.hasNetwork === undefined) && next.hasNetwork === true,
       hasExec: (prev.hasExec === false || prev.hasExec === undefined) && next.hasExec === true,
     },
     removed: {
       hosts: hosts.removed, fsPaths: fsPaths.removed, spawnCmds: spawnCmds.removed, imports: imports.removed,
+      ghostDeps: ghostDeps.removed, zombieDeps: zombieDeps.removed,
       hasNetwork: prev.hasNetwork === true && next.hasNetwork !== true,
       hasExec: prev.hasExec === true && next.hasExec !== true,
     },
@@ -244,6 +252,8 @@ function describeDelta(delta: ManifestDelta): string[] {
   for (const f of delta.fsPaths) parts.push('敏感路径 ' + f)
   for (const s of delta.spawnCmds) parts.push('子进程 ' + s)
   for (const i of delta.imports) parts.push('新依赖 ' + i + '（能力未知）')
+  for (const d of delta.ghostDeps) parts.push('幽灵依赖 ' + d + '（未声明）')
+  for (const d of delta.zombieDeps) parts.push('僵尸依赖 ' + d + '（声明但未安装）')
   if (delta.hasNetwork) parts.push('网络能力')
   if (delta.hasExec) parts.push('执行能力')
   return parts
@@ -344,6 +354,58 @@ export function history(pkg: string): VersionDiffHistory {
       }
     } catch {
       return { package: pkg, records: [], latest: null, prior: null, diff: null, note: '能力清单存储不可读' }
+    }
+  })
+}
+
+/** 营养标签数据（M2）：某包的已记录能力清单 + 升级差分摘要（vet label 数据源；只读，不写存储）。 */
+export interface CapabilityLabel {
+  package: string
+  /** 是否存在任何本地记录。 */
+  present: boolean
+  records: { version: string; recordedAt: number }[]
+  latest: string | null
+  /** 最新版的能力清单（基于记录里 recordedAt 最晚的一条）。 */
+  manifest: CapabilityManifest | null
+  /** 最近一次升级差分的简写（无旧版时 null）。 */
+  diffSummary: { from: string; to: string | null; added: string[] } | null
+  note: string | null
+}
+
+/** 某插件包的最新能力标签（vet label 数据源）。只读，不触发扫描、不联网。 */
+export function label(pkg: string): CapabilityLabel {
+  return withVetSelfIo(() => {
+    try {
+      const store = loadCapabilities()
+      const records = Object.values(store.records)
+        .filter(r => r.name === pkg)
+        .sort((a, b) => a.recordedAt - b.recordedAt)
+      const versions = records.map(r => ({ version: r.version, recordedAt: r.recordedAt }))
+      if (records.length === 0) {
+        return { package: pkg, present: false, records: versions, latest: null, manifest: null, diffSummary: null, note: '无任何本地记录——该包尚未被 vet 自动扫描，或用 vet 扫描后才有能力标签可用' }
+      }
+      const latestRecord = records[records.length - 1]
+      let diffSummary: CapabilityLabel['diffSummary'] = null
+      let note: string | null = null
+      if (records.length === 1) {
+        note = '仅一条版本记录，无升级差分可展示（冷启动：之后的下一次升级将产出差分）'
+      } else {
+        const prev = records[records.length - 2]
+        const { added } = diffManifests(prev.capabilities, latestRecord.capabilities)
+        const parts = describeDelta(added)
+        diffSummary = { from: prev.version, to: latestRecord.version, added: parts }
+      }
+      return {
+        package: pkg,
+        present: true,
+        records: versions,
+        latest: latestRecord.version,
+        manifest: latestRecord.capabilities,
+        diffSummary,
+        note,
+      }
+    } catch {
+      return { package: pkg, present: false, records: [], latest: null, manifest: null, diffSummary: null, note: '能力清单存储不可读' }
     }
   })
 }

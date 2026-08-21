@@ -3,8 +3,9 @@
  * alarm-only：只记录与暴露状态，绝不产生任何拦截/杀进程/卸载行为（PLAN §2.1 D21）。
  * level 派生：任一 red 报警 → red；任一 yellow 报警或最近扫描 suspicious → yellow；否则 green。
  */
+import { isPersistentlyDismissed, persistentlyDismiss, restorePersistentDismissal } from './dismissed-alerts.js'
 export type ShieldLevel = 'green' | 'yellow' | 'red'
-export type AlarmSeverity = 'yellow' | 'red'
+export type AlarmSeverity = 'yellow' | 'red' | 'info'
 export type AlarmSource = 't1' | 't2' | 'scan'
 
 export interface VetAlarm {
@@ -91,19 +92,32 @@ export class VetStatus {
     }
   }
 
-  /** 用户忽略一条报警：从盾牌 level 与活动列表隐藏，记录保留（可恢复）。 */
+  /** 用户忽略一条报警：从盾牌 level 与活动列表隐藏，记录保留（可恢复）。
+   *  0.2.1：同时持久化忽略状态，DSH 重启后仍生效。
+   *  对于有 mergeKey 的警报（如 N3 无主警报），使用 mergeKey 作为持久化 key，
+   *  这样忽略一个警报后，所有同类警报都会被忽略。 */
   dismiss(id: string): void {
     this.dismissedIds.add(id)
+    // 查找警报的 mergeKey（如果存在）
+    const alarm = this.alarms.find(a => a.id === id)
+    const dismissKey = alarm?.mergeKey ?? id
+    persistentlyDismiss(dismissKey)
   }
 
-  /** 恢复一条被忽略的报警。 */
+  /** 恢复一条被忽略的报警。
+   *  0.2.1：同时从持久化存储中恢复。
+   *  对于有 mergeKey 的警报，使用 mergeKey 作为持久化 key。 */
   restore(id: string): void {
     this.dismissedIds.delete(id)
+    const alarm = this.alarms.find(a => a.id === id)
+    const dismissKey = alarm?.mergeKey ?? id
+    restorePersistentDismissal(dismissKey)
   }
 
-  /** 某条报警当前是否被忽略。 */
+  /** 某条报警当前是否被忽略（内存 + 持久化）。
+   *  0.2.1：同时检查持久化忽略列表，用户忽略后跨 session 生效。 */
   isDismissed(id: string): boolean {
-    return this.dismissedIds.has(id)
+    return this.dismissedIds.has(id) || isPersistentlyDismissed(id)
   }
 
   /**
@@ -116,6 +130,10 @@ export class VetStatus {
   record(alarm: VetAlarm): 'new' | 'deduped' {
     const now = Date.now()
     this.expire(now)
+    // 0.2.1：用户已持久化忽略的警报（或同类 mergeKey 警报）不入列——统一在收口层拦截，
+    // 保证所有记录点（t1/t2/scan）的忽略语义一致，避免调用点漏检查。
+    const dismissKey = alarm.mergeKey ?? alarm.id
+    if (isPersistentlyDismissed(dismissKey)) return 'deduped'
     const groupKey = alarm.mergeKey ?? alarm.id
     const matchGroup = (a: VetAlarm): boolean => (a.mergeKey ?? a.id) === groupKey
     const recent = this.alarms.find(a => matchGroup(a) && now - a.at < this.dedupeWindowMs)

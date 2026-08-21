@@ -29,6 +29,10 @@ export interface VetConfig {
   }
   /** P-5：官方包内容哈希基线（默认开启）：对 @deepseek-ai/* 包计算内容哈希，与基线比对，防止包名伪造。 */
   contentBaseline: boolean
+  /** P-5 补充（0.1.21）：已声明的本机补丁哈希。键为 `name@version`，值为该版本被允许的内容哈希
+   * （sha256 hex，可用 computePackageHash 或红警消息里的短 hash 全量获取）。命中 → 豁免基线比对
+   * 并记一次性 yellow 提示（透明不静默）；未登记的差异仍按篡改处理。 */
+  acknowledgedPackageHashes: Record<string, string[]>
   /** P1：运行时网络出口观测（默认开启）：包装 http/https/net/http2/tls/dgram/fetch，观测插件发起的网络请求。 */
   networkEgress: boolean
   /** P1：传递依赖 OSV 核对（默认关闭）：调用 upstream-radar CLI 扫描传递依赖树。需要安装 upstream-radar。 */
@@ -39,6 +43,14 @@ export interface VetConfig {
   confirmBlockFamily3: 'alarm' | 'block'
   /** N7 族 4 覆写（默认 alarm，仅报警）：显式 'block' 才拦截供应链/安装态写入。 */
   confirmBlockFamily4: 'alarm' | 'block'
+  /** M1 语义契约（默认开，0.1.21 记录档）：插件存在通过校验的契约时，运行时对账——
+   * 越界记 info m1:contract-violation、拒载 yellow m1:contract-rejected、代码事实证伪
+   * 时 yellow m1:contract-distrusted（契约永远不压制任何既有报警）。无契约 = 零变化。 */
+  contract: {
+    enabled: boolean
+    /** 契约目录；空 = $HOME/.dsh/vet/contracts（env DSH_PLUGIN_VET_CONTRACTS_DIR 可覆盖）。 */
+    dir: string
+  }
 }
 
 export const VetConfigSchema: z<VetConfig> = z.object({
@@ -62,9 +74,14 @@ export const VetConfigSchema: z<VetConfig> = z.object({
     dir: z.string().default(''),
   }).default({ enabled: false, dir: '' }),
   contentBaseline: z.boolean().default(true),
+  acknowledgedPackageHashes: z.dict(z.array(z.string())).default({}),
   networkEgress: z.boolean().default(true),
   transitiveDeps: z.boolean().default(false),
   confirmBlock: z.union([z.const('block'), z.const('alarm'), z.const('off')]).default('block'),
   confirmBlockFamily3: z.union([z.const('alarm'), z.const('block')]).default('alarm'),
   confirmBlockFamily4: z.union([z.const('alarm'), z.const('block')]).default('alarm'),
+  contract: z.object({
+    enabled: z.boolean().default(true),
+    dir: z.string().default(''),
+  }).default({ enabled: true, dir: '' }),
 })

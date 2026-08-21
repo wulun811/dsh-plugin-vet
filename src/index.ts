@@ -3,6 +3,7 @@ import { VetConfigSchema } from './config.js'
 import type { VetConfig } from './config.js'
 import { createScanPluginTool } from './tools/scan-plugin.js'
 import { createVetDiffTool } from './tools/vet-diff.js'
+import { createVetLabelTool } from './tools/vet-label.js'
 import { registerAuditProtocolSkill } from './skills/audit-protocol.js'
 import { installInternalPluginGuard } from './guards/internal-plugin.js'
 import { installToolExecuteGuard } from './guards/tool-execute.js'
@@ -19,6 +20,7 @@ export function apply(ctx: Context, config: VetConfig): void {
   const status = new VetStatus()
   ctx.tools.register(createScanPluginTool(config))
   ctx.tools.register(createVetDiffTool())
+  ctx.tools.register(createVetLabelTool())
   registerAuditProtocolSkill(ctx as unknown as { skills?: { register?: (reg: unknown) => () => void } })
   const guardDisposer = installRuntimeGuard(ctx, config, status)
   // 生命周期（二轮审查发现）：事件监听/工具/skill/路由都随 cordis ctx 销毁自动清理，

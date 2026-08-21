@@ -13,6 +13,8 @@ import { capabilityDiff } from '../guard/capability-diff.js'
 import { recordScan as recordVersionScan, consumeCapabilitiesTamper } from '../guard/version-diff.js'
 import type { VetStatus } from '../guard/status.js'
 import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline, consumeBaselineTamper } from './content-baseline.js'
+import { verifyAgainstRegistry } from './registry-verify.js'
+import { isPersistentlyDismissed } from '../guard/dismissed-alerts.js'
 
 /** typert loader 为 Fiber 附加的 entry 元数据（loader.ts:412 同款访问）。 */
 type VetFiber = Fiber & { entry?: { options?: { name?: string } } }
@@ -62,40 +64,87 @@ function extractPackageName(packageName: string): string {
   return packageName
 }
 
-function isExempt(packageName: string, packageRoot: string | undefined, config: VetConfig, status?: VetStatus): boolean {
+/** P-5 判定结果：官方包是否豁免；mismatch 携带上下文供 report 模式 registry 对账。 */
+type OfficialVerdict =
+  | { kind: 'exempt' }
+  | { kind: 'not-official' }
+  | { kind: 'mismatch'; version: string; hash: string; acknowledged: boolean }
+
+/**
+ * 官方包判定（P-5，0.1.21 重构）：内容哈希基线 + 已声明本机补丁。
+ * - first-seen 自动信任并记录基线（v5 方案）；
+ * - match 豁免；
+ * - mismatch 且 hash 在 acknowledged-package-hashes 登记 → 豁免 + 一次性 yellow（透明不静默）；
+ * - 其余 mismatch 不豁免：deny 同步记红（零网络 fail-closed）；report 由调用方异步对账 registry 后定性。
+ */
+function classifyOfficial(packageName: string, packageRoot: string | undefined, config: VetConfig): OfficialVerdict {
   // cordis builtin 命名空间（cordis:group 等框架内置分组入口，非可安装的第三方插件）——不扫描不审计
-  if (packageName.startsWith('cordis:')) return true
-  if (config.allowlist.includes(packageName)) return true
-  if (!packageName.startsWith('@deepseek-ai/')) return false
-  if (!config.contentBaseline) return true  // 配置关闭时维持旧行为
-  if (packageRoot === undefined) return false  // 无法解析包根，不豁免
+  if (packageName.startsWith('cordis:')) return { kind: 'exempt' }
+  if (config.allowlist.includes(packageName)) return { kind: 'exempt' }
+  if (!packageName.startsWith('@deepseek-ai/')) return { kind: 'not-official' }
+  if (!config.contentBaseline) return { kind: 'exempt' }  // 配置关闭时维持旧行为
+  if (packageRoot === undefined) return { kind: 'not-official' }  // 无法解析包根，不豁免
 
   // 官方包：内容哈希校验（P-5）
   const hashResult = computePackageHash(packageRoot, { maxFiles: 1000, maxSizeBytes: 50 * 1024 * 1024, timeoutMs: 10000 })
-  if (hashResult === null) return false  // 超限/超时：不豁免
+  if (hashResult === null) return { kind: 'not-official' }  // 超限/超时：不豁免
   const hash = hashResult.hash
   const version = readInstalledVersion(packageRoot) ?? 'unknown'
-  const store = getBaseline()
-  const result = checkBaseline(packageName, version, hash, store)
+  const result = checkBaseline(packageName, version, hash, getBaseline())
   if (result === 'first-seen') {
+    const store = getBaseline()
     recordBaseline(packageName, version, hash, store)
     saveBaseline(store)  // 原子写
-    return true  // 首次见到，自动信任（v5 修订：砍掉白名单，与 VET 信任官方包的定位一致）
+    return { kind: 'exempt' }  // 首次见到，自动信任（v5 修订：砍掉白名单，与 VET 信任官方包的定位一致）
   }
-  if (result === 'match') return true  // 内容一致，信任
-  // mismatch：同名但内容变了 → 不豁免，记录 red 报警
-  const msg = `官方包 ${packageName}@${version} 内容哈希与基线不一致（疑似供应链篡改）`
+  if (result === 'match') return { kind: 'exempt' }  // 内容一致，信任
+  const ackList = config.acknowledgedPackageHashes[`${packageName}@${version}`] ?? []
+  return { kind: 'mismatch', version, hash, acknowledged: ackList.includes(hash) }
+}
+
+/** mismatch 红警（deny 同步路径 / report 对账失败路径共用）。 */
+function recordMismatchAlarm(status: VetStatus | undefined, name: string, version: string, hash: string, why: string): void {
   status?.record({
-    id: `baseline-mismatch:${packageName}`,
+    id: `baseline-mismatch:${name}`,
     severity: 'red',
     source: 'scan',
     kind: 'baseline-mismatch',
-    message: msg,
-    target: packageName,
-    pluginHint: packageName,
+    message: `官方包 ${name}@${version} 内容哈希与基线不一致（${why}）。若为本机合法修改（如 LAN 补丁），在配置 acknowledged-package-hashes 登记 hash ${hash.slice(0, 12)}…；否则疑似供应链篡改`,
+    target: name,
+    pluginHint: name,
     at: Date.now(),
   })
-  return false
+}
+
+/**
+ * report 模式 registry 对账（0.1.21）：npm 同版本发布内容不可变 = 内容真值。
+ * - 本机字节 == registry → 基线陈旧（记录早于官方发布/来自开发通道），刷新基线 + yellow；
+ * - 本机字节 != registry → 非官方修改坐实，红警升级措辞；
+ * - 对账不可用 → 维持红警（fail-closed），提示可登记补丁。
+ */
+async function reconcileMismatch(status: VetStatus | undefined, name: string, verdict: Extract<OfficialVerdict, { kind: 'mismatch' }>): Promise<void> {
+  const v = await verifyAgainstRegistry(name, verdict.version)
+  if (v.status === 'resolved' && v.officialHash === verdict.hash) {
+    const store = getBaseline()
+    recordBaseline(name, verdict.version, verdict.hash, store)
+    saveBaseline(store)
+    status?.record({
+      id: `baseline-refreshed:${name}`,
+      severity: 'yellow',
+      source: 'scan',
+      kind: 'baseline-refreshed',
+      message: `官方包 ${name}@${verdict.version} 本机字节与官方 registry 一致——原基线记录已过期，已自动刷新（此前 baseline-mismatch 为基线陈旧，非篡改）`,
+      target: name,
+      pluginHint: name,
+      at: Date.now(),
+    })
+    return
+  }
+  if (v.status === 'resolved') {
+    recordMismatchAlarm(status, name, verdict.version, verdict.hash, '与官方 registry 字节也不一致')
+  } else {
+    recordMismatchAlarm(status, name, verdict.version, verdict.hash, `registry 对账不可用：${v.detail ?? 'unknown'}`)
+  }
 }
 
 /**
@@ -127,20 +176,53 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // 扫描复用同一 root，避免重复 resolve。
     const profileDir = (ctx as { baseUrl?: string }).baseUrl
     const root = resolvePackageRoot(entryName, profileDir)
-    
-    // P-5：isExempt 需要 packageRoot 做内容哈希校验
-    if (isExempt(entryName, root, config, status)) return
-    
     const installedVersion = root === undefined ? undefined : readInstalledVersion(root)
+
+    // P-5：官方包内容哈希判定（0.1.21：report 模式 mismatch 异步对账 registry 定性）
+    const official = classifyOfficial(entryName, root, config)
+    if (official.kind === 'exempt') return
+    if (official.kind === 'mismatch') {
+      if (official.acknowledged) {
+        const alertId = `baseline-patch-ack:${entryName}`
+        // 0.2.1：用户已忽略的警报不再重新记录（持久化忽略）
+        if (!isPersistentlyDismissed(alertId)) {
+          status?.record({
+            id: alertId,
+            severity: 'yellow',
+            source: 'scan',
+            kind: 'baseline-patch-ack',
+            message: `官方包 ${entryName}@${official.version} 处于已声明的本机补丁状态（hash ${official.hash.slice(0, 12)}… 已在配置 acknowledged-package-hashes 登记）——豁免基线比对；请确保补丁来源可信`,
+            target: entryName,
+            pluginHint: entryName,
+            at: Date.now(),
+          })
+        }
+        return
+      }
+      if (config.mode === 'deny') {
+        // deny：同步记红 fail-closed（不做网络对账——同步路径零网络，P2-7 同款约束）
+        recordMismatchAlarm(status, entryName, official.version, official.hash, 'deny 模式不做网络对账')
+      } else {
+        // report：异步对账官方 registry 再定性（红 / 基线刷新黄）；独立于扫描路径，
+        // 即使后续 files 为空提前返回也不会丢警报
+        void reconcileMismatch(status, entryName, official).catch((error: unknown) => {
+          ctx.logger.error(`vet: registry 对账失败 ${entryName}: ${String(error)}`)
+          recordMismatchAlarm(status, entryName, official.version, official.hash, 'registry 对账异常')
+        })
+      }
+    }
 
     // D30 强制层：requireAudit 开启时，无健康档案的第三方插件在加载时被拦截（deny）/报警（report）。
     // 门槛独立于包解析与扫描——档案存在与否只取决于 agent 是否按协议审查过。
     if (config.requireAudit && !hasAuditRecord(entryName, installedVersion)) {
       const msg = auditRequiredMessage(entryName)
       ctx.logger.warn(msg)
+      const alertId = `audit-required:${entryName}`
+      // 0.2.1：用户已忽略的警报不再重新记录（持久化忽略）
+      if (isPersistentlyDismissed(alertId)) return
       // alarm-only：未审计插件只记录黄色告警（观测/警报），不拦截——除非用户显式选择 deny。
       status?.record({
-        id: `audit-required:${entryName}`,
+        id: alertId,
         severity: 'yellow',
         source: 'scan',
         kind: 'audit-required',
@@ -219,10 +301,12 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       // 运行时防线仅剩 T1 哨兵——显式提示边界，不静默
       // 0.1.20：session 级去重——同一插件只报一次（架构性限制，反复提醒=警报疲劳）
       if (res.report.capabilities?.esmNamedBuiltins === true && config.runtimeGuard === 'watch') {
-        if (!esmGuardReported.has(entryName)) {
+        const alertId = 'esm-guard-coverage:' + entryName
+        // 0.2.1：用户已忽略的警报不再重新记录（持久化忽略）
+        if (!isPersistentlyDismissed(alertId) && !esmGuardReported.has(entryName)) {
           esmGuardReported.add(entryName)
           status?.record({
-            id: 'esm-guard-coverage:' + entryName,
+            id: alertId,
             severity: 'yellow',
             source: 'scan',
             kind: 'esm-guard-coverage',

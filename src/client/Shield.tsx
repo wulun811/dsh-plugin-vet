@@ -37,7 +37,7 @@ export interface VetAlarmWire {
   id: string
   kind: string
   message: string
-  severity?: 'yellow' | 'red'
+  severity?: 'yellow' | 'red' | 'info'
   pluginHint?: string
   /** 目标是否为会话日志文件（归因分层文案用，见 status.ts VetAlarm）。 */
   sessionLog?: boolean

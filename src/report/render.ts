@@ -39,5 +39,20 @@ export function renderScorecard(card: PluginScorecard): string {
       lines.push(`  [${f.rule}] ${f.severity} ${f.message}${loc}`)
     }
   }
+  // vet 本体自扫注解（②+①）：Trusted/Review-required 卡；原始 findings 上一段已按原文列出。
+  if (card.selfScan !== undefined) {
+    const s = card.selfScan
+    const pinLabel = s.pin === 'pinned-match' ? '已钉扎' : s.pin === 'dev-tree' ? '开发树（字节≠发布钉扎）' : '未钉扎'
+    lines.push('')
+    lines.push('🔒 vet 安全层本体' + (s.version !== undefined ? '@' + s.version : '') + ' · ' + pinLabel)
+    lines.push('  已声明能力面：模块 {' + s.declared.modules + '} | env {' + s.declared.envVars + '} | 网络 {' + s.declared.hosts + '}')
+    const certified = s.pin === 'pinned-match' && s.verdict === 'clean'
+    lines.push('  判定：' + (certified ? 'Trusted（已声明能力面 · 有界豁免）' : 'Review-required（' + s.verdict + '，钉扎未背书）') + ' | selfScanScore ' + s.staticScore)
+    lines.push('  注解：已声明能力面 ' + s.annotation.declared + ' · 数据集自引用 ' + s.annotation.datasetSelfRef + ' · 开发夹具 ' + s.annotation.devFixtures + ' · 须复查 ' + s.annotation.retained.length + ' — 原始 finding ' + card.static.findings.length + ' 条完全保留、可展开')
+    for (const f of s.annotation.retained.slice(0, 20)) {
+      const loc = f.file !== undefined ? ' (' + f.file + (f.line !== undefined ? ':' + f.line : '') + ')' : ''
+      lines.push('  [须复查] [' + f.rule + '] ' + f.severity + ' ' + f.message + loc)
+    }
+  }
   return lines.join('\n')
 }
