@@ -86,6 +86,9 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | `honeypot.enabled` | `false` | 蜜罐诱饵（需 `runtimeGuard: watch`）：往 `honeypot.dir` 放假密钥诱饵，T2 对诱饵路径的触碰（读/写/删）单独报 `honeypot` 类报警。目录/文件名/内容均无蜜罐关键词（反蜜罐），默认位置 `~/.dsh/.local`，诱饵值全是格式正确但无效的假凭据 |
 | `honeypot.dir` | `''` | 诱饵目录；空 = `$HOME/.dsh/.local` |
 | `osvCheck` | `true` | 扫描 package.json 时向 Google OSV 查询已知漏洞（**仅精确版本**查询：range（*、>=、^、~）与无 version 的主包跳过，P3-1/P3-3——避免陈旧全量历史误报；round-7 起 range 不再剥前缀当下界精确版查询）；核对面 = 插件自身 + 直接依赖（上限 8 个，`@deepseek-ai/*` 官方包跳过，P3-10）；间接传递树超出 OSV v1 范围与扫描预算。默认开启会外发包名到 api.osv.dev，网络失败静默降级。介意隐私可设 false |
+| `contentBaseline` | `true` | 官方包内容哈希基线（P-5）：对每个 `@deepseek-ai/*` 包的文件计算 SHA-256 并与基线比对——同名冒名包（file:/tarball 无 registry 校验）哈希不符时按最严格 plugin 判定。首次见到自动落盘并信任；基线按 `name@version` 多版本并存（上限：1000 文件 / 50MB / 10s） |
+| `networkEgress` | `true` | 运行时网络出口观测（P1）：包装 http/https/net/http2/tls/dgram/fetch，观测插件发起的出站请求（alarm-only，需 `runtimeGuard: watch`） |
+| `transitiveDeps` | `false` | 传递依赖 OSV 核对（P1，opt-in，默认关）：调用**本地已安装**的 upstream-radar CLI（绝不 npx 自动安装）；未安装/超时/输出形状不符 → 静默降级为仅直接依赖。命中以 `OSV-T` medium 呈现 |
 | `confirmBlock` | `block` | N7 确认拦截（0.1.14，需 `runtimeGuard: watch`）：只拦不可逆破坏。`block`（默认）族 1/2 确认即拦；`alarm` 全族只报警；`off` 关闭。每次拦截抛错并写一条红色 `n7-block` 报警；黑名单为进程内存（重启即清） |
 | `confirmBlockFamily3` | `alarm` | N7 族 3 覆写（系统持久化/提权面写入：bashrc/cron/systemd/ld.so.preload/sudoers.d/profile.d/autostart/authorized_keys/hosts/ssl）。显式 `block` 为用户自担风险的选择，默认只报警 |
 | `confirmBlockFamily4` | `alarm` | N7 族 4 覆写（供应链/安装态写入：node_modules 包文件、cordis.patch.yml / cordis.yml / plugin.json）。显式 `block` 为用户自担风险的选择，默认只报警 |
@@ -94,8 +97,9 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 
 ## 工具
 
-- **`scan_plugin`** — 确定性静态扫描：`target` = `dynamic-code`（源码字符串）/ `package`（包目录）/ `file`（单文件）。返回评分卡（verdict + staticScore + findings）。verdict 只由静态规则产出。
+- **`scan_plugin`** — 确定性静态扫描：`target` = `dynamic-code`（源码字符串）/ `package`（包目录）/ `file`（单文件）。返回评分卡（verdict + staticScore + findings）。verdict 只由静态规则产出。支持 `scanBasis`：`npm`（默认，registry tarball 真实发布物）/ `git`（仅源码仓，R12 入口/patch 缺失降 info 不误报）。0.1.21 起评分卡能力块含 R16 幽灵/僵尸依赖字段；扫 vet 本体（realpath 判定，非包名）时额外输出 `selfScan` 注解块——本体自扫呈现 Trusted 卡（① token 级能力声明降级 + ② 每版本产物钉扎 `vet-self-pins.json` + ④ 发布自扫门禁），普通插件路径行为零变化；原始 findings 原样保留可展开（详见 docs/ARCHITECTURE.md §5.12）。
 - **`vet_diff`** — 只读、纯本地：输出某包本地记录过的版本历史 + 最近两版的行为差分（N6）。展示 hosts/fsPaths/spawnCmds/imports 的新增|移除与网络/执行能力翻转。不扫描、不联网。
+- **`vet_label`** — 只读、纯本地：输出某包的人类可读"能力营养标签"（M2）——访问的文件（标注敏感路径）、引用的网络主机/子进程、第三方依赖（能力未知）、网络/执行能力标志（含 ESM 具名导入盲区标记），以及最近升级差分摘要。数据源 = 同一份本地 N6 能力清单历史；标签反映的是**声明侧**静态能力——运行时观测/休眠能力属运行中的盾牌。不扫描、不联网。
 - **`vet-audit-protocol`（技能）** — 审查流程协议（`AUDIT_PROTOCOL.md`）：agent 按预设步骤审查新插件——scan_plugin 静态判据（含 R12 Cordis/DSH 契约）→ 读清单/源码 → 逐条核实发现 → 主动深挖（网络/文件/进程/凭据/库语义）→ **契约与代码质量审计**（4.5 步：入口/Config schema 一致性、错误处理/同步阻塞/资源泄漏/异步正确性等「写得烂」问题——静态干净≠值得装）→ 用系统写入能力手写健康档案到 `~/.dsh/vet/audits/<plugin>-<version>-<ts>.md`。vet 不内置审计工具、不替 agent 调查，只给判据与落盘约定。
 
 ## 自动行为
@@ -114,7 +118,7 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
   - **单条忽略**：每条报警可点「忽略」——只影响展示（不再计入盾牌等级与计数），记录保留可随时「恢复」；报警停止后忽略自动失效，将来复发会重新可见（可再忽略）。忽略状态与报警存储同生命周期（重启即重置）。鉴权边界（P3-12 记录）：dismiss/restore 仅做同源校验（alarm-only 展示层风险——同源页面脚本可隐藏报警，但记录不删、不影响其他能力，体系内可接受）。
   - **展示上限**：面板展示最近 8 条报警；存储为环形缓冲上限 20 条，同 id 60 秒内去重，24 小时 TTL 过期（持续触发会自然续期）——100 条不会全量展示，也无需展示（新报警会顶掉最旧的）。最近扫描回显（suspicious → 黄灯）同样按 24h TTL 过期（P3-2：一次可疑扫描不再永久黄，持续扫描自然续期）。
 
-## 静态规则表（R1-R14）
+## 静态规则表（R1-R16）
 
 | ID | 名称 | 默认级别 | 适用场景 | 确定性 |
 |---|---|---|---|---|
@@ -132,6 +136,7 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | R13 | 网络外联端点（字符串字面量中的 Discord/Telegram/Slack webhook、云元数据端点 169.254.169.254 / metadata.*.internal / 100.100.100.200、.onion 目标） | high | both | likely |
 | R14 | 随包分发的非 JS 脚本下载即执行（.sh/.bash/.ps1/.cmd/.bat 中 curl|sh、wget|sh、编码 PowerShell -enc/IEX、certutil/bitsadmin/mshta/regsvr32/rundll32 等；generic → info） | high（plugin）/ info（generic） | files | likely |
 | R15 | 动态网络目标（fetch / WebSocket / http(s).request|get / net.connect 的目标参数静态不可解——"刻意遮蔽"目标） | info（观测；叠加 N1 隐能力等信号才抬升） | both | heuristic |
+| R16 | 依赖一致性审计：**幽灵依赖**（代码引用但 package.json 未声明，靠传递依赖提升侥幸可解析）与**僵尸依赖**（package.json 声明但 node_modules 缺失） | info（观测；永不进 verdict） | files | heuristic |
 
 ## 评分模型
 
@@ -180,6 +185,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | 完整性金丝雀（0.1.14） | ~/.dsh 下落地少量小文件（固定内容+自身 sha256）；写/删 → red kind `integrity` | 勒索加密 profile/凭据面的最早触发（N3 破坏签名兜底） | 范围仅限 ~/.dsh（拍板）；读不报警 |
 | N7 确认拦截（0.1.14） | 破坏确认后对破坏类 fs 操作做包装器级拦截（族 1/2）+ 族 3/4 可选升级拦截；护栏：官方归因/无主操作/vet 自身 IO 永不拦、凭据精确文件级匹配、判定 fail-open | 族 1：确认（N3 勒索组合/完整性金丝雀写删/N4 金丝雀泄漏）后该插件破坏类 fs 操作（write/unlink/rename/cp/truncate/createWriteStream）抛错；族 2：凭据本体删除+覆盖已存在文件单次即时拦截（精确文件：~/.ssh/id_*、~/.dsh/.credentials.yaml、~/.aws/credentials、.pgpass、.netrc、.git-credentials、.npmrc）；族 3/4：黄 `persistence-write`/`install-write` 报警（默认永不拦） | 黑名单为进程内存（重启清）；配置变更需重启；可逆写（appendFile、新建文件）永不拦；族 3/4 仅显式覆写 `block` 才拦 |
 | N6 版本行为差分（0.1.15） | 每次自动扫描把 N1 能力清单按 `name@version` 记入本地 `~/.dsh/vet/capabilities.json`（0600，LRU 保留 1000 个版本）；升级时与上一记录版本（按 recordedAt 选取，不解析 semver）做清单差分 | 相对上一版的新增能力 → 黄 `upgrade-diff`（新增网络主机/敏感路径/子进程/依赖/网络或执行能力）；新增构成高敏感组合（执行+网络 / 敏感路径+网络 / 敏感路径+执行）→ 红；冷启动（首次安装）只记录，exec+network 双高给黄 `upgrade-cold` 提示；能力收窄只记录不报警；`vet_diff` 工具输出本地历史 + 最近两版行为 changelog | 只对比"声明"清单（运行时隐藏/依赖携带的能力变化由 N1 隐能力 + N2 解码覆盖，不在清单差分内）；"上一个版本"= 本机实际扫过的最近版本；同版本重装不差分（同版本内容篡改由 content-baseline 哈希覆盖）；纯本地、alarm-only |
+| 取证模式（0.1.21，P0-2） | N4 金丝雀确认后，被确认恶意插件后续每次 fs/子进程/网络操作追加写入 `~/.dsh/vet/forensics/<plugin>-<ts>.jsonl`（0600/0700，fail-open） | 完整微活动时间线："平时不打扰，确认有鬼布天罗地网" | 武装集在内存（重启清除）；不落会话内容（仅操作形状+目标，与 N3 同数据面）；取证是增强、永不拦截 |
 | 盾牌 | 浏览器 `conversation.session.header.actions` + /vet/status.json | 绿/黄/红灯 + 报警计数 | 需 `dsh web` 重启激活 |
 
 ### 明确不检测（实测验证）
@@ -245,14 +251,14 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 13. **盾牌激活需要 `dsh web` 重启**：client-modules 在启动时扫描 `dsh.client` 声明；重启前浏览器不会加载盾牌，但 /vet/status.json 端点与运行时守卫（宿主侧）重启即生效。
 14. **运行时守卫默认关闭**（`runtimeGuard: 'off'`）：包装 fs/child_process 有性能与稳定代价，opt-in 开启。
 15. **`process.kill` 保持 high（有意设计，round-7.1）**：kill 是副作用成员，不随只读成员降级——但 MCP/桥接器类插件 kill 自己 spawn 的子进程是正常功能面（dsh-bridges 实测：98/134 条已清，剩余 high 全为 run.js/util.js 的 process.kill）。静态区分 `process.kill(child.pid)`（pid 来自本包 spawn 返回值）与任意 pid 需要数据流分析，成本高收益低——维持现状，由 agent 按 vet-audit-protocol 审计时人工排除（结论记入健康档案）。
-16. **平台支持（Linux 优先，非 Linux 优雅降级）**：静态扫描层（scanner-bin/scan_plugin/R1-R12/OSV）、T2 运行时钩子、蜜罐、GUI 盾牌、审计协议均为纯 JS，跨平台（macOS/Windows 可跑）。**T1 哨兵是 Linux 专有**——依赖 /proc 读 VmRSS/子进程/fd，非 Linux 上哨兵自动退出、指标面板回退 -1/0（不报错不刷屏，设计如此）。T2 敏感路径按"路径段名"匹配（反斜杠已归一化，Windows 下 `.ssh`/`.env`/`credentials` 等段名同样命中），但"系统根前缀"（/etc /usr /var）是 POSIX 形态——Windows 上写删 `C:\Windows\System32` 类路径不受系统根判定（段名/密钥特征判定仍有效）；macOS 有 /etc /usr /var，T2 全功能。与 DSH 当前 Linux 优先的适配状态一致。
+16. **平台支持（Linux 优先，非 Linux 优雅降级）**：静态扫描层（scanner-bin/scan_plugin/R1-R12/OSV）、T2 运行时钩子、蜜罐、GUI 盾牌、审计协议均为纯 JS，跨平台（macOS/Windows 可跑）。**T1 哨兵是 Linux 专有**——依赖 /proc 读 VmRSS/子进程/fd；0.1.21（P0-6）起在非 Linux 上通过显式平台门整体跳过（不拉哨兵、零 respawn/sentinel-down 噪音），指标面板回退 -1/0（不报错，设计如此）。T2 敏感路径按"路径段名"匹配（反斜杠已归一化，Windows 下 `.ssh`/`.env`/`credentials` 等段名同样命中），但"系统根前缀"（/etc /usr /var）是 POSIX 形态——Windows 上写删 `C:\Windows\System32` 类路径不受系统根判定（段名/密钥特征判定仍有效）；macOS 有 /etc /usr /var，T2 全功能。与 DSH 当前 Linux 优先的适配状态一致。
 
 ## 开发
 
 ```sh
 npm run build       # scanner-bin + src 编译到 lib/ + client bundle
 npm run typecheck   # tsc --noEmit 全量
-npm test            # 构建 + vitest（250 用例，含覆盖率阈值）
+npm test            # 构建 + vitest（633 用例全绿）
 npx vitest run --coverage   # 覆盖率报告（lines/functions >= 70%，branches >= 50%）
 ```
 

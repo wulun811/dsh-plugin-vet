@@ -100,8 +100,24 @@ review, up to reject.
 After the review, write the conclusion with the system file-write capability (`write` tool) to:
 
 ```
-~/.dsh/vet/audits/<plugin-name>-<version>-<yyyyMMdd-HHmmss>.md
+~/.dsh/vet/audits/<escaped-plugin-name>-<version>-<yyyyMMdd-HHmmss>.md
 ```
+
+**Critical — the filename must match vet's `hasAuditRecord` matcher exactly, or the audit gate will keep firing even though the record exists.** Apply these rules when constructing `<escaped-plugin-name>`:
+
+1. **Stripe the package scope**: remove the leading `@` from scoped names.
+2. **Replace every `/` with `-`**: `@deepseek-ai/dsh-client-connection` → `deepseek-ai-dsh-client-connection`.
+3. **Local file-path plugins keep their path, `/` → `-`**: `/home/me/.dsh/profiles/web/lan-uuid-polyfill.mjs` → `-home-me-.dsh-profiles-web-lan-uuid-polyfill.mjs` (leading `/` becomes `-`, dots stay).
+4. **Timestamp format is `yyyyMMdd-HHmmss`** (with a dash between date and time), e.g. `20260821-073129`.
+5. **`<version>` is the installed version string exactly** (e.g. `0.1.0-rc.8`, `1.0.0`). For file-path plugins with no declared version, use `1.0.0` as the default.
+
+Full example for `@deepseek-ai/dsh-client-connection@0.1.0-rc.8`:
+
+```
+~/.dsh/vet/audits/deepseek-ai-dsh-client-connection-0.1.0-rc.8-20260821-073129.md
+```
+
+(Old records created with the pre-0.2.1 format `-yyyyMMddHHmmss.md` without the dash are still matched for upgrade compatibility; new records must use the dash form.)
 
 Record format (Markdown):
 

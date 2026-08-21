@@ -155,6 +155,8 @@ interface CapabilityManifest {
   imports: string[]     // third-party require/import package names
   hasNetwork: boolean   // references http/https/net/fetch/dgram …
   hasExec: boolean      // references eval/Function/child_process …
+  ghostDeps?: string[]  // R16: imported but undeclared (ghost dependency)
+  zombieDeps?: string[] // R16: declared but not installed (zombie dependency)
 }
 ```
 
@@ -168,7 +170,7 @@ interface CapabilityManifest {
   imports empty) | red `n1-hidden` (confidence certain — hidden capability executed) |
   | any third-party import present | conservatively covers any action (capability unknown, never false-alarm) |
   | static capability, runtime never triggered | dormant — recorded in the observation store, surfaced by the
-  nutrition label (M2, 0.1.16) |
+  nutrition label (M2 — `vet_label`, 0.1.21) |
 - Alarm-only: the diff never blocks; detection signals never trigger interception (N7 is the only interceptor,
   and only for destructive classes).
 
@@ -206,6 +208,25 @@ checks whether the target argument is statically resolvable to a string:
   missing argument → skipped. ENGINE_VERSION bumped static-v10 → static-v11 (old caches invalidate).
 
 
+### 4.11 Dependency consistency audit (R16, P0-2 #9)
+
+Three-way reconciliation of *declared* (package.json) vs *referenced* (code imports) vs *installed*
+(node_modules): deterministic, zero network, advisory-only.
+
+- **Ghost dependency (幽灵)**: a third-party package imported by code but not declared in any of
+  dependencies / devDependencies / peerDependencies / optionalDependencies — it resolves only because npm
+  hoists it as a transitive dep; an upgrade can silently drop or replace it. `@deepseek-ai/*` (host trust
+  boundary, same skip rule as the OSV direct-dep check) is never flagged.
+- **Zombie dependency (僵尸)**: a package declared in package.json but absent from `node_modules` (bounded
+  8-level upward walk for monorepo hoisting) — stale/forged declaration that fails at runtime.
+
+Wired into scanner-bin (files mode, package.json present): emitted as `R16` findings at info/heuristic
+(no score, never changes the verdict) and recorded into the N1 manifest as `ghostDeps`/`zombieDeps`
+(optional arrays), so `vet_label` (M2) prints them and N6's version diff surfaces their changes
+(displayed, not alarm-escalating — `imports` already carries the "new dep" signal).
+The node_modules/declared state feeds the scanner cache key (`deps` fingerprint) so results never go stale.
+Rule gate `rules: { R16: false }`; `engine` bumped static-v12 → static-v13.
+
 ## 5. Runtime guard (T1 + T2 + honeypot, alarm-only)
 
 ### 5.1 T1 sentinel (sidecar monitor)
@@ -215,6 +236,9 @@ checks whether the target argument is statically resolvable to a string:
 - Over-limit → alarm JSON line back to host: memory over-limit red, fork burst red, fd over-limit yellow,
   growth yellow.
 - Granularity = host-global (plugins share the process; can't attribute to a plugin).
+- Platform gate (0.1.21, P0-6): the sidecar is only spawned on Linux. /proc is required for the singleton
+  lock, host-liveness watchdog and PID identity check, so on macOS/Windows the sentinel is skipped entirely —
+  no spawn, no respawn noise, no `sentinel-down` alarm; T2 hooks (in-process) are unaffected.
 
 ### 5.2 T2 hooks (in-process wrapping)
 
@@ -227,10 +251,27 @@ snapshots are a known side channel):
   keywords, destructive commands (rm/mv/dd/mkfs…) hitting sensitive paths, shell redirection to sensitive
   paths, reconnaissance primitives (readdir/stat/access on sensitive paths), honeypot-lure touches.
 - **Never blocks a call**; officially attributed spawn gets noise reduction.
+- **Hook integrity heartbeat (0.1.21, P0-2 #2)**: every wrapper is branded (`brandVetHook`) with a
+  module-closure-private `Symbol` — an extractable, non-spoofable marker (a copied `toString()` can't forge
+  it). `hookHeartbeat()` re-checks the registered targets' current exports. In `watch` mode a periodic timer
+  (runtimeIntervalMs×4, min 5s, unref) raises a yellow `t2:hook-heartbeat` alarm listing any stripped/replaced
+  op — the one in-process way to bypass T2 is to rewrite the module exports, and this makes that deterministic.
 - **N1 cross-layer diff (0.1.13)**: every sensitive T2 alarm (net-egress/spawn/fs-read/fs-write/fs-destroy/
   fs-probe) is diffed against the scanned capability manifest of the attributed plugin — a sensitive action with
   zero static footprint (including imports) is a hidden capability → red `n1-hidden` alarm (certain). The diff
-  store also records observed sets for the M2 nutrition label (dormant capabilities, 0.1.16).
+  store also records observed sets for the M2 nutrition label (dormant capabilities), surfaced by the
+  `vet_label` tool (0.1.21), which prints the *declared* (static) capability manifest from the N6 history as a
+  human-readable "nutrition label"; runtime observed/dormant capabilities live in the in-process diff store.
+- **File layout (0.1.21, P0-4 structure refactor — zero behavior change)**: `src/guard/runtime-hooks.ts` (1011
+  lines) is now a public-API re-export barrel over 8 focused submodules: `runtime-ops` (op tables & types),
+  `runtime-count` (stream byte counters), `runtime-heartbeat` (hook brand + heartbeat), `runtime-denoise` (path
+  sensitivity / lock-sibling / session-log / stack-tamper / vet-self-io & root-indexing passthrough),
+  `runtime-classify` (classifyOp), `runtime-attrib` (pluginFromStack / isOfficial), `runtime-net` (network
+  classification) and `runtime-patch` (patchModule / patchNetworkModule). `src/guard/runtime-guard.ts`
+  (762 → 492 lines) keeps the `installRuntimeGuard` assembly; the T1 sentinel lifecycle moved to
+  `runtime-sidecar.ts`, and the T2 alarm/ledger/canary/key-leak/forensics pipeline to `runtime-sink.ts`
+  (`createT2Sink(status)`). All previously-public symbols are re-exported from the same module paths, so no
+  import site changes; `rootIndexing`/`vetSelfIo` stay module-private and the sidecar flags write via setters.
 
 ### 5.3 Honeypot lures
 
@@ -281,11 +322,49 @@ outbound byte counts and operation shapes:
   encrypts the profile/credentials surface, a backstop for the N3 destruction signatures. Reads are not
   alarmed (content is fixed and known).
 
+### 5.11 Semantic contract — M1 (0.1.21, P0-5 record stage)
+
+- A plugin can ship a local, offline-authored behavior contract (`vet.contract.json`, schema 1): the fs paths it
+  reads/writes/deletes, the hosts/ports it connects to, the commands it spawns, and the env vars it reads.
+  Contracts are written by the user's own agent locally (reusing the AUDIT_PROTOCOL authoring pattern) — **VET
+  makes zero model requests and stays deterministic**; enforcement is always code, never LLM.
+- **Laxity validator** (`src/guard/contract.ts`, pure/deterministic): rejects overly-flexible contracts —
+  bare `**`/`*`/empty path patterns, mid-globstar (`a/**/b`), unreachable path forms (`~/...` home-glob,
+  `/` root, `./...` relative — none can ever match an absolute runtime path), wildcard hosts (`*`),
+  wildcard commands, and malformed schema. Bounded forms are accepted: `/<dir>/**` directory-prefix recursion,
+  `/tmp/<seg>/out` single-segment wildcard, `*.example.com` one-label host suffix. A rejected contract does
+  not load (N1 stays at declared-vs-scanned); a `destroy` scope or unknown `meta.generator` raises a warning,
+  not a rejection.
+- **Trust priority (three levels)**: code facts (static scan) > runtime observations (T2) > contract promises,
+  enforced by `contractPriority()`. A contract can *explain/denoise* an observation inside its declared scope,
+  but can never override a code fact or swallow an out-of-scope observation.
+- **Record stage only — wired (0.1.21, 方案 A)**: with config contract.enabled (default on) and a per-plugin
+  contract file at ~/.dsh/vet/contracts/<name>.json, the T2 sink (createT2Sink(status, contractResolver))
+  reconciles each runtime alarm against the plugin's contract:
+  - out-of-scope alarm → info m1:contract-violation (collapses by source/kind/plugin/field, count accumulates);
+  - rejected contract → yellow m1:contract-rejected (once per plugin);
+  - a *code fact* (N1 hidden capability) contradicting the contract → yellow m1:contract-distrusted
+    (once per plugin) — the contract is proven untrustworthy against the higher authority.
+  The contract is strictly advisory: it never suppresses code-fact/observation alarms and never intercepts
+  (N7 untouched). No contract file → byte-for-byte zero behavior change. Escalating contract violations into
+  alarm evidence is a deliberate, later rollout decision (0.2.x).
+
 ### 5.6 Alarm aggregation (VetStatus)
 
 - Ring buffer (default 20) + per-id dedup window (60s) + **TTL expiry (default 24h)** — a single false
   positive doesn't turn the shield permanently yellow/red.
 - Shield level: any red → red; any yellow or a recent non-clean scan → yellow; otherwise green.
+
+### 5.10 Forensics mode (0.1.21, P0-2 — confirmed-malicious micro log)
+
+- Once a plugin is **armed** (`src/guard/forensics.ts`, triggered by the N4 canary-leak confirmation in
+  `recordCanary`), every subsequent fs/child_process op (ledgerFsObserver) and network op (ledgerNetObserver)
+  of that plugin is appended to `~/.dsh/vet/forensics/<plugin>-<ts>.jsonl` (directory 0700, file 0600).
+- Operates on the same data plane as the N3 ledger (operation-shape + target only; **never session/chat
+  content**). `arm` is idempotent, `record` is fail-open (disk errors are silent — forensics is an
+  enhancement, not a block path), and the armed set is in-memory (cleared on restart). Honest boundary: only
+  the plugin's fs/network ledger surface is captured — native binaries, worker realms and process-memory
+  exfiltration remain invisible (same boundary as N3).
 
 
 ### 5.7 Confirmation block (N7, 0.1.14 — the only interceptor)
@@ -353,6 +432,93 @@ Trust-relevant highlights:
 - C4 使归因文本不可被全局静音/伪造滥用：prepareStackTrace/stackTraceLimit 篡改 → attribution-tampered
   red + 族 2 凭据破坏照拦（哨兵身份）。
 - M7 使 capabilities/baseline 存储被外部改写可观测（vet-store-tamper 黄灯）。
+
+### 5.12 Baseline-mismatch 定性重构（0.1.21）
+
+**问题**：同版本号重装/本机补丁触发红警「疑似供应链篡改」，实际可能是基线陈旧或合法修改。
+
+**方案**：双机制——registry 对账 + 补丁登记。
+
+1. **Registry 对账**（report 模式）：mismatch 时异步对账 npm registry（同版本发布内容不可变=内容真值）：
+   - 本机字节 == registry → 基线陈旧，自动刷新基线 + yellow「基线已对齐官方 registry」
+   - 本机字节 != registry → 红警坐实「与官方 registry 字节也不一致」
+   - 对账不可用（网络失败/tar 缺失）→ 维持红警 fail-closed「registry 对账不可用」
+   - deny 模式：同步记红 fail-closed（零网络，P2-7 同款约束）
+
+2. **已声明本机补丁**：配置 `acknowledged-package-hashes`（键 `name@version`，值 sha256 hex 数组）：
+   - 命中 → 豁免基线比对 + 一次性 yellow「已声明的本机补丁状态」
+   - 未命中 → 走 registry 对账路径
+   - 用途：LAN 信任补丁等合法修改，登记后消除红警，透明不静默
+
+**配置示例**：
+```yaml
+# ~/.dsh/profiles/web/cordis.yml 或 vet 配置文件
+plugins:
+  vet:
+    acknowledgedPackageHashes:
+      "@deepseek-ai/dsh-client-connection@0.1.0-rc.8":
+        - "e396626b275719de626a3338ed5566f7b556846cee52e7e85e947f00ced8442d"
+```
+
+**红警消息**：改为可操作指引（含短 hash 与登记方法），i18n 补 `baseline-patch-ack` / `baseline-refreshed` 两类建议。
+
+### 5.13 N3 密钥外泄归因分级（0.1.21）
+
+**问题**：无主（宿主自身流量）PEM 形状命中 → red「100% 确认密钥外泄」——宿主会话体/文档天然含密钥样文本（安全报告、测试夹具），形状命中≠外泄实锤。
+
+**方案**：归因分级：
+- 归因第三方插件 → red「按外泄处置」（原语义不变）
+- 无主（宿主自身流量）→ yellow「格式命中待人工研判，非确认外泄」
+- 金丝雀命中（recordCanary）不受影响：预埋值出现即近乎实锤，保持 red
+
+**i18n**：`suggest.n3-key-leak` / `.unattributed` 措辞同步修正。
+
+### 5.14 Capability 提取降噪（0.1.21）
+
+**问题**：
+- hosts：模板拼接残片（如 `[`）混入
+- fsPaths：注释样文本/报错文案/相对模块引用混入
+- hasExec：bundle 自带同名辅助函数（fork/exec）误触 upgrade-cold「执行+网络双高」
+
+**方案**：
+1. **hosts 形状校验**：拒绝模板拼接残片；localhost（含端口）与方括号 IPv6 放行；其余要求含点域名形状
+2. **裸字面量 fsPath 收紧**：仅接受路径前缀开头且无空白且非相对模块引用；跳过模板拼接片段；fs 调用实参位的结构化提取保留完整 looksLikePath 语义（含敏感段）
+3. **hasExec 门控**：裸 spawn/exec/fork 标识符仅在文件确实引用 child_process 时计为执行能力；Function("return this") realm shim 不算动态执行
+
+### 5.15 Self-scan trust annotation — vet 扫 vet（0.1.21）
+
+把 vet 当作待审插件扫（dsh.so SECURITY SCAN 面板 / `scan_plugin` target=package），其源码天然命中全部
+危险能力词表——T1/T2 的实现就是监视 fs/child_process/net，检测规则文件里写着 curl|sh 正则、honeypot 里
+造着假私钥。原始报告呈现为海量 Critical，普通用户极易误读为"安全层本身不安全"。
+
+与"扫到自己就跳过/变绿"的作弊式豁免相反，vet 走**对本体可验证的评判标准**（有界豁免）：
+
+1. **① 能力声明降级**（`src/report/self-scan.ts`，纯函数，绝不影响非本体扫描路径）：危险 token（模块 /
+   出站目标 / 环境变量 / 敏感路径 / 子进程命令）逐个与 vet 自带的能力声明比对——token 全在声明内 →
+   视为已声明能力面（info）；**任一个未声明**（出站非回环非 osv.dev host、未知 `process.env.*`、凭据/密钥
+   路径、shell 管道、worker_threads/vm/cluster 等 IPC 原语）→ 保留原 severity，新增能力照旧 red。
+   检测规则数据/黑名单/诱饵/文案文件（rules/*、runtime-net、honeypot、i18n、capability）与
+   test/spec/e2e 开发夹具按文件级豁免——均仅 pinned-match 生效（② 钉扎兜底，非 pinned-match 时文件形同
+   陌生人，豁免失效）。
+2. **② 每版本产物钉扎**（`src/report/self-pin.ts` + `vet-self-pins.json` + `scripts/gen-self-pin.mjs`）：
+   版本 → 扫描集 sha256，按版本发布、不写死单 hash（升级同版自扫不误报；字节不符任一发布钉扎——含被替换
+   的 vet——→ 一律非 pinned-match，按陌生人全扫）。`pinned-match` = 当前字节 == 被审计发布物 → 可出
+   Trusted；`dev-tree`/`unpinned` → 不予信任背书（amber）。钉扎范围 = 本体权威源码集
+   （`src/report/self-scope.ts`：排除 gitignore 非本体目录 lib/、dsh-src/、plugin-scan-tmp/、
+   dist/coverage/build，跨机可复现、与面板扫 vet 源码仓同源）。
+3. **③ 展示数据**（`scan_plugin` 输出 `selfScan` 块 + 评分卡 Trusted 卡）：`static` 保留原始
+   verdict/findings 完整透明，`selfScan` 给出零化已声明项后的 verdict/score + 归属统计（declared /
+   datasetSelfRef / devFixtures / retained）+ 必须复查清单。**dsh.so 接入点：面板对 vet 本体改走
+   `scan_plugin` 出口；有 `selfScan` 时以其 `verdict`/`staticScore` 作标题态（Trusted = pinned-match &&
+   verdict clean），原始 findings 可折叠展开；`selfScan` 缺失（普通插件）维持原静态判定呈现，行为零变化。**
+4. **④ 发布自扫门禁**（`scripts/check-self-contract.mjs`，挂 `prepublishOnly`）：版本未钉扎 / 本地字节与
+   发布钉扎不符 / 已使用但未声明的 decisive（critical|high retained）→ 拒绝发布——保证"能发出去的版本
+   声明一定完整"。发布仪式：`npm run build && npm run gen:self-pin`（提交 `vet-self-pins.json`）→ 正常走
+   prepublish（含本门禁）。
+
+信任边界（不得放宽）：出站 host（非回环非 osv.dev）、未声明 env、凭据/密钥路径、IPC 原语四个方向出现的
+任一 token 一律保留，无待定豁免；**钉扎（pinned-match）是豁免生效的前提**。测试：`test/self-scan.test.ts`
+（27）、`test/self-pin.test.ts`（6）；端到端实测本体自扫 pinned-match + clean，325 findings 全分类。
 
 ## 6. Audit protocol (vet-audit-protocol skill)
 

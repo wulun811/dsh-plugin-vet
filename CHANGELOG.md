@@ -3,6 +3,148 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.2.2] - 2026-08-21
+
+### Fixed
+- **fetch 包装器 Request 形态 body 盲点（二轮审查 #1/#6）**：fetch(new Request(url, { body })) 时 body 在 Request 内部，原实现三路观测（字节台账/金丝雀扫描/密钥外泄匹配）全部失效。现在同步 clone（不消费原流）后异步补观测，字符串 body 与 Request body 统一走金丝雀/密钥扫描；body 表达式只计算一次。
+- **持久化忽略热路径同步读盘（二轮审查 #2）**：isPersistentlyDismissed 原实现每次 record()（每次 T2 报警收口）都 readFileSync 读盘——报警风暴时叠加大量同步 I/O。现改为内存缓存 Set（O(1) 查询），dismiss/restore 同步更新缓存。
+- **saveDismissed 目录硬编码（二轮审查 #3）**：原实现写 ~/.dsh/vet/ 而非 dirname(DISMISSED_FILE)——测试自定义路径（setDismissedFileForTest）时会建错目录。现以 dirname(DISMISSED_FILE) 为准。
+- **fetch 包装器缺失 C4 归因篡改检测（二轮审查 #5）**：归因链被篡改（prepareStackTrace / stackTraceLimit）时其余网络模块会报 attribution-tampered red，fetch 分支此前静默降级为无主。现已对齐：篡改 + 敏感出口 → 独立 red 报警。无主密钥泄漏保持静默（0.2.1 设计：宿主对话含 PEM 为正常行为，不回归）。
+- **取证文件无限增长（二轮审查 #10）**：取证 jsonl 文件名不再固定 <plugin>.jsonl（每次 DSH 重启 append 同一文件），改为 <plugin>-<会话毫秒时间戳>.jsonl 按会话轮转；模块注释如实标注「无自动 TTL 清理，保留供审计」。
+
+### Changed
+- **依赖范围升至 ^0.1.1-rc.1（DSH 0.1.1 兼容）**：peer/dev 中 @deepseek-ai/dsh-invariants/llm/session/tools 从 ^0.1.0-rc.8 升到 ^0.1.1-rc.1——semver 预发布规则下 ^0.1.0-rc.8 不满足 0.1.1-rc.1，不升级会在 DSH 0.1.1 环境报 peer 冲突。API 面已验证零差异（lib 全量 diff 空）。
+- **路径模式匹配正则缓存（二轮审查 #4）**：patternMatchPath 含通配符模式每次调用都 new RegExp，现按规范模式缓存编译结果。
+
+## [0.2.1] - 2026-08-21
+
+### Added
+- **N3 密钥外泄归因分级**：无主（宿主自身流量）降 yellow「格式命中待人工研判」，删除「100% 确认」过度声明；归因插件保持 red。金丝雀命中不受影响。
+- **capability 提取降噪**：hosts 形状校验（拒绝模板拼接残片）；裸字面量 fsPath 收紧（仅路径前缀+无空白+非相对模块引用）；hasExec 门控（裸 spawn/exec/fork 仅在文件引用 child_process 时计为执行能力）；Function("return this") realm shim 豁免。
+- **baseline-mismatch 定性重构**：report 模式 mismatch 时异步对账 npm registry（同版本发布内容不可变=内容真值）——字节一致→基线陈旧，自动刷新+yellow；不一致→红警坐实；对账不可用→维持红警 fail-closed。新增配置 `acknowledged-package-hashes`（键 `name@version`，值 sha256 hex）：登记的本机合法修改豁免比对并记一次性 yellow 提示，透明不静默。
+
+### Fixed
+- N3 无主流量误报：宿主会话体/文档天然含密钥样文本（安全报告、测试夹具），形状命中≠外泄实锤，原「100% 确认」措辞过度。
+- capability 提取器噪声：bundle 自带同名辅助函数（fork/exec）误触 upgrade-cold「执行+网络双高」；注释样文本/报错文案/相对模块引用混入 fsPaths；模板拼接残片（如 `[`）混入 hosts。
+- baseline-mismatch 误判方向：同版本号重装/本机补丁触发红警「疑似供应链篡改」，实际可能是基线陈旧或合法修改。registry 对账+补丁登记双机制解决。
+
+## [0.1.21] - 2026-08-20
+
+### Added
+
+- **Forensics mode (P0-2, cross-hardening #6)**: once a plugin is confirmed malicious (N4 canary leak),
+  `arm` puts it under forensics and every subsequent fs/child_process/network op of that plugin is appended
+  to `~/.dsh/vet/forensics/<plugin>-<ts>.jsonl` (0600/0700). Wired into `recordCanary` and the N3 ledger
+  fs/net observers (new `src/guard/forensics.ts`). Fail-open, no session-content capture (same data plane as
+  the N3 ledger). Tests `test/v2-forensics.test.ts` (7 cases).
+
+
+- **`vet_label` tool (M2 capability nutrition label, P0-1)**: prints a human-readable "nutrition label" for a
+  plugin package — the files it touches (with sensitive-path marking), the hosts / subprocesses it references,
+  its third-party imports (capability unknown), and its network/exec capability flags (incl. the ESM named-import
+  blind-spot marker), plus a one-line summary of the last upgrade diff. Read-only, purely local, reads the same
+  N6 capability history (`~/.dsh/vet/capabilities.json`); no scan, no network. It reports *declared* static
+  capabilities; runtime observed/dormant capabilities stay with the running shield. New `label()` query in
+  `src/guard/version-diff.ts`; registered in `src/index.ts`.
+
+- **Ghost/zombie dependency audit (P0-2, cross-hardening #9, new rule R16)**: the scanner (files mode +
+  package.json) reconciles *declared* (dependencies/devDependencies/peerDependencies/optionalDependencies) vs
+  *referenced* (code imports) vs *installed* (node_modules): ghost deps (imported but undeclared) and zombie
+  deps (declared but missing) are emitted as info/heuristic `R16` findings and recorded into the N1 manifest
+  as `ghostDeps`/`zombieDeps`, which `vet_label` (M2) prints and N6's version diff displays. `@deepseek-ai/*`
+  is never flagged (host trust boundary). The declared/installed state feeds the scanner cache key (`deps`
+  fingerprint) so results never go stale; gate `rules:{R16:false}`. ENGINE static-v12 → static-v13 (caches
+  invalidate). Tests `test/v2-ghost-zombie.test.ts` (14 cases).
+
+- **M1 semantic-contract core (P0-5, record stage)**: new `src/guard/contract.ts` — a deterministic,
+  offline contract schema + laxity validator + scope matchers + three-level trust priority
+  (code facts > runtime observations > contract promises). A contract the user's own agent authors locally
+  (`vet.contract.json`, schema 1: fs paths, hosts/ports, commands, env) is validated: bare `**`/`*`/empty
+  paths, mid-globstar, wildcard hosts/commands and bad schema are rejected deterministically; bounded forms
+  (`/<dir>/**`, `/tmp/<seg>/out`, `*.example.com`) are accepted. Contracts never override code facts or
+  swallow out-of-scope observations, and the record stage never intercepts (N7 untouched). Tests
+  `test/contract.test.ts` (27 cases).
+
+- **M1 contract wired into runtime T2 sink / N1 diff (P0-5, 方案 A record-stage)**: with config
+  `contract.enabled` (default on) plus a per-plugin contract file, runtime alarms are reconciled against
+  the contract: out-of-scope → info `m1:contract-violation` (collapses by source/kind/plugin/field),
+  rejected contract → yellow `m1:contract-rejected` (once per plugin), and a *code fact* (N1 hidden
+  capability) contradicting the contract → yellow `m1:contract-distrusted` (once per plugin). The contract
+  is strictly advisory — it never suppresses code-fact or observation alarms and never intercepts (N7
+  untouched); no contract file = byte-for-byte zero behavior change. Tests
+  `test/v2-m1-wiring.test.ts` (10 cases).
+
+- **T2 hook integrity heartbeat (P0-2, cross-hardening #2)**: every T2 wrapper (fs / fs.promises / child_process
+  / http / https / net / http2 / tls via patchModule/patchNetworkModule, plus the manual dgram.createSocket and
+  globalThis.fetch wrappers) is branded with a module-closure-private `Symbol` (`brandVetHook`) — an extractable
+  marker that a copied `toString()` cannot spoof. `hookHeartbeat()` re-checks the current module exports for the
+  brand (registry keyed by module object); in `runtimeGuard: watch` a periodic timer (runtimeIntervalMs × 4,
+  min 5s, unref'd, cleared on dispose) raises a yellow `t2:hook-heartbeat` alarm listing the stripped ops if any
+  wrapper was removed/replaced (e.g. a plugin rewriting `require.cache` exports to bypass T2). Zero config, zero
+  network, alarm-only. Tests `test/v2-hook-heartbeat.test.ts` (6 cases).
+
+- **Self-scan trust annotation — vet 扫 vet（0.1.21，self-scan Trusted 卡）**: `scan_plugin` 扫 vet 本体
+  （realpath 判定，非包名）时输出 `selfScan` 数据块 + 评分卡 Trusted/Review-required 卡——本体自扫从原始
+  雷达式 116 Critical 呈现为 Trusted（已声明能力面 · 有界豁免），原始 findings 原样保留、可折叠展开。
+  - ① 能力声明降级：危险 token（模块/出站目标/env/敏感路径/子进程）逐个对比声明清单，任一个未声明
+    （出站非回环 host、未知 `process.env.*`、凭据/密钥路径、shell 管道、worker_threads·vm·cluster）→
+    该 finding 保留原 severity（新增能力照旧 red）；检测规则数据/诱饵/文案/开发夹具按文件级豁免，仅
+    pinned-match 生效。
+  - ② 每版本产物钉扎：`vet-self-pins.json`（版本 → 扫描集 sha256，按版本发布不写死单 hash；升级同版
+    不误报，字节不符任一发布钉扎 → 豁免失效按陌生人全扫）；扫描集 = 权威源码集（`src/report/self-scope.ts`
+    排除 gitignore 非本体目录 lib/dsh-src/plugin-scan-tmp 等，跨机可复现）。
+  - ③ 展示：`scan_plugin` 输出 `selfScan`（isTrustLayer/version/pin/verdict/staticScore/annotation），
+    dsh.so 面板改走 vet 出口即得 Trusted 卡。
+  - ④ 发布自扫门禁 `scripts/check-self-contract.mjs`（挂 `prepublishOnly`）：版本未钉扎 / 字节不符 /
+    已使用但未声明的 decisive 能力 → 拒绝发布。
+  Tests `test/self-scan.test.ts`（27）+ `test/self-pin.test.ts`（6）；端到端实测本体自扫 pinned-match+
+  clean、325 findings 全分类（declared 128 / datasetRef 11 / devFixtures 186 / retained 0）。
+
+### Changed
+
+- **Structure refactor of the runtime guard (P0-4, zero behavior change)**: `src/guard/runtime-hooks.ts`
+  (1011 lines) is now a public-API barrel over 8 focused submodules — runtime-ops (op tables & HookConfig/
+  HookAlarm types), runtime-count (stream byte counters), runtime-heartbeat (hook brand + heartbeat),
+  runtime-denoise (path sensitivity / lock-sibling / session-log / stack-tamper / vet-self-io passthrough),
+  runtime-classify (classifyOp), runtime-attrib (pluginFromStack / isOfficial), runtime-net (network
+  classification), runtime-patch (patchModule / patchNetworkModule). `src/guard/runtime-guard.ts`
+  (762 → 492 lines) keeps the `installRuntimeGuard` assembly; the T1 sentinel lifecycle moved to
+  `runtime-sidecar.ts` and the T2 alarm/ledger/canary/key-leak/forensics pipeline to `runtime-sink.ts`
+  (`createT2Sink(status)`). All public symbols re-exported unchanged from the same module paths — no import-site
+  changes; `rootIndexing`/`vetSelfIo` stay module-private, and the sidecar flags write via setters (ESM
+  read-only imports). Regression: 35 files / 634 tests green.
+
+- **Code-review batch (0.1.21, zero behavior change)**: `installRuntimeGuard` (380-line single function)
+  split into three module-level assemblers — `installSidecar` (T1 spawn/stdout/respawn), `installT2`
+  (T2 hooks + network egress patching, sharing rootIndex/sink/hookCfg in one scope) and
+  `installHookHeartbeat` — leaving a 48-line assembly body; `validateContract` de-nested into
+  `checkScope/checkFs/checkNetwork/checkSpawn/checkEnv/checkMeta` guard-clause sub-checks; five genuinely
+  dead exports removed (`resetCapabilityDiff`, `CapabilityDiffStore.hasStatic/staticOf`,
+  `ConfirmBlock.isFamily1Blocked`, `isGuardDisabled`). All findings from the full code review were
+  verified first — the reported unused-imports and Shield components were false positives and kept.
+  Regression: 37 files / 673 tests green.
+
+### Fixed
+
+- **Contract laxity check now rejects unreachable path patterns**: `isValidPathPattern` was written during
+  M1 development but never wired into `validateContract` (which only used `isLaxPathPattern`), so
+  home-glob (`~/data`), root (`/`) and relative (`./data`) path patterns passed validation while
+  `patternMatchPath` could never match them against absolute runtime paths — a contract that silently
+  explains nothing. The validator now uses `isValidPathPattern` (plus a new `./`-prefix rejection;
+  previously only exact `./` was rejected). Contracts containing such patterns are rejected at load
+  (N1 falls back to declared-vs-scanned) instead of loading as dead scope. Tests extended in
+  `test/contract.test.ts` (29 cases).
+
+- **Windows/macOS explicit platform gate for the T1 sentinel (P0-6)**: `spawnSidecar` now checks
+  `sidecarSupportedOn(process.platform)` (Linux only) and skips spawning the sidecar on other platforms.
+  Previously the sidecar would launch, fail its first `/proc/<host>/stat` read, exit 0, and the host would
+  treat that as an unexpected exit and respawn it up to 5× with 5s backoff (≈6 wasted node spawns + a
+  `t1:sentinel-down` alarm per watch-mode start). Now no sentinel is spawned, the `DSH_VET_SIDECAR_PID`
+  env registry is cleared, and a single `info` log explains T1 is unavailable on this platform. In-process
+  T2 hooks and the static layer are unaffected. `sidecarSupportedOn` is exported and unit-tested
+  (Linux → supported; win32/darwin/freebsd/sunos/openbsd/aix → skipped) — makes the non-Linux degradation
+  intentional instead of an accidental spawn-and-exit loop.
+
 ## [0.1.20] - 2026-08-20
 
 ### Added
@@ -425,343 +567,3 @@ guard layer, storage/governance. 51 new tests (533 total); coverage still above 
   Now uses `js-yaml.load()` to parse the existing file into a JS object, manipulates the object (add/remove
   vet entries), and regenerates with `js-yaml.dump()`. This guarantees valid YAML output regardless of the
   input file's structure. If the existing file is already corrupted (unparseable), it's auto-repaired with
-  a user-visible message. Comments are lost but stability is guaranteed — users never need to manually fix
-  broken config files.
-  
-  Added `js-yaml` as a runtime dependency for the object-based generation layer.
-  
-  Regression test +1 (250 total cases).
-
-## [0.1.4]
-
-### Fixed
-
-- **round-7.2 (minified-bundle verification, 2 semantic false positives fixed)**:
-  - R2: `new n.constructor(n.type, n)` (React event system cloning event objects) false-positived as high —
-    checkNew's constructor branch now routes through isConstructorCapture: the base must be an arrow/function
-    literal to count as true capture (object-clone/factory shapes no longer alarm; true capture
-    `new (async()=>{}).constructor('return process')` stays critical).
-  - R9: `outer: for(;;) { for(...) { break outer } }` false-positived as an exit-less loop — exitSignals now
-    understands labeled-break exit semantics: a label bound to a labeled statement wrapping the current loop
-    (an ancestor of the loop body) counts as an exit signal; a label bound inside the loop (`break inner`)
-    does not, so true infinite loops still alarm.
-  - ENGINE_VERSION static-v6 → static-v7 (rule change → old caches invalidate).
-  - Regression tests +6 (249 total cases).
-- **Windows test environment**: the sidecar singleton-lock integration test (D30) depends on /proc; on Windows
-  that path is absent, so the first tick exits gracefully (exit 0) and the assertion always fails — now skipped
-  per platform (`skipIf(win32)`); still runs as-is on Linux/CI.
-
-### Docs
-
-- All documentation translated to English for international users: README.md (Chinese original kept as
-  README.zh.md), AUDIT_PROTOCOL.md, CONTRIBUTING.md, SECURITY.md, CHANGELOG.md, docs/ARCHITECTURE.md.
-  `README.zh.md` added to the npm `files` allowlist.
-  - Restored Known Limitation 16 (platform support: Linux-first, graceful degradation) in the English README.md
-    - the en rewrite dropped it while README.zh.md kept it; the two docs now stay in sync.
-
-### Build / release
-
-- `exports["./client"]` gains a `types` condition: build-client also emits a hand-written `lib/client.d.ts`
-  (kept in sync with `inject`/`apply` in src/client/index.ts), so browser-half integrators get type hints.
-- The `files` allowlist now includes `docs/ARCHITECTURE.md`: the architecture link in the npm package README no
-  longer breaks (it was only reachable on GitHub before).
-- Added GitHub Actions CI (.github/workflows/ci.yml): on push/PR runs typecheck + coverage-threshold tests +
-  `npm pack --dry-run` artifact verification.
-
-## [0.1.3]
-
-- **round-7.1 (0.1.2 external verification, 5 feedback items)**:
-  - R3 read-only member classification (P-1/P-2): `cwd`/`env`/`platform`/`pid`/`argv`/`execPath`/`stdout`/
-    `nextTick`/`on` and other pure read-only / side-effect-free members downgrade to info capability surface in
-    plugin mode (reading cwd/env/pid isn't an escape channel) — the 134 cwd/env/platform false positives on
-    dsh-bridges-class no-bin MCP/tool plugins that depend on @deepseek-ai/* are gone; wechat-mp's cacheFile +
-    pid + .tmp atomic-write temp names no longer get hurt. Side-effect members (`kill`/`abort`/`chdir`/`umask`/
-    `setuid`/`dlopen`/`binding`, etc.) and unknown members stay high; `exit`/getBuiltinModule/mainModule/module/
-    reallyExit stay critical — no loss of escape detection.
-  - R4 prototype pollution no longer downgrades by targetKind (P-3): pollution semantics are unrelated to
-    plugin/generic package (a generic package can also be installed into the host as a plugin); files mode is
-    always high; core-js-class polyfill false-positive risk is limited (polyfills usually live in node_modules
-    dependencies, outside the scan surface).
-  - detectTargetKind self-exemption via realpath (P-3 security surface): vet's self-exemption used to compare
-    names only — local file: installs have no registry validation, so a malicious tarball naming itself
-    @jieai/dsh-plugin-vet could fool the generic downgrade (R3/R4 fully downgraded, deny passes). It now must
-    realpath-verify that the target is the current vet instance; a same-name impostor is judged by the
-    strictest plugin rules (identity impersonation = highest suspicion), together with R4 no longer
-    downgrading, closing that attack surface.
-  - P-4 re-verification: vet's self-scan 2 R9 medium self-hits (constructor-chain.js/dynamic-exec.js rule
-    regexes) no longer trigger on the 0.1.2 engine (covered by the round-7 group-then-`?` fix); tarball
-    verified with no R9 medium; static-v6 invalidates any old cache.
-  - P-5 recorded: judging official @deepseek-ai/* packages as generic with capability-surface downgrade is part
-    of official trust (same policy as the internal/plugin guard); a supply-chain attack on an official package
-    would let static downgrade mask process access — recorded in README Known Limitations 8.
-  - All with regression tests (+5, 243 total cases); ENGINE_VERSION static-v5 → static-v6.
-  - Known Limitations 15 (evaluation feedback): keeping process.kill high is intentional (side-effect member);
-    MCP/bridge-class plugins killing their own spawned children are ruled out manually by the agent during
-    review — distinguishing kill(child.pid) from arbitrary pids needs dataflow analysis; high cost, low
-    benefit; kept as-is.
-
-## [0.1.2]
-
-- **round-7 (second external evaluation round, all 4 feedback items generalized-fixed)**:
-  - R2 `new (Function)('...')` parenthesized-callee bypass: a parenthesized callee (incl. the parenthesized
-    base of `(async()=>{}).constructor`) was previously treated as a plain expression and fully bypassed
-    (adversarial sample verdict=clean) — checkCall/checkNew/isConstructorCapture now uniformly strip parens
-    (unwrapParens); `new (Function)('return process')` and friends hit critical.
-  - R4 host-global prototype pollution: override assignments of prototype members on host builtins
-    (Object/Array/String/Function/TextEncoder/URL/Buffer and 40+) were previously undetected — added the three
-    forms (assignment / Object.defineProperty / whole-object replacement), code → critical / files plugin →
-    high / generic (possible polyfill) → info.
-  - P2 OSV range false positive: directDepsOf stripped `^`/`~` before isExactVersion, so `^2.4.2` was queried
-    as an exact lower bound — false-known-vulnerability when the lower bound is affected but the upper bound is
-    already fixed (actually installed 2.8.x), inflating the verdict. Ranges now always skip the query (matching
-    the README claim); exact versions query as-is.
-  - R9 `(https?:)?`-class false positive: group-then-`?` (at most one extra branch) is linear backtracking, not
-    `(a+)+`-class exponential — only group-then-`*`/`+` is judged ReDoS (dsh-wechat-mp markdown.js verified
-    fixed).
-  - R3 app-type downgrade: packages whose package.json declares bin (CLI/TUI/server, where process is the
-    product function) downgrade process access wholesale to info capability surface; bin entry files (CLI
-    scripts that always run standalone) judge as generic code (R2/R3 downgraded, R9 dead loops → medium) —
-    dsh-tui's 4065 and dsh-bridges' 2100 score deductions were all false positives.
-  - R6 obfuscation combined evidence: charCodeAt/fromCharCode/atob appearing alone is normal terminal-protocol
-    parsing / byte handling (dsh-tui's 42 were all false positives) — only when the same file has a dynamic
-    execution signal (eval/new Function/vm, etc.) is the obfuscation hint emitted.
-  - R9 bounded traversal recursion: for-of/for-in collection traversal and self-calls inside conditional loops
-    (while(cond)/do/for(;cond;)) are no longer crudely judged "non-terminating recursion" (zeroLayoutRecursive
-    tree-traversal false-positive fix); while(true)/for(;;) still judged.
-  - Engine package-shape parsing: the engine reads package.json's bin field to produce cliFiles (bin entry
-    basename set) + appShape (app-type), injected into the RuleContext; package.json content is already inside
-    the cache hash, so shape changes invalidate naturally.
-  - All with regression tests (+13, 238 total cases); ENGINE_VERSION static-v4 → static-v5 (rule changes must
-    bump it).
-
-## [0.1.1]
-
-- **round-6 (second regression-test round) fixes**:
-  - R1 new-form bypass: `new (globalThis.constructor.constructor)('return process')()` and `const c = ...; new c(...)`
-    were fully bypassed — added a NewExpression branch; the callee supports property/bracket-access chains and
-    const-alias binding tracking; all forms hit critical.
-  - Cache-version poisoning: rule changes didn't bump ENGINE_VERSION (static-v3 unchanged) → the old disk cache
-    was hit by the new engine and returned old-rule results (247 stale results in practice); bumped to
-    static-v4, cache key and validReport validation invalidate together, added a regression test (old-version
-    caches must invalidate).
-  - R9 ReDoS disjoint-alternation judgment: `((?:[^']|'')*)` branches' first characters are disjoint (non-quote
-    vs. double-quote) → linear, not reported; `(a|aa)+` branches overlap → still reported.
-- **Install docs added (round-5 evaluation feedback)**: README install section adds a local tarball install
-  example (`dsh plugin add` with a local tgz + file: protocol fallback note + manual unpack mount-entry
-  example), and notes the first install into a large profile may take several minutes (pnpm full resolution /
-  lockfile update / supply-chain validation — not vet's own overhead).
-- **round-5 (external DSH evaluation) fixes**:
-  - R1 bracket-access-form bypass: `x["constructor"]("return " + "process")` was previously fully bypassed
-    (verdict=clean) — one of the most common malicious forms; now both dot-access and bracket-access forms plus
-    concatenation/template/const-bound static arg evaluation all hit critical.
-  - R3 signal-handling false positive: process.on/once('SIG*') registration and process.exit inside signal
-    callbacks (graceful shutdown) are normal for resident MCP servers, downgraded to info (not into verdict);
-    bare process.exit (error paths, etc.) stays critical.
-  - R5 ctx.logger false positive: officially injected cordis services (heavily used by dsh-mcp-client, etc.)
-    added to the allowlist, no longer reported as medium.
-  - R9 ReDoS false-positive rewrite: the old regex treated a leading `?` modifier on a group `(?:x)?` as a
-    quantifier, misreporting all single-optional groups as medium — switched to a functional judgment (top-level
-    quantifier inside the group + quantifier after the group both count); real `(a+)+` ReDoS still reported.
-  - All with regression tests (+7, 225 total cases).
-- **Build hygiene: stale lib/ residue cleanup**:
-  - Added a clean step before build (rm -rf lib, then compile) — previously, compiled artifacts of deleted
-    sources lingered in lib/ and shipped in the tgz (session-events.js, tools/audit-plugin.js, 6 abandoned
-    modules under audit/ as js + matching d.ts, old LLM-audit-tool compat shells); after the cleanup the
-    tarball dropped from 83 to 66 files, and vitest.config.ts removed two coverage excludes pointing at the
-    abandoned files.
-- **round-4 review fixes (open-source prep)**:
-  - R12 nodeMajorBelow22 single-digit-major bypass: the old implementation assumed a two-digit major
-    (two=s[0]+s[1]), so 4.0.0 / 8.17.0 / 2.0.0 / 6.0.0 / 9.0.0 / 3.x / 5.5.0 all missed the hint — now parses
-    the numeric-prefix major and compares to 22, and supports a `v` prefix (v18.0.0).
-  - R12 pickEntry adds two legal forms: the exports string form (legal in Node) was previously skipped → no
-    main + no root index.js produced a medium false positive; the exports conditional object now includes the
-    `node` condition (DSH runs on Node; the node condition is the most common) — the old list only had
-    import/require/default/types.
-  - P2-2 fix gap: nearestPackageRoot's existsSync probe wasn't wrapped in withVetSelfIo — scanning
-    non-node_modules files under ~/.dsh produced unowned fs-probe self-alarms; now wrapped straight through
-    (aligned with detectTargetKind/listSourceFiles/readPackageVersion).
-  - budgetMs removed the DSH_PLUGIN_VET_SCAN_BUDGET_MS env override: a large value bypasses host-timeout
-    alignment and makes R8-skip unreachable again (subprocess killed → deny fail-closed false block); tests
-    control the budget via a timeoutMs parameter.
-  - Lockfile switched to the official npmjs source: all package-lock.json resolved URLs regenerated from
-    registry.npmmirror.com to registry.npmjs.org (with full integrity), npm ci smoke-verified clean install of
-    137 packages.
-- **Pre-open-source self-check (dogfood, verified)**:
-  - Honeypot-lure R7 self-hit fix: lure prefixes (sk-/AKIA) switched to constant concatenation, so template
-    concatenation text is no longer judged high by its own R7 — the shipped artifact self-scans clean (was
-    suspicious); reinstalling vet in deny mode no longer locks itself; regression test added.
-  - esbuild declared as a direct devDependency (previously a fragile transitive of vitest).
-  - README numbers/wording synced: case count 189→214; Known Limitations #8 rewritten to the OSV status quo
-    (exact-version queries, silent network-failure downgrade, can be disabled).
-  - Removed 19 references to a PLAN.md that no longer exists in the repo; .gitignore gains *.tgz (npm pack
-    output).
-- **Three-round review fixes + audit-protocol extension (P-2 plan items landed)**:
-  - P2-1 scan budget vs host timeout mismatch: the engine budget used to be unbounded files×2s, so 15+/31+ file
-    packages in deny/report got killed by the host before R8-skip triggered → false scan-fail (deny fail-closed
-    would block legitimate large packages). The request now carries the host's planned timeout
-    (protocol.timeoutMs); engine budget = min(files×2s, timeout-1.5s) — R8-skip always precedes the kill, so
-    graceful degradation is structurally reachable; scan_plugin's tool timeout uses the same formula as
-    internal/plugin (scaled by file count, capped at 60s).
-  - P2-2 vet self-check IO not covered by vetSelfIo: archive.hasAuditRecord's readdir of ~/.dsh and
-    scan_plugin's listSourceFiles/detectTargetKind reading user paths produced unowned fs-probe self-alarms
-    under the .dsh sensitive segment — all pass through withVetSelfIo (same as the shield polling).
-  - P2-3 cross-module duplicate install + 5s respawn-window race silently killed monitoring: the exit handler
-    now logs a warn + yellow t1:sentinel-taken-over when decideRespawn=false and env points at a live pid —
-    handover is observable, not silent.
-  - P3-1/P3-3 OSV exact-version only: `*`, `>=`, `^` and version-less main packages skip the query
-    (isExactVersion character judgment), eliminating stale range/full-history false positives.
-  - P3-2 lastScan gains a TTL (24h, reuses alarmTtlMs): one suspicious scan no longer turns the shield
-    permanently yellow; sustained scanning renews naturally.
-  - P3-4 file target-identity: when the parent directory has a package.json, detectTargetKind runs (plugin-file
-    escape judgment is no longer always generic).
-  - P-1 record exact-version binding: the requireAudit gate matches records against the installed version
-    (internal/plugin resolves the root package version early) — after a plugin upgrade the old record no longer
-    authorizes the new version; re-audit required.
-  - New rule R12 (Cordis/DSH bundle contract): missing declared dsh.bundle.patch / missing entry file → high
-    (suspicious); no entry (no main/exports and no index.js) → medium; plugin-intent package missing name →
-    medium; engines.node major < 22 → info. Deterministic manifest checks; non-plugin-intent packages aren't
-    judged.
-  - scan_plugin output adds pluginVersion (for record/version checks); AUDIT_PROTOCOL adds step 4.5 "contract
-    & code-quality audit" (error handling/synchronous blocking/resource leaks/async correctness/lifecycle
-    hygiene and hot-reload idempotence) + a quality section in the record template + the conclusion matrix gains
-    the quality dimension (statically clean but host-dragging defects → review).
-  - P3-5 recorded (not a problem): readHostMetrics fully scans /proc children every 5s poll — overhead scales
-    linearly with the number of children; acceptable at current magnitudes, left for later on-demand
-    caching/de-bursting.
-  - False-positive fix (shield-tested): atomic-write protocol-lock (`<file>.lock`) delete/write exemption —
-    DSH writes `~/.dsh/.credentials.yaml` via dsh-atomic-write (wx-creates a sibling lock file holding only the
-    PID, finally deletes the lock after writing), so every credential save triggered an unowned fs-destroy red
-    false positive; the lock file isn't the credential itself, so single-path write/delete is no longer
-    sensitive (credential body and cp/rename dual-path semantics unchanged).
-- **Second-round review fixes (all 14 items verified and handled)**:
-  - P1-1 `guardDisabled` asymmetric reset: off→watch transition never started the sentinel — the watch branch
-    now resets it at the start (the fresh-spawn branch used to return directly after the check, with no log).
-  - P1-2 T1 reuse-mode alarm loss: reusing the old sentinel = the new instance had no stdout pipe, so all T1
-    alarms went into the abandoned VetStatus — now clears env + terminates the old sentinel + spawns fresh (new
-    pipe, new listeners).
-  - P1-3 `rootIndexing` flag leak: when attribution construction (loader.entries()/ctx.baseUrl) threw, the flag
-    stuck forever → all T2 alarms silently bypassed — the whole construction is now in try/finally, and the
-    wrapper try/catches attribution failures (alarms stay, unowned; fs calls never interrupted).
-  - P2-4 ring-buffer replace semantics: an out-of-window resend of the same id first removes the old copy then
-    enqueues — sustained alarms no longer fill all 20 slots (inflated alarmCount, crowding out other alarms).
-  - P2-5 M5 half-implementation: clean results no longer get a `\n\n` prefix (previously polluted
-    machine-readable output even with empty notes).
-  - P2-6 `~/.dsh` sensitive segment: config-root reconnaissance (readdir/stat/config reads) was fully
-    invisible — added to the sensitive segment; paired with full-class official-attribution noise reduction
-    (platform-body high-frequency IO doesn't spam) + vet self-IO pass-through (withVetSelfIo, shield polling
-    doesn't self-alarm).
-  - P2-7 deny synchronous freeze: OSV network query removed from the synchronous path + timeout capped at 30s
-    (previously scaled by file count to 60s + OSV 4s; timeout still fails closed against scan-avoidance).
-  - P2-8 vet entry-match rule unified: strip/extract/read used inconsistent trim vs. top-level alignment —
-    indented nested entries were misread / not stripped; now only top-level matches.
-  - P3-9 enable-branch indentation reuse: writing runtimeGuard no longer hardcodes 4 spaces; reuses the
-    original config indentation (non-4-space configs no longer produce corrupt YAML).
-  - P3-10 OSV dependency tree: check surface extended from the plugin itself to direct dependencies (cap 8,
-    official packages skipped, independent timeout, silent downgrade).
-  - P3-11 README sync: cordis_run carries no code payload, so the guard slot is dormant (kept as a placeholder
-    slot); the interception claim was removed; M5 behavior synced.
-  - P3-12 auth boundary recorded: dismiss/restore do same-origin validation (alarm-only display layer; recorded
-    in the README).
-  - P3-13 judgment: keep deny scan-failure fail-closed (M9 scan-avoidance), OSV moved off the deny synchronous
-    path (network jitter no longer affects it); trade-off recorded in README/CHANGELOG.
-  - P3-14 cleanup: osv.ts stale comments synced, data/code-index.sock working residue deleted, render.ts
-    trailing newline added.
-- **Lifecycle gap-fill (Cordis convention)**: T2 hooks and the T1 sentinel are global resources (fs/
-  child_process monkey patches + sentinel subprocess) that were only cleaned up on re-apply — fully removing the
-  entry leaked them until process exit. apply now registers a disposer via `ctx.effect` (runs on cordis fiber
-  unmount; verification found `ctx.on('dispose')` isn't in cordis's typed event surface and failed to compile,
-  so effect mounting is used); the disposer is idempotent (belt-and-braces with prevGuardDisposer).
-- Open-source release prep: MIT license, CONTRIBUTING/SECURITY/CODE_OF_CONDUCT, public architecture document,
-  npm metadata.
-- False-positive fixes (two, empirically verified):
-  - T2 fs-destroy: toolchain temp-artifact exemption — tsc incremental compilation builds `<src>.<pid>.<uuid>.tmpdir`
-    next to sources (`*.tmp`/`*.temp`/`*.swp`, etc.) and deletes them as it goes; the secrets in their names are
-    just source filenames being compiled; the trailing temp suffix doesn't participate in sensitive-word
-    judgment, parent segments still judged (`~/.ssh/config.bak` still alarms).
-  - T1 growth: the measurement span must cover the full window — an early-window transient spike (274MB in the
-    first 20s) is no longer labeled "10-minute sustained growth, suspected leak".
-- New feature: per-alarm dismiss/restore — each alarm in the panel can be "dismissed" (no longer counts toward
-  shield level or count; the record stays and can be "restored"; a dismissed alarm auto-expires once the alarm
-  stops, so a recurrence is visible again; shares the alarm store's lifecycle, resets on restart).
-- **R31 crash fix (watch-mode crash, actually recursive stack overflow)**: T2 alarm attribution (rootIndex
-  traversing 100+ plugin roots) ran its own fs probes through the wrapped fs → sensitive package names
-  (dsh-credentials / dsh-token-meter, etc., 4041 recursion levels in practice) alarmed again → attribution →
-  infinite recursion → per-level regex rebuild → V8 RegExpCompiler stack exhaustion, a false OOM process crash.
-  Fix: set a pass-through flag during attribution; the wrapper passes through the original fs to break the
-  recursion; segmentHasKeyword regexes cached per keyword. The guard flag is module-private (hanging it on
-  globalThis would hand a malicious plugin the key to blind all of vet).
-- **A9 self-harm fix (user-reported)**: both root causes of T2 mis-attributing vet itself as the alarm source:
-  - Attribution excludes vet: the wrapper frame (runtime-hooks.js) is always the top of the alarm stack, so when
-    vet's root was in the attribution map, every host/unowned alarm got pinned on @jieai/dsh-plugin-vet
-    (in practice: fs-probe realpathSync(...@deepseek-ai/dsh-credentials-local/package.json) attributed to
-    @jieai/dsh-plugin-vet). Now the attribution map excludes vet — alarms still fire but attribute to the real
-    caller (official package / unowned).
-  - node_modules package-directory exemption: package names/inner files are public artifacts; names containing
-    credential/secret words are normal ecosystem (12 installed in practice: @aws-sdk/credential-provider-*,
-    @deepseek-ai/dsh-credentials(-local), etc.) — host module resolution (require.resolve's internal
-    realpathSync/stat of inner package.json) and vet's own scan reads both touch them at high frequency, and
-    they all previously false-positived as fs-probe. Path segments after node_modules no longer do sensitive
-    matching; segments before node_modules still judged (~/.ssh/node_modules/x still hits); under mutate,
-    system-root prefixes (/usr, etc.) still apply.
-  - rootIndex attribution map built once and cached: previously rebuilt per classified fs call (N×require.resolve),
-    amplifying to CPU spin during alarm storms.
-- Installability verified and corrected against the DSH official bundle contract:
-  - peerDependencies aligned to the DSH 0.1.0-rc.6 version family (the old `^0.0.1-rc.1` didn't match the
-    actually installed versions — pure luck that it worked).
-  - Added `prepublishOnly`: forces a build before publish, so lib/ (incl. the client bundle) can't be missing
-    or stale.
-  - Cleaned internal comments in cordis.patch.yml pointing at the deleted PLAN.md.
-  - End-to-end simulated a fresh-user install through the full chain: `dsh plugin --profile <name> add <tarball>`
-    → reconcilePlugins recognizes `dsh.bundle` → loadProfile resolves the bundle layer → composeEntries mounts
-    the vet entry → client-registry conditions (`dsh.client`/exports["./client"]/inject edges) all satisfied.
-
-## [0.1.0] - 2026-08-16
-
-First releasable version.
-
-### Added
-
-- Static scan engine (scanner-bin): R1-R11 rule set, deterministic verdict, scoring model, content-hash cache,
-  OSV known-vulnerability check (version-filtered).
-- Target-identity grading (targetKind): DSH plugin packages judged strictly; ordinary npm packages downgraded to
-  capability surface — 195 official packages, zero false positives.
-- `scan_plugin` tool: dynamic-code / package / file scan targets; the verdict comes only from the static layer.
-- `vet-audit-protocol` skill: agent-guided plugin review protocol (AUDIT_PROTOCOL.md), health-record on-disk
-  convention.
-- `requireAudit` audit gate: loading a third-party plugin without a record → report alarms / deny blocks
-  (record-prefix anti-forgery).
-- `tools/execute` guard: pre-execution code scan of cordis_define / cordis_run / run_code / workflow.
-- Runtime guard (`runtimeGuard: watch`, alarm-only):
-  - T1 sentinel: sidecar /proc monitor (memory/children/fd/growth window), singleton lock against hot-reload
-    stacking, auto-restart on unexpected exit.
-  - T2 hooks: wrap fs / fs.promises / child_process; sensitive-path operations/reconnaissance/destructive
-    commands/honeypot touches alarm; stack attribution to the plugin package name.
-  - Honeypot lures: fake keys in an unobtrusive location, anti-honeypot design (no keywords), 0700/0600
-    permissions, idempotent self-heal.
-- GUI shield: session-header status light (green/yellow/red + count badge), alarm panel, live metrics,
-  one-click guard toggle (takes effect on restart), Morandi dual theme.
-- Alarm aggregation: ring buffer + per-id dedup + TTL expiry (24h) — one false positive never turns the shield
-  permanently yellow/red.
-
-### Fixed
-
-- Sentinel respawn dead code (env was deleted before the comparison, always false) — monitoring now recovers
-  after a crash.
-- Report-mode scan synchronously blocked the event loop — switched to an async subprocess; large packages no
-  longer freeze the host.
-- T2 alarm id lacked pluginHint, letting alarms across plugins swallow each other.
-- fs.open treated the first-arg path as flags (open('auth.txt','r') false-positived as a write).
-- exec destructive commands (rm -rf ~/.ssh, etc.) and sensitive-path redirection missed.
-- Scan cache key lacked targetKind/runtime, cross-context contamination.
-- OSV query without a version false-positived already-fixed versions.
-- R7 hardcoded-secret whole-segment placeholder false kill (real key mixed with example missed).
-- R11 fsBase used startsWith('fs'), hurting custom objects like fsmap.
-- R2 eval/Function lacked a shadowing check; factory-injected require in nested functions false-positived.
-- Honeypot file permission 0644 readable on the same machine (tightened to 0600/0700).
-
-### Security
-
-- Scanner is a separate subprocess; AST read-only, never eval'd; malicious input can't affect the host.
-- Scan failure in deny mode fails closed (block + alarm, no silent pass).
-- Cache strict-shape validation against local forgery.
-- Strict record-naming regex against prefix forgery.
