@@ -112,6 +112,26 @@ export function isDshWebTempArtifact(p: string): boolean {
   const last = norm.slice(norm.lastIndexOf('/') + 1)
   return last !== '' && TRANSIENT_TEMP_SUFFIX.test(last)
 }
+
+/** DSH 状态目录正则（~/.dsh 下任意深度）。 */
+const DSH_STATE_DIR_RE = /\/\.dsh\//
+/** 宿主原子写暂存目录段：`.<basename>.<pid>.<uuid>.tmpdir`（randomUUID 小写 hex，宽松认大小写）。 */
+const ATOMIC_STAGING_SEGMENT_RE = /^\..+\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmpdir$/i
+/**
+ * DSH 宿主原子写暂存路径（六轮用户反馈降噪）：fs-local 的 writeFileAtomic 在目标旁建
+ * `.<basename>.<pid>.<uuid>.tmpdir` 暂存目录（0700），写入 `<basename>.tmp` 后 rename 提交、
+ * rm -rf 必删（dsh-src packages/fs/fs-local/src/fsio.ts writeFileAtomic 协议，暂存目录是
+ * 随用随清的残留）。用户手改配置触发宿主重存、或宿主直接保存设置，都会在 ~/.dsh 根产生
+ * `.settings.yaml.<pid>.<uuid>.tmpdir` 的 lstat+rmdir 清理对——此前豁免只覆盖 web/ 子树，
+ * 这里补齐 ~/.dsh 任意深度。判定到段级：暂存目录本身与其内 .tmp 文件都命中。
+ * 刻意不匹配凭据面协议形态（@deepseek-ai/dsh-atomic-write 的 `<file>.<hex12>.tmp`，无
+ * pid/uuid 段）：凭据临时件照旧报警；是否豁免由调用方结合归因决定（插件碰它=信号，照报）。
+ */
+export function isDshAtomicStagingPath(p: string): boolean {
+  const norm = p.replace(/\\/g, '/')
+  if (!DSH_STATE_DIR_RE.test(norm)) return false
+  return norm.split('/').some(seg => ATOMIC_STAGING_SEGMENT_RE.test(seg))
+}
 /**
  * 归一化路径并判断是否敏感。
  * mode='mutate'（写/删）额外计入系统根前缀（/etc /usr /var …：写删系统文件=篡改/破坏）；

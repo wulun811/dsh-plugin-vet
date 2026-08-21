@@ -6,7 +6,7 @@ import { DESTROY_OPS, WRITE_OPS, READ_OPS, PROBE_OPS, PROC_OPS, FS_LEDGER_OPS } 
 import type { HookModule, HookConfig, HookAlarm } from './runtime-ops.js'
 import type { LedgerFsEvent, LedgerNetEvent } from './exfil-ledger.js'
 import { confirmBlock, BLOCK_FS_OPS, type BlockDecision } from './confirm-block.js'
-import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact } from './runtime-denoise.js'
+import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact, isDshAtomicStagingPath } from './runtime-denoise.js'
 import { classifyOp } from './runtime-classify.js'
 import { classifyNetworkOp, extractNetworkTarget, isTrackedNetHost, NET_OPS } from './runtime-net.js'
 import { fsOpBytes, attachWriteCounter, attachCanaryScanner, attachReadCounter } from './runtime-count.js'
@@ -69,12 +69,15 @@ export function patchModule(
       }
       // 五轮用户反馈降噪：DSH web 状态临时产物（UI 原子写 `.x.json.<pid>.<uuid>.tmpdir` 的
       // lstat/rmdir 清理）——宿主自身高频家务操作，栈里只有宿主帧 → 无归因 → 每次保存刷
-      // red fs-destroy / yellow fs-probe。仅在「无归因 + 归因链未被篡改」时按宿主自身豁免；
-      // 插件归因的同类操作照报（碰宿主状态=信号），蜜罐/完整性金丝雀类不受此豁免。
+      // red fs-destroy / yellow fs-probe。六轮扩展：fs-local writeFileAtomic 暂存目录
+      // (`.<name>.<pid>.<uuid>.tmpdir`，~/.dsh 任意深度，settings.yaml 保存实测路径)同判。
+      // 仅在「无归因 + 归因链未被篡改」时按宿主自身豁免；插件归因的同类操作照报
+      // （碰宿主状态=信号），蜜罐/完整性金丝雀类不受此豁免。
+      const opTarget = firstString(args) ?? '';
       if (
         alarm !== null && hint === undefined && !stackTampered &&
         alarm.kind !== 'honeypot' && alarm.kind !== 'integrity' &&
-        isDshWebTempArtifact(firstString(args) ?? '')
+        (isDshWebTempArtifact(opTarget) || isDshAtomicStagingPath(opTarget))
       ) {
         alarm = null
       }
