@@ -47,7 +47,16 @@ function expandFilesField(filesField) {
 
 // ── 相对引用提取（import/export from + 裸 import + require）──
 const REL_REF_RE =
-  /(?:import|export)\s+(?:[^'"]*?\s+from\s*)?['"](\\.{1,2}\/[^'"]+)['"]|require\(\s*['"](\\.{1,2}\/[^'"]+)['"]\s*\)/g
+  /(?:import|export)\s+(?:[^'"]*?\s+from\s*)?['"](\.{1,2}\/[^'"]+)['"]|require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g
+// 门禁自检（五轮审查）：本正则曾误写 `\\.{1,2}`——正则字面量里 \\ 匹配字面反斜杠而非转义点号，
+// 相对导入永远零匹配，闭合检查静默空转（0 命中也照印「✓ 全部闭合」）。用已知样本自证，失效即失败。
+{
+  const probe = "import { a } from './a.js'; export * from '../b/c.js'; const r = require('./d.json')"
+  if ([...probe.matchAll(REL_REF_RE)].length !== 3) {
+    console.error('  ✗ 相对引用提取正则自检失败（REL_REF_RE 零/错位匹配，闭合检查将空转）')
+    process.exit(1)
+  }
+}
 
 function relativeRefs(file) {
   const src = readFileSync(join(ROOT, file), 'utf8')

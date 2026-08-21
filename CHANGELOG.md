@@ -3,6 +3,29 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.2.3] - 2026-08-21
+
+三轮全量代码审查产出（每项修复均带回归测试）：
+
+### Fixed（用户反馈：宿主家务操作误报降噪）
+- **DSH web 状态临时产物无归因高频误报**：宿主 web 层保存 UI 状态（.shortcut-bar.json 等）走原子写协议，每次保存高频产生 `.名.json.<pid>.<uuid>.tmpdir` 的 lstat+rmdir 清理；栈里只有宿主帧 → 无归因 → 每次都刷 red fs-destroy / yellow fs-probe（用户反馈「真的好烦」）。现 fs 包装器对**无归因且归因链未被篡改**的该类目标豁免报警——刻意不做「无归因一律不报」（那正是异步隐藏归因的恶意插件想要的静默通道），豁免边界：插件归因碰这些路径照报（碰宿主状态=信号）、真敏感路径照报、非临时产物照报、蜜罐/完整性金丝雀不受豁免；凭据面（.credentials.yaml 原子写临时件）与 sessions/** 刻意不在豁免目录内。
+
+### Fixed（五轮复审补遗）
+- **check-pack-integrity 相对引用闭合检查静默空转（发布门禁失效）**：REL_REF_RE 正则字面量误写 `\\.{1,2}`——正则字面量里 `\\` 匹配字面反斜杠而非转义点号，真实构建产物上相对导入零命中，检查 #3 完全空转却照印「✓ 全部闭合」，且脚本此前无任何测试覆盖——0.2.2 的 files 白名单事故今天重演它也拦不住。现改正则为 `\.{1,2}`；脚本内加已知样本自检（正则失效即 exit(1)，防同类退化再静默）；脚本本体纳入 vitest 门禁（任一完整性项不过 → 测试红）。
+
+### Fixed（四轮复审补遗）
+- **vet_label 渲染层对残缺能力清单仍有崩溃面**：loadCapabilities 对单条记录零结构校验，且 label() 单记录路径不触碰 .capabilities——一条缺字段的记录（手改/半写/旧版升级遗留）可让 manifest 经 execute 键省略 + JSON 往返变成 undefined，`=== null` 守卫穿透后在 m.hasNetwork 崩溃（与 DSH.SO 反馈 bug 同族）；manifest 缺数组字段时 m.hosts.length 同崩。现 null/undefined 双拦截 + 各段 Array.isArray 兜底按空渲染；latest/note 同款穿透一并收紧。
+- **registry 成员预检漏反斜杠成员**：'..\\..' 形态成员在 GNU tar 里是字面字符无险，但 Windows bsdtar 提取时会当路径分隔符转换越界。现预检一并拒绝含反斜杠的成员——npm 官方 pack 归一化路径分隔符，正常 tarball 不含反斜杠成员，误杀风险为零。
+
+### Fixed
+- **scanner 并发上限失效（排队路径不记账）**：withScanSlot 排队分支只跑任务、不增减 activeScans，pump 的 while 条件看不到占位，一口气放空整个队列——8 任务仿真实测真实并发峰值 7（上限 2）。首次启动批量加载正是该上限要防的 spawn 风暴场景。现排队路径自行记账并在完成后 pump。
+- **upstream-radar 从被扫描包目录链解析执行（隔离破口）**：queryUpstreamRadar 用 require.resolve(..., { paths: [packageRoot] }) 探测，会优先命中被扫包自带/伪造的 node_modules/upstream-radar 并被 execFile 直接执行——恶意包塞同名假包即可在 scanner 子进程里运行任意代码，破坏「静态分析、不执行被扫代码」承诺。现仅在 vet 自身模块树解析（不带 paths），并对解析结果落在被扫包目录内的情形纵深拒绝。
+- **registry 对账解包无成员名防护 + dist.tarball 主机未钉死**：hashPackTarball 直接 tar -xzf 不可信 tarball（GNU tar 默认不拦 '..' 成员，可写出 tmpdir 之外）；doVerify 对 packument 返回的任意 tarball URL 直接 fetch（SSRF 面）。现解包前 -tzf 列成员预检（拒绝对路径/'..'/盘符）；tarball 主机钉死到 registry 源；baseline-reconcile 测试夹具的 tarball URL 同步对齐真实 npm 行为。
+- **vet_label / vet_diff 单版本记录渲染崩溃（DSH.SO 反馈 bug）**：execute 对 null 字段整键省略，JSON 往返后 render 收到 undefined 而非 null，原 `!== null` 守卫穿透后读 .from 抛 “Cannot read properties of undefined (reading 'from')”。两工具渲染守卫改 null/undefined 双拦截；vet_diff 为排查中发现的同款隐患一并修复。
+
+### Changed
+- **移除僵尸运行时依赖 typescript**：dependencies 声明但 src/scanner-bin/scripts 零引用（构建期 tsc 由 devDependencies 覆盖）——安全工具不该让用户为无用依赖扩安装面。已同步 lockfile。
+
 ## [0.2.2] - 2026-08-21
 
 ### Fixed

@@ -1,6 +1,6 @@
 {
   "name": "@jieai/dsh-plugin-vet",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Plugin trust pipeline for deepseek-harness (DSH): deterministic static scan, runtime guard (T1 sentinel + T2 hooks), audit protocol skill, GUI shield. Alarms by default; N7 confirm-block intercepts confirmed destructive fs ops (family 1/2) by throwing.",
   "license": "MIT",
   "author": {
@@ -111,8 +111,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
-    "js-yaml": "^5.3.0",
-    "typescript": "^5.5.0"
+    "js-yaml": "^5.3.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
