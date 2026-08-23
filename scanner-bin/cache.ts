@@ -74,10 +74,13 @@ function validReport(report: unknown): report is ScanReport {
 export function cacheKey(
   files: CachedFile[],
   rules: Record<string, boolean> | undefined,
-  context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm'; deps?: string } = {},
+  context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm'; deps?: string; surface?: { configFiles?: boolean; instructionFiles?: boolean } } = {},
 ): string {
   const body = files.map(f => `${f.path}\u0000${f.content}`).join('\u0001')
-  const ctx = `tk:${context.targetKind ?? ''}|rt:${context.runtime ?? ''}|sb:${context.scanBasis ?? ''}|deps:${context.deps ?? ''}`
+  // surface 改变输出形状（R17/R18 是否参与）→ 必须入 key，否则开关切换会命中旧形状缓存
+  const sf = context.surface
+  const surface = sf !== undefined ? `cf:${sf.configFiles !== false ? 1 : 0}|if:${sf.instructionFiles !== false ? 1 : 0}` : 'cf:1|if:1'
+  const ctx = `tk:${context.targetKind ?? ''}|rt:${context.runtime ?? ''}|sb:${context.scanBasis ?? ''}|deps:${context.deps ?? ''}|${surface}`
   return createHash('sha256').update(`${ENGINE_VERSION}|${ctx}|${JSON.stringify(rules ?? {})}|${body}`).digest('hex')
 }
 

@@ -26,7 +26,7 @@ function isBufferFromCall(n: ts.Expression): n is ts.CallExpression {
     || (ts.isPropertyAccessExpression(base) && ts.isIdentifier(base.expression) && base.expression.text === "Buffer")
 }
 
-function decodeB64(s: string): string | undefined {
+export function decodeB64(s: string): string | undefined {
   try {
     const buf = Buffer.from(s, "base64")
     if (buf.length === 0 || buf.length > MAX_DECODED_BYTES) return undefined
@@ -38,7 +38,7 @@ function decodeB64(s: string): string | undefined {
   }
 }
 
-function decodeHex(s: string): string | undefined {
+export function decodeHex(s: string): string | undefined {
   if (s.length % 2 !== 0 || s.length === 0) return undefined
   if (!/^[0-9a-fA-F]+$/.test(s)) return undefined
   const buf = Buffer.from(s, "hex")

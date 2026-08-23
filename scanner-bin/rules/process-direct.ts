@@ -81,7 +81,7 @@ function inSignalHandler(exitNode: ts.Node): boolean {
  * 注：scripts/ 不是测试/CI 目录——包里的 scripts/ 常是产品代码（CLI 工具、构建脚本），其内
  * 的 process.exit 是真实逃逸意图，不能降级（曾把 scripts/ 与测试目录等同 → 潜在漏报）。
  */
-function isTestOrCiFile(fileName: string): boolean {
+export function isTestOrCiFile(fileName: string): boolean {
   const segs = fileName.replace(/\\/g, '/').split('/').filter(Boolean)
   if (segs.some(s => s === 'test' || s === 'tests' || s === 'spec' || s === 'specs' || s === '__tests__' || s === '.github')) return true
   const base = segs[segs.length - 1] ?? fileName

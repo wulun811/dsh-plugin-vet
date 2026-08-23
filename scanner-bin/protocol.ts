@@ -21,6 +21,11 @@ export interface ScanRequest {
   /** 扫描基础（接入 dsh.so 静态注册站）：'npm' = registry tarball 真实发布物（入口/patch 声明对照发布物有效）；
    * 'git' = 仅源码仓（通常不提交 lib/ 等构建产物），此时 R12 入口/patch 缺失降 info 不误报。缺省按 npm 语义。 */
   scanBasis?: 'git' | 'npm'
+  /** 扫描面扩展（undefined = 全开；dsh.so 等消费方可按需关闭）：
+   * configFiles: 包根 cordis.yml、cordis.patch.yml、*.patch.yml 纳入扫描面 → R17 !!js 配置检测；
+   * instructionFiles: AGENTS.md/CLAUDE.md 与 skills 目录、*.skill 目录下的 SKILL.md 纳入扫描面 → R18 指令/技能注入检测。
+   * 两档默认开启但产出以 info 观测为主（见 R17/R18 severity 设计），要绝对静默可用 rules 开关逐规则关。 */
+  surface?: { configFiles?: boolean; instructionFiles?: boolean }
   /** OSV 已知漏洞核对（npm 生态）：仅 files 模式且存在 package.json 时生效；严格 opt-in（=== true）。 */
   osv?: boolean
   /** 宿主侧计划超时（P2-1 对齐）：engine 以此收敛扫描预算（budget=min(files×2s, timeout-余量)），
@@ -85,7 +90,7 @@ export interface CapabilityManifest {
 }
 
 export interface ScanReport {
-  engine: 'static-v13'
+  engine: 'static-v16'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -102,12 +107,20 @@ export interface ScanResponse {
 
 /** 规则/引擎实现变更必须递增此版本——cache key 与缓存有效性校验都依赖它（round-6：R1 new 形态、R9 ReDoS 判定变更后未递增导致旧缓存中毒；round-7：R2 括号形态/R4 原型污染/R6 组合证据/R9 判定/R3 形态降级；round-7.1：R3 只读成员分类/R4 generic 不再降 info；round-7.2：R2 new X.constructor 复用 isConstructorCapture base 校验/R9 带标签 break 出口语义；round-8：新增 R13 网络外泄端点/R14 非 JS 脚本下载即执行；round-8.1：R14 大小写不敏感（PowerShell/cmd 命令不分大小写）、curl -o 落盘降 medium、flags 传播修复；round-9（0.1.15）：新增 R15 动态网络目标（N5，信息级观测）；round-10（0.1.16 加固批次）：R2 间接/前缀 eval·Function（globalThis.eval/(0,eval)）与 require 拼接折叠、R3 global.*process* 前缀形态（此前漏检为 info）、R4 Reflect.defineProperty、R9 sync 子进程变体与转义括号深度计数、R10 prepare 钩子、R14 python/ruby/perl 下载即执行模式、R15 undici sink。
  * round-11（0.1.21，P0-2 #9）：新增 R16 幽灵/僵尸依赖健康审计（声明 vs 代码引用 vs 实际安装的确定性观测；
- * info 级不扣分不改 verdict；capabilities 增 ghostDeps/zombieDeps）。 */
-export const ENGINE_VERSION = 'static-v13' as const
+ * info 级不扣分不改 verdict；capabilities 增 ghostDeps/zombieDeps）。
+ * round-12（R17/R18 扫描面扩展）：新增 R17 !!js 配置注入检测（cordis.yml/cordis.patch.yml 等根级配置文件
+ * 中的 !!js 表达式文本，仅提取不执行，单动词 info、动词+外联/凭据组合 high）与 R18 指令/技能注入观测
+ * （AGENTS.md/CLAUDE.md 与 skills、*.skill 目录下 SKILL.md 的组合式文本特征，首版全 info）。
+ * 均受 request.surface 门控；surface 并入缓存 key。
+ * round-13（R19）：新增 R19 typosquat 观测（包名/依赖 vs 官方核心名编辑距离 ≤1 或同形，info 永不进 verdict）。
+ * round-14（异常流对抗回归）：R18 匹配前剥离不可见字符（ZWSP 等打断规避）、R19 比较前 NFKC 归一
+ * （全角同形规避）——规则行为变化，引擎版本递增使旧缓存失效。 */
+export const ENGINE_VERSION = 'static-v16' as const
 
-/** The rules of static-v13. R8 is a meta finding emitted by the engine (scan timeout skip); R16 is a
- * project-scope dep-consistency audit (emitted by the engine, not a per-file AST rule). */
-export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16'] as const
+/** The rules of static-v16. R8 is a meta finding emitted by the engine (scan timeout skip); R16 is a
+ * project-scope dep-consistency audit (emitted by the engine, not a per-file AST rule);
+ * R17/R18/R19 are surface-gated text/config rules (emitted by the engine, not per-file AST rules). */
+export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19'] as const
 
 /** Shared context handed to every rule. */
 export interface RuleContext {

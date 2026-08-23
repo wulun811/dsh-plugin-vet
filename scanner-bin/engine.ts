@@ -12,6 +12,9 @@ import { collectDecodedLiterals } from './decode.js'
 import { executeRules } from './rules/index.js'
 import { runPackageJson } from './rules/supply-chain.js'
 import { runContract } from './rules/contract.js'
+import { runTyposquat } from './rules/typosquat.js'
+import { runConfigScan, isRootConfigName, CONFIG_EXT } from './rules/config-scan.js'
+import { runInstructionScan, isInstructionFile } from './rules/instruction-scan.js'
 import { NON_JS_SCRIPT_EXT, runNonJsScript } from './rules/non-js-scripts.js'
 import { computeScore, computeVerdict } from './score.js'
 import { cacheKey, readCached, writeCached, cacheDirFor } from './cache.js'
@@ -204,6 +207,15 @@ function skipFinding(file: string): Finding {
   }
 }
 
+/** 大文件预检（round-12 供 R17/R18 分支复用）：整读前先 stat，超限即 R8-skip（不整读、不 OOM）。 */
+function sizeWithinBudget(file: string): boolean {
+  try {
+    return statSync(file).size <= PRE_FILE_SIZE_LIMIT
+  } catch {
+    return true // stat 失败（消失/不可读）→ 交给 readOrDefault 的空串兜底
+  }
+}
+
 /** Assemble the final report (score + verdict) for a request. */
 function buildReport(
   request: ScanRequest,
@@ -266,6 +278,8 @@ function scanFiles(request: ScanRequest): ScanResponse {
       scanBasis: request.scanBasis,
       // P0-2 #9（R16）：声明/node_modules 变化 → key 变化 → 缓存失效重扫；规则关掉则不参与 key
       deps: request.rules?.['R16'] === false ? undefined : depsInfo?.fingerprint,
+      // round-12（R17/R18）：surface 改变输出形状 → 入 key，开关切换不命中旧形状缓存
+      surface: request.surface,
     },
   )
   // C3（0.1.16 加固）：目录与 nonce 均来自宿主注入（cacheDirFor 缺省回退 env/tmpdir）
@@ -294,6 +308,10 @@ function scanFiles(request: ScanRequest): ScanResponse {
       if (request.rules?.['R12'] !== false) {
         findings.push(...runContract(json, file, request.targetKind, request.scanBasis))
       }
+      // R19: typosquat 观测（round-13）——包名/依赖 vs 官方核心名编辑距离 ≤1/同形
+      if (request.rules?.['R19'] !== false) {
+        findings.push(...runTyposquat(json, 'package.json'))
+      }
       continue
     }
     const ext = extOf(file)
@@ -304,6 +322,36 @@ function scanFiles(request: ScanRequest): ScanResponse {
         const script = readOrDefault(file)
         if (script !== '') {
           findings.push(...runNonJsScript(script, basename(file), request.targetKind))
+        }
+      }
+      continue
+    }
+    // R17: 根级配置面（round-12）——cordis.yml/cordis.patch.yml 等的 !!js 表达式文本检测。
+    // 只提取不执行（红线 N1）；surface.configFiles 关闭或 rules.R17=false 时不参与。
+    if (ext !== undefined && CONFIG_EXT.has(ext) && isRootConfigName(basename(file)) && request.surface?.configFiles !== false) {
+      if (request.rules?.['R17'] !== false) {
+        // N2 纪律：大文件不整读（与 AST 路径同款预检；超限 R8-skip）
+        if (!sizeWithinBudget(file)) {
+          findings.push(skipFinding(file))
+        } else {
+          const configText = readOrDefault(file)
+          if (configText !== '') {
+            findings.push(...runConfigScan(configText, basename(file), file, request.targetKind))
+          }
+        }
+      }
+      continue
+    }
+    // R18: 指令/技能文件面（round-12）——AGENTS.md/skills/**/SKILL.md 的组合式注入观测。
+    if (ext === 'md' && isInstructionFile(file) && request.surface?.instructionFiles !== false) {
+      if (request.rules?.['R18'] !== false) {
+        if (!sizeWithinBudget(file)) {
+          findings.push(skipFinding(file))
+        } else {
+          const mdText = readOrDefault(file)
+          if (mdText !== '') {
+            findings.push(...runInstructionScan(mdText, basename(file), file))
+          }
         }
       }
       continue
