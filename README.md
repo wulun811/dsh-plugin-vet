@@ -1,4 +1,4 @@
-# @jieai/dsh-plugin-vet — Trust pipeline for DSH plugins
+# @jieai/dsh-plugin-vet — The security gate for DSH plugins
 
 English | [中文](README.zh.md)
 
@@ -6,9 +6,10 @@ English | [中文](README.zh.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933)](package.json)
 
-> Before installing any plugin, run it through dsh-plugin-vet: static rules produce a verdict (deterministic,
-> unforgeable), the agent investigates sensitive points and quality issues following the `vet-audit-protocol`
-> skill (no one can substitute for that), and a final scorecard is handed to a human/model to decide.
+> **Audit before install, guard at runtime.** Run every DSH plugin through dsh-plugin-vet before mounting it:
+> static rules produce a verdict (deterministic, unforgeable), the agent investigates sensitive points and
+> quality issues following the `vet-audit-protocol` skill (no one can substitute for that), and a final
+> scorecard is handed to a human/model to decide.
 >
 > **Positioning: a monitoring alarm, not an enforcer.** vet only does "check → alarm → advise": checks at
 > write time (static scan), watches at run time (runtime guard), and surfaces alarms (scorecard + GUI shield

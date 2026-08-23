@@ -1,4 +1,4 @@
-# @jieai/dsh-plugin-vet — DSH 插件信任流水线
+# @jieai/dsh-plugin-vet — DSH 插件安全闸门（装前审核 · 运行守护 · 供应链检查）
 
 [English](README.md) | 中文
 
@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933)](package.json)
 
-> 安装任何插件前，先让 dsh-plugin-vet 走一遍：静态规则给出 verdict（确定性、不可伪造），
+> **装前审核，运行守护。** 安装任何插件前，先让 dsh-plugin-vet 走一遍：静态规则给出 verdict（确定性、不可伪造），
 > agent 按 vet-audit-protocol 技能排查敏感点与质量问题（谁也无法替代），最终一张评分卡交给人/模型决定。
 >
 > **定位：监控报警器，不是打手。** vet 只做「检查 → 报警 → 给建议」：写时查（静态扫描）、
