@@ -3,6 +3,87 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.2.6] - 2026-08-23
+
+### Added
+- **DSH 0.1.1-rc.2 (npm-public) adaptation (round-15)**:
+  - Telemetry config monitoring (G-3) now understands the new row-list patch format
+    (`- id: session-telemetry-otel` + `config:` block; OTLP exporter passthrough `url`/`mode` keys)
+    while keeping the legacy `telemetry:` block format; reads the new home-layer patch
+    (`$DSH_HOME/cordis.patch.yml`, hot-reloaded by boot, outranks the profile layer) in addition
+    to profile-level files. Privacy discipline unchanged (sha16 url hash only).
+  - R19 typosquat core-list extended with npm-public official names (`dsh-agent`, `dsh-subagent`,
+    `dsh-sandbox`, `dsh-workflow`, `dsh-web-frontend`, `dsh-api-gateway`, `dsh-app-boot`,
+    `dsh-host-webserver`, `dsh-client-connection`); still info-only, never in verdict, rule-data
+    change (no engine bump, cache invalidates by content hash).
+  - Verified no change needed: plugin contract (cordis@4 bundles), control-plane path shapes
+    (`/api/` prefix + `session.*` vocabulary unchanged), official-package baseline (first-seen
+    auto-trust per version; new family versions pass), `dsh plugin --profile add` CLI.
+  - Docs: README gains the npm-public bundle-mount note; new tests for both patch formats and the
+    home-layer override (privacy assertions intact).
+  - Follow-up review hardenings (round-15 复查, launcher-source-verified): `homePatchPath()` now
+    mirrors `resolveDshHome` exactly (whitespace-only `$DSH_HOME` = unset, `~` expansion); R19 +5
+    doc-visible official names (`dsh-session-telemetry-otel`, `dsh-session-telemetry`, `dsh-goal`,
+    `dsh-headless`, `dsh-mcp-client`) diffed against the installed 187-package npm-public set.
+    Cross-checked: `--patch` overlays remain launcher-flag-only (invisible to plugins, not
+    hot-reloaded → outside G-3's hot-reload model) and the profile `cordis.yml` root is rewritten
+    to an empty stub every boot (both recorded as documented limits, no code change needed).
+- **Static scan-surface extensions (R17/R18, ENGINE `static-v13` → `static-v14`)** — closes the two
+  P0 blind spots from the third-party DeepSeek-Harness plugin audit (40 attack paths, P2/G-1/G-3):
+  - **R17 !!js config surface**: root-level `cordis.yml` / `cordis.patch.yml` / `*.patch.yml` /
+    `plugin.yml` are now scanned for `!!js` configuration-as-code expressions — presence
+    observation (certain, info), dangerous-verb enumeration (info, e.g. `child_process`/`eval(`/
+    `fetch(`/shell tools), base64/hex decode hook-in, and **"verb + exfil-host / credential-path"
+    double combos → high/likely** (test/CI dirs and generic packages stay info). Text is only
+    extracted, never evaluated (red line); narrow line-based parser with hard caps (64 exprs/file,
+    8KB/expr, 6 continuation lines) — no complete YAML semantics, no new dependency, no ReDoS surface.
+  - **R18 instruction/skill injection observation (G-1)**: `AGENTS.md` / `CLAUDE.md` / `CODEGOV.md`
+    and `SKILL.md` under `skills/` or `*.skill` dirs are scanned with **combined-text matching**
+    (instruction-rewrite intent × credential/exfil/persistence action, ≥2 independent group hits;
+    a single string never fires — no rule-data self-hits). v1 is all-info observation; escalation
+    gates on real-corpus false-positive rates in a later version.
+  - **Noise/attack-surface discipline**: both surfaces are gated by `request.surface`
+    (`configFiles` / `instructionFiles`, default on), which enters the cache key; per-rule off via
+    `rules: {R17:false}`; per-deployment off via new `scanSurface` config; R17/R18 files and their
+    tests are registered in `DETECTION_DATA_FILES`/fixture exemption so vet's own self-scan stays
+    pinned and clean (`check:self` retained decisive = 0). Engine version bump invalidates stale caches.
+  - New tests: `test/r17-config-scan.test.ts`, `test/r18-instruction-scan.test.ts` (hits, downgrades,
+    surface/rules toggles, cache-key switching, DoS caps).
+
+- **Phase 3 — observation surface (round-13, ENGINE `static-v14` → `static-v15`)**:
+  - `observeLoopback` (default off): local-API loopback observation — plugin requests to
+    127.0.0.1 enter the N3 ledger, and control-plane path hits (`/api/`, `session.*`, `/plugins/`)
+    attributed to third-party plugins raise yellow `loopback-control` (alarm-only, dismissible;
+    covers audit paths P15/P17/G-2/G-5 observationally — RPC auth itself remains dsh-side work).
+  - `telemetryDiff` (default on): telemetry config sensitization (G-3) — polls profile
+    `cordis.yml`/`cordis.patch.yml` for telemetry exporter `url`/`mode` hashes; cold start records
+    only, host change → yellow (restart verification). Only hashes are stored — config content never
+    enters alarms/archive; independent of `runtimeGuard`, reads via `withVetSelfIo`.
+  - `skills` added to T2 sensitive path segments: skill-catalog writes reuse fs-write/install-write
+    semantics (G-1 runtime surface).
+- **Phase 4 — supply-chain (round-13)**:
+  - **R19 typosquat observation (P4/G-9)**: package name/deps vs a curated core list of official
+    `@deepseek-ai` names — Levenshtein ≤1 or visual homoglyphs (`dshh`, `d5h`, `dsh_tool_bash`);
+    info/heuristic only, never into verdict; DP-based distance (no ReDoS surface); per-package cap 8.
+  - `thirdPartyBaseline` (default off, P7 hardening): non-official packages get a first-install
+    content-hash baseline; same-version content changes → red, exemptable via
+    `acknowledgedPackageHashes`. Change-detection only — the static verdict scan always still runs.
+  - New tests: `r19-typosquat`, `loopback-observe`, `config-diff`, `third-party-baseline`
+    (803/803 passing; self-scan gate pinned-match, retained decisive = 0).
+
+### Fixed
+- **Break the `invariant` ↔ `runtime-guard` circular dependency**: package constants
+  (`PACKAGE_NAME`, `PLUGIN_ENTRY_ID`) moved to a new zero-dependency `src/package-meta.ts`;
+  `lib/invariant.js` re-exports them unchanged (API compatible, tests keep importing from it).
+  `runtime-guard` / `internal-plugin` / `scan-plugin` / `status-route` now import constants
+  directly — importing `PACKAGE_NAME` no longer transitively loads the whole runtime-guard
+  chain, and the ESM module graph is acyclic.
+
+### Docs
+- **README / README.zh: document all `DSH_PLUGIN_VET_*` environment variables** (cache /
+  baseline / archive / forensics / contracts / stats dirs + the internal `DSH_VET_SIDECAR_PID`
+  registry) — only cache/baseline were previously mentioned.
+
 ## [0.2.5] - 2026-08-22
 
 User-reported false alarm: saving `~/.dsh/settings.yaml` (manual edit picked up by the host, or saved by DSH itself) raised unattributed red `fs-destroy` / yellow `fs-probe` on `.settings.yaml.<pid>.<uuid>.tmpdir`.

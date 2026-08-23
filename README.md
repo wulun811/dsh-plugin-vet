@@ -76,10 +76,17 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 > the time is parsing/validating the profile's existing tree, not vet). Subsequent installs/updates take seconds
 > (validation results are reused).
 
-> **Compatibility**: vet targets DSH 0.1.0-rc.6+ (peer range `^0.1.0-rc.6`). pnpm may warn about unmet peer
+> **Compatibility**: vet targets DSH 0.1.0-rc.6+ (peers: `@deepseek-ai/cordis ^4.0.1`, dsh-* `^0.1.1-rc.1`;
+> verified against npm-public `0.1.1-rc.2` in round-15 and re-verified in the follow-up review). pnpm may warn about unmet peer
 > dependencies — this is expected: profile templates set `autoInstallPeers: false`, and at runtime the packages
 > resolve from the DSH install closure (`$DSH_HOME/profiles/node_modules` fallback layer); you neither need nor
 > should install another copy of the cordis family in the profile.
+>
+> **npm-public DSH (0.1.1-rc.2+)**: a profile loads plugins from `dsh.profile.bundles` in the profile's
+> `package.json` (boot composes bundle layers + `cordis.patch.yml` + `$DSH_HOME/cordis.patch.yml`). After
+> `dsh plugin add`, add the package name to that bundle list (or insert it with a patch `- insert:` row) —
+> otherwise the package is installed but not mounted. vet's config block uses the same row-id form
+> (`- id: plugin-vet / config: …`). Guarded paths/tests are unchanged.
 
 > **Watch scope = the profile vet is installed into.** vet's guards are in-process events
 > (`internal/plugin`) — whichever profile vet is installed into is the one whose loaded plugins it guards.
@@ -95,7 +102,11 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | `autoScan` | `true` | Automatically static-scan new plugins (`internal/plugin`) |
 | `scannerTimeoutMs` | `15000` | Static-scan subprocess timeout |
 | `requireAudit` | `false` | Audit gate (opt-in): when enabled, loading a new plugin checks `~/.dsh/vet/audits/` for a health record — without one, `report` mode logs a yellow `audit-required` alarm, `deny` mode blocks. Records are written to disk by hand by the agent following the `vet-audit-protocol` skill |
-| `rules` | `{}` (all on) | Per-rule switches (R1-R12) |
+| `rules` | `{}` (all on) | Per-rule switches (R1-R18; e.g. `{"R17": false}` disables the !!js config surface) |
+| `scanSurface` | all on | Static scan-surface switches (0.2.6, engine static-v14+): `configFiles` (cordis.yml/patch !!js detection, R17), `instructionFiles` (instruction/skill injection observation, R18); disabling only affects the new surfaces, the legacy surface keeps scanning |
+| `observeLoopback` | `false` | Local-API loopback observation (0.2.6): when on, plugin requests to 127.0.0.1 enter the N3 ledger, and hits on DSH control-plane paths (/api/, session.*, /plugins/) attributed to third-party plugins raise a yellow `loopback-control` observation (alarm-only, dismissible). Observation is not a fix — RPC auth is a dsh-side concern |
+| `telemetryDiff` | `true` | Telemetry config sensitization (0.2.6): periodically hashes telemetry exporter url/mode fields in profile config; cold start records only; host change → yellow (requires restart verification, G-3 shape). Hashes only — config content never enters alarms/archive |
+| `thirdPartyBaseline` | `false` | Third-party post-install integrity baseline (0.2.6): records first-install content hash for non-official packages; same-version content change → red (exempt via `acknowledgedPackageHashes`). Change-detection, not a trust anchor; the static scan still runs regardless |
 | `denyOn` | `critical` | Blocking threshold in `mode: deny` |
 | `allowlist` | `[]` | Package/plugin-id allowlist (skip scanning) |
 | `runtimeGuard` | `off` | Runtime guard (performance/stability cost, opt-in): `off` = disabled; `watch` enables the T1 sentinel + T2 hooks, **alarm-only** |
@@ -116,6 +127,22 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | `confirmBlockFamily4` | `alarm` | N7 family 4 override (supply-chain/install-state writes: node_modules package files, cordis.patch.yml / cordis.yml / plugin.json). Explicit `block` is user opt-in; default alarms only |
 
 Official `@deepseek-ai/*` packages are exempt by default (built-in trust).
+
+## Environment variables
+
+All `DSH_PLUGIN_VET_*` paths are **snapshotted at module load** (vet loads before third-party
+plugins — a plugin changing `process.env` afterwards cannot redirect vet's storage). Set them in
+the host environment (i.e. in the DSH profile/weekly launch script), not from inside a plugin.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DSH_PLUGIN_VET_CACHE_DIR` | `<tmpdir>/dsh-plugin-vet-cache` | Static-scanner report cache (sha-256 keyed, 0600 files) |
+| `DSH_PLUGIN_VET_BASELINE_DIR` | `~/.dsh/vet` | Content-baseline store (`baseline.json`) + N6 capability history (`capabilities.json`) + version snapshots |
+| `DSH_PLUGIN_VET_ARCHIVE_DIR` | `~/.dsh/vet/audits` | Audit health records — where `requireAudit` looks for `<plugin>-<version>-<ts>.md` |
+| `DSH_PLUGIN_VET_FORENSICS_DIR` | `~/.dsh/vet/forensics` | Forensics journal root (post-confirmation per-plugin recording, 0700 dirs / 0600 files) |
+| `DSH_PLUGIN_VET_CONTRACTS_DIR` | `~/.dsh/vet/contracts` | Runtime contract snapshots (state contracts + observation reconciliation) |
+| `DSH_PLUGIN_VET_STATS_DIR` | `~/.dsh/vet` | Defense statistics (`stats.json`, atomic write, 0600) |
+| `DSH_VET_SIDECAR_PID` | (internal) | T1 sentinel PID registry that survives hot reloads — **internal, do not set** |
 
 ## Tools
 
@@ -200,7 +227,7 @@ Official `@deepseek-ai/*` packages are exempt by default (built-in trust).
     the 24h TTL (P3-2: one suspicious scan no longer turns the shield permanently yellow; sustained scanning
     renews naturally).
 
-## Static rule table (R1-R16)
+## Static rule table (R1-R18)
 
 | ID | Name | Default level | Scope | Determinism |
 |---|---|---|---|---|
@@ -219,6 +246,11 @@ Official `@deepseek-ai/*` packages are exempt by default (built-in trust).
 | R14 | Download-and-exec primitives in shipped non-JS scripts (.sh/.bash/.ps1/.cmd/.bat: curl|sh, encoded PowerShell, IEX, certutil…) | high (plugin) / info (generic) | files | likely |
 | R15 | Dynamic network targets (fetch / WebSocket / http(s).request|get / net.connect whose target argument cannot be statically resolved — "deliberately obscured" target) | info (observation; escalates only when other signals stack, e.g. N1 hidden capability fires) | both | heuristic |
 | R16 | Dependency consistency audit: **ghost deps** (imported by code but not declared in package.json — resolves only via transitive hoisting) and **zombie deps** (declared in package.json but missing from node_modules) | info (advisory; never into verdict) | files | heuristic |
+| R17 | !!js config injection (root-level cordis.yml / cordis.patch.yml / plugin.yml `!!js` expressions: presence observation + dangerous-verb enumeration + base64/hex decode hook-in; "verb + exfil-host/credential-path" double combos → high; test/CI dirs and generic packages stay info. **Text extraction only, never executed**) | high (double combo) / info (single verb / observation) | files (surface.configFiles; engine static-v14+) | likely (double combo) / heuristic (observation) |
+| R18 | Instruction/skill injection observation
+| R19 | Typosquat observation (package name / deps vs a curated core list of official @deepseek-ai names: Levenshtein <=1 or visual homoglyphs — dshh / d5h / dsh_tool_bash; only against the curated core list; everything else is covered by R10 dep manifest + OSV + manual pre-install review) | info (observation; never into verdict) | files | heuristic |
+ (AGENTS.md / CLAUDE.md / CODEGOV.md and SKILL.md under skills/ or *.skill dirs: combined-text features — instruction rewrite × credential/exfil/persistence action, ≥2 independent group hits to fire; v1 all-info observation, escalation after real-corpus tuning) | info (observation; never into verdict) | files (surface.instructionFiles; engine static-v14+) | heuristic |
+ **ghost deps** (imported by code but not declared in package.json — resolves only via transitive hoisting) and **zombie deps** (declared in package.json but missing from node_modules) | info (advisory; never into verdict) | files | heuristic |
 
 > **Engine pipeline additions (0.1.13)**: besides the rule set, the scanner now produces a per-package
 > **capability manifest (N1)** — hosts/fsPaths/spawnCmds/imports/hasNetwork/hasExec extracted from source

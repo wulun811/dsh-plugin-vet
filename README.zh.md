@@ -30,8 +30,8 @@
 dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 ```
 
-安装即生效链路：pnpm 安装 → `reconcilePlugins` 读 `dsh.bundle` → 下次启动 `loadProfile`
-解析 bundle 挂载插件。默认配置见下方 Config（fail-open：只报告不拦截）。
+安装即生效链路：pnpm 安装 → 登记 `dsh.profile.bundles`（或 patch `- insert:` 挂载行）→ 下次启动
+boot 组合 bundles 层挂载插件。默认配置见下方 Config（fail-open：只报告不拦截）。
 
 **本地 tarball 安装**（离线/先验证再发版场景）：
 
@@ -56,9 +56,15 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 > 校验完成后再次安装/更新只需秒级（复用校验结果）。
 
 
-> **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer 范围 `^0.1.0-rc.6`）。安装时 pnpm 可能提示
+> **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer：`@deepseek-ai/cordis ^4.0.1`、dsh-* `^0.1.1-rc.1`；
+> round-15 对 npm-public `0.1.1-rc.2` 完成适配并复查）。安装时 pnpm 可能提示
 > unmet peer dependency——这是预期的：profile 模板 `autoInstallPeers: false`，运行期从 DSH 安装闭包
 > （`$DSH_HOME/profiles/node_modules` 回退层）解析，无需也不能在 profile 里另装一份 cordis 全家桶。
+>
+> **npm-public DSH（0.1.1-rc.2+）**：profile 从自身 `package.json` 的 `dsh.profile.bundles` 加载插件
+> （boot 组合 bundles 层 + `cordis.patch.yml` + `$DSH_HOME/cordis.patch.yml`，后两层热重载）。`dsh plugin add`
+> 之后还要把包名登记进该 bundle 列表（或用 patch `- insert:` 行挂载），否则装了不挂。vet 配置块同用
+> row-id 形态（`- id: plugin-vet / config: …`）。
 
 > **监控范围 = 安装 vet 的 profile。** vet 的守卫是进程内事件（`internal/plugin`）——
 > vet 装进哪个 profile，就只守那个 profile 实例加载的插件。多 profile 部署时，
@@ -73,7 +79,11 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | `autoScan` | `true` | 新插件（`internal/plugin`）自动静态扫描 |
 | `scannerTimeoutMs` | `15000` | 静态扫描子进程超时 |
 | `requireAudit` | `false` | 审计门槛（opt-in）：开启后新插件加载时检查 `~/.dsh/vet/audits/` 健康档案——无档案则 `report` 模式记录黄色 `audit-required` 告警、`deny` 模式拦截。档案由 agent 按 `vet-audit-protocol` 技能审查后手写落盘 |
-| `rules` | `{}`（全开） | 规则开关（R1-R14） |
+| `rules` | `{}`（全开） | 规则开关（R1-R18；如 `{"R17": false}` 关 !!js 配置面） |
+| `scanSurface` | 全开 | 静态扫描面开关（0.2.6，engine static-v14 起）：`configFiles`（cordis.yml/patch 的 !!js 检测，R17）、`instructionFiles`（指令/技能注入观测，R18）；关闭只影响新面，旧扫描面照扫 |
+| `observeLoopback` | `false` | 本地 API 回环观测（0.2.6）：开启后插件对 127.0.0.1 的请求计入 N3 台账，命中 DSH 控制面路径（/api/、session.*、/plugins/）且归因第三方插件 → yellow `loopback-control`（alarm-only、可忽略）。观测不是修复——RPC 认证需 dsh 侧 |
+| `telemetryDiff` | `true` | 遥测配置敏感化（0.2.6）：周期读取 profile 配置 telemetry exporter url/mode 字段哈希，冷启动只记录；主机变化 → yellow（要求重启校验，G-3 形态）。只存哈希，配置内容不进报警/档案 |
+| `thirdPartyBaseline` | `false` | 第三方安装后完整性基线（0.2.6）：非官方包记录首装内容哈希，同版本内容变化 → red（可经 `acknowledgedPackageHashes` 豁免）。定位是变更检测而非信任锚；**不影响静态扫描**（第三方包仍要过 verdict） |
 | `denyOn` | `critical` | `mode: deny` 时的拦截阈值 |
 | `allowlist` | `[]` | 包名/插件 id 白名单（跳过扫描） |
 | `runtimeGuard` | `off` | 运行时守卫（性能/稳定代价 opt-in）：`off` 关；`watch` 启用 T1 哨兵 + T2 钩子，**只报警不动作** |
@@ -94,6 +104,20 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | `confirmBlockFamily4` | `alarm` | N7 族 4 覆写（供应链/安装态写入：node_modules 包文件、cordis.patch.yml / cordis.yml / plugin.json）。显式 `block` 为用户自担风险的选择，默认只报警 |
 
 `@deepseek-ai/*` 官方包默认豁免（内置信任）。
+
+## 环境变量
+
+所有 `DSH_PLUGIN_VET_*` 路径均在**模块加载时快照**（vet 先于第三方插件加载——插件之后改 `process.env` 无法重定向 vet 的存储）。请在宿主环境设置（DSH profile / 启动脚本），不要由插件内部设置。
+
+| 变量 | 默认值 | 用途 |
+|---|---|---|
+| `DSH_PLUGIN_VET_CACHE_DIR` | `<tmpdir>/dsh-plugin-vet-cache` | 静态扫描报告缓存（sha-256 键，0600 文件） |
+| `DSH_PLUGIN_VET_BASELINE_DIR` | `~/.dsh/vet` | 内容基线存储（`baseline.json`）+ N6 能力历史（`capabilities.json`）+ 版本快照 |
+| `DSH_PLUGIN_VET_ARCHIVE_DIR` | `~/.dsh/vet/audits` | 审计健康档案目录——`requireAudit` 在此查找 `<plugin>-<version>-<ts>.md` |
+| `DSH_PLUGIN_VET_FORENSICS_DIR` | `~/.dsh/vet/forensics` | 取证流水根目录（确认恶意后按插件全量记录，目录 0700 / 文件 0600） |
+| `DSH_PLUGIN_VET_CONTRACTS_DIR` | `~/.dsh/vet/contracts` | 运行时契约快照（状态契约 + 观测对账） |
+| `DSH_PLUGIN_VET_STATS_DIR` | `~/.dsh/vet` | 防御统计（`stats.json`，原子写，0600） |
+| `DSH_VET_SIDECAR_PID` | （内部） | T1 哨兵 PID 注册表（跨热重载保留）——**内部使用，请勿设置** |
 
 ## 工具
 
@@ -118,7 +142,7 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
   - **单条忽略**：每条报警可点「忽略」——只影响展示（不再计入盾牌等级与计数），记录保留可随时「恢复」；报警停止后忽略自动失效，将来复发会重新可见（可再忽略）。忽略状态与报警存储同生命周期（重启即重置）。鉴权边界（P3-12 记录）：dismiss/restore 仅做同源校验（alarm-only 展示层风险——同源页面脚本可隐藏报警，但记录不删、不影响其他能力，体系内可接受）。
   - **展示上限**：面板展示最近 8 条报警；存储为环形缓冲上限 20 条，同 id 60 秒内去重，24 小时 TTL 过期（持续触发会自然续期）——100 条不会全量展示，也无需展示（新报警会顶掉最旧的）。最近扫描回显（suspicious → 黄灯）同样按 24h TTL 过期（P3-2：一次可疑扫描不再永久黄，持续扫描自然续期）。
 
-## 静态规则表（R1-R16）
+## 静态规则表（R1-R18）
 
 | ID | 名称 | 默认级别 | 适用场景 | 确定性 |
 |---|---|---|---|---|
@@ -137,6 +161,9 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | R14 | 随包分发的非 JS 脚本下载即执行（.sh/.bash/.ps1/.cmd/.bat 中 curl|sh、wget|sh、编码 PowerShell -enc/IEX、certutil/bitsadmin/mshta/regsvr32/rundll32 等；generic → info） | high（plugin）/ info（generic） | files | likely |
 | R15 | 动态网络目标（fetch / WebSocket / http(s).request|get / net.connect 的目标参数静态不可解——"刻意遮蔽"目标） | info（观测；叠加 N1 隐能力等信号才抬升） | both | heuristic |
 | R16 | 依赖一致性审计：**幽灵依赖**（代码引用但 package.json 未声明，靠传递依赖提升侥幸可解析）与**僵尸依赖**（package.json 声明但 node_modules 缺失） | info（观测；永不进 verdict） | files | heuristic |
+| R17 | !!js 配置注入（cordis.yml/cordis.patch.yml/plugin.yml 等根级配置的 `!!js` 表达式：存在性观测 + 危险动词枚举 + base64/hex 解码联动；「动词+外联主机/凭据路径」双组合 high；测试/CI 目录与 generic 包恒 info。**只提取文本，绝不执行**） | high（双组合）/ info（单动词/观测） | files（surface.configFiles；engine static-v14 起） | likely（双组合）/ heuristic（观测） |
+| R18 | 指令/技能注入观测（AGENTS.md/CLAUDE.md/CODEGOV.md 与 skills、*.skill 目录下 SKILL.md 的组合式文本特征：指令改写 × 凭据/外联/持久化动作 ≥2 组独立信号才报；首版全 info 观测，v2 据误报语料升级） | info（观测；永不进 verdict） | files（surface.instructionFiles；engine static-v14 起） | heuristic |
+| R19 | typosquat 观测（包名/依赖 vs 官方 @deepseek-ai 核心名：编辑距离 ≤1 或视觉同形——dshh/d5h/dsh_tool_bash 等；只对精选核心清单比对，其余靠 R10 依赖清单 + OSV + 人工审计兜底） | info（观测；永不进 verdict） | files | heuristic |
 
 ## 评分模型
 
@@ -194,7 +221,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 |---|---|
 | 间接引用：别名函数 `const f = Function; f(...)`、`process["getBuiltinModule"]`、`globalThis.process`、间接 eval `(0, eval)` | 仅 R6 info 或零 finding，verdict=clean |
 | 运行时/外部构造载荷：base64 串、hex/charCode 拼装、网络/环境变量/参数读码、自修改代码 | base64 构造器串实测**零 finding**；**0.1.15（N5/R15）**：网络 sink 的目标参数静态不可解 → 报 info（"刻意遮蔽"——运行时目标无法从源码审计） |
-| 非源码文件：`.jsx`/\`.tsx\`/\`.vue\`/\`.json\`/二进制/wasm | 不在扫描面；shell/PowerShell/batch 脚本（.sh/.bash/.ps1/.cmd/.bat）由 R14 覆盖（下载即执行） |
+| 非源码文件：`.jsx`/\`.tsx\`/\`.vue\`/\`.json\`/二进制/wasm、任意 `.md`/`.yml` | 不在通用扫描面；shell/PowerShell/batch 脚本（.sh/.bash/.ps1/.cmd/.bat）由 R14 覆盖（下载即执行）；**0.2.6（R17/R18）**：仅根级配置 cordis.yml/patch（!!js）与指令/技能文件 AGENTS.md/SKILL.md 有窄面（surface 门控），README/docs 仍不扫 |
 | 依赖链/供应链：import/require 图、依赖版本漏洞、`package.json` scripts/install 钩子、许可证、作者信誉 | 不解析 |
 | 运行时行为：网络外传、动态原型污染链、死循环/资源耗尽、时序、权限滥用 | 无数据流/行为分析；静态的 `<内置>.prototype` 覆盖赋值已由 R4 检出（round-7） |
 | 语义知识：插件实际注入的服务、bundler polyfill 中的 `process`、遮蔽判定边界 | R5 只认 4 个变量名；遮蔽检查是 v1 启发式（偏少报） |
