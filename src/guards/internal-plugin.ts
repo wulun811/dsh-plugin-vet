@@ -4,8 +4,8 @@ import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { ScanResponse } from '../scanner/protocol.js'
 import type { VetConfig } from '../config.js'
 import { scan, scanSync } from '../scanner/client.js'
-import { listSourceFiles, resolvePackageRoot } from '../scanner/package-sources.js'
-import { PACKAGE_NAME } from '../invariant.js'
+import { listSourceFiles, listInstructionFiles, resolvePackageRoot } from '../scanner/package-sources.js'
+import { PACKAGE_NAME } from '../package-meta.js'
 import { incrementScanned, incrementBlocked } from '../guard/stats.js'
 import { hasAuditRecord, auditRequiredMessage } from '../audit/archive.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
@@ -117,6 +117,45 @@ function recordMismatchAlarm(status: VetStatus | undefined, name: string, versio
 }
 
 /**
+ * round-13（Phase 4）：第三方安装后完整性基线（P7 强化，默认关）。
+ * 对非官方包记录首装内容哈希，后续加载同版本内容变化（字节不一致）→ red。
+ * 复用 P-5 的 content-baseline 存储与 acknowledgedPackageHashes 豁免（用户本地 patch 零误报）。
+ * 定位是"变更检测"而非信任锚：first-seen 自动信任仍有窗口（PLAN §5.2 明示），
+ * 与 deny/requireAudit 叠加才有完整语义。无论结果如何都**不跳过静态扫描**（与官方包
+ * exempt 语义不同——第三方包仍要过 verdict）。
+ */
+export function checkThirdPartyBaseline(packageName: string, packageRoot: string, version: string | undefined, config: VetConfig, status?: VetStatus): 'ok' | 'mismatch' | 'acknowledged' | 'first-seen' {
+  if (config.thirdPartyBaseline !== true) return 'ok'
+  const hashResult = computePackageHash(packageRoot, { maxFiles: 1000, maxSizeBytes: 50 * 1024 * 1024, timeoutMs: 10_000 })
+  if (hashResult === null) return 'ok' // 超限/超时：不参与（静默，不阻断）
+  const v = version ?? 'unknown'
+  const store = getBaseline()
+  const result = checkBaseline(packageName, v, hashResult.hash, store)
+  if (result === 'first-seen') {
+    recordBaseline(packageName, v, hashResult.hash, store)
+    saveBaseline(store)
+    return 'first-seen'
+  }
+  if (result === 'match') return 'ok'
+  const ackList = config.acknowledgedPackageHashes[`${packageName}@${v}`] ?? []
+  if (ackList.includes(hashResult.hash)) {
+    status?.record({
+      id: `third-party-patch-ack:${packageName}`,
+      severity: 'yellow',
+      source: 'scan',
+      kind: 'baseline-patch-ack',
+      message: `第三方包 ${packageName}@${v} 内容与首装基线不同但已在 acknowledged-package-hashes 登记（hash ${hashResult.hash.slice(0, 12)}…）——豁免基线比对，请确保变更来源可信`,
+      target: packageName,
+      pluginHint: packageName,
+      at: Date.now(),
+    })
+    return 'acknowledged'
+  }
+  recordMismatchAlarm(status, packageName, v, hashResult.hash, '第三方包内容被修改（首装基线不一致，P7 形态）')
+  return 'mismatch'
+}
+
+/**
  * report 模式 registry 对账（0.1.21）：npm 同版本发布内容不可变 = 内容真值。
  * - 本机字节 == registry → 基线陈旧（记录早于官方发布/来自开发通道），刷新基线 + yellow；
  * - 本机字节 != registry → 非官方修改坐实，红警升级措辞；
@@ -210,6 +249,12 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           recordMismatchAlarm(status, entryName, official.version, official.hash, 'registry 对账异常')
         })
       }
+    }
+
+    // round-13（Phase 4）：第三方安装后完整性基线（默认关）——非官方包也做内容哈希对账，
+    // 但**不豁免扫描**（第三方包仍要静态 verdict；与官方 exempt 语义不同）
+    if (official.kind === 'not-official' && config.thirdPartyBaseline === true && root !== undefined) {
+      checkThirdPartyBaseline(entryName, root, installedVersion, config, status)
     }
 
     // D30 强制层：requireAudit 开启时，无健康档案的第三方插件在加载时被拦截（deny）/报警（report）。
@@ -326,8 +371,19 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
 
     if (root === undefined) return
     const files = listSourceFiles(root)
-    if (files.length === 0) return
-    const request = { kind: 'files' as const, files, osv: config.osvCheck === true }
+    // round-12（R17/R18 扫描面扩展）：配置面已由 listSourceFiles 根级配置名带出；
+    // 指令/技能文件按 config.scanSurface.instructionFiles 追加（默认开）
+    const surfaceFiles = config.scanSurface?.instructionFiles === false
+      ? files
+      : [...files, ...listInstructionFiles(root)]
+    if (surfaceFiles.length === 0) return
+    const request = {
+      kind: 'files' as const,
+      files: surfaceFiles,
+      osv: config.osvCheck === true,
+      // surface 显式传入（与缓存 key 联动）：关闭的面不参与扫描也不命中旧形状缓存
+      ...(config.scanSurface !== undefined ? { surface: { configFiles: config.scanSurface.configFiles, instructionFiles: config.scanSurface.instructionFiles } } : {}),
+    }
     // P2-5：engine 的扫描预算 = files×2s；守卫超时若小于它，大包会在 engine 发出 R8-skip 前
     // 被 kill → 扫描静默失败。超时按文件数放大（上限 60s），让 engine 能优雅降级而不是被杀。
     const scanTimeoutMs = Math.min(Math.max(config.scannerTimeoutMs, files.length * 2000), 60_000)

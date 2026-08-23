@@ -27,5 +27,5 @@ export {
 
 export { classifyOp } from './runtime-classify.js'
 export { pluginFromStack, isOfficial } from './runtime-attrib.js'
-export { isTrackedNetHost, extractNetworkTarget, classifyNetworkOp } from './runtime-net.js'
+export { isTrackedNetHost, extractNetworkTarget, classifyNetworkOp, isLoopbackHost, isControlPlanePath } from './runtime-net.js'
 export { patchModule, patchNetworkModule } from './runtime-patch.js'

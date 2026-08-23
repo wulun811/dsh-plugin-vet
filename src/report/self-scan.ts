@@ -70,6 +70,9 @@ export const DECLARED_SPAWN = ['process.execPath', 'upstream-radar'] as const
 export const DETECTION_DATA_FILES = [
   'non-js-scripts', 'string-heuristics', 'dynamic-exec', 'capability',
   'runtime-net', 'honeypot', 'i18n',
+  // round-12（R17/R18）：规则词表文件（config-scan/instruction-scan）——含 !!js/注入特征串
+  // 的自引用数据集；仅 pinned-match 下豁免（改字节即失效）
+  'config-scan', 'instruction-scan', 'supply-chain',
 ] as const
 
 /** 开发夹具（test/spec 文件）：R13/R14 探测器实测样本（Discord/Telegram webhook、AWS 元数据、

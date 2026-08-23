@@ -37,6 +37,21 @@ export interface VetConfig {
   networkEgress: boolean
   /** P1：传递依赖 OSV 核对（默认关闭）：调用 upstream-radar CLI 扫描传递依赖树。需要安装 upstream-radar。 */
   transitiveDeps: boolean
+  /** round-12（R17/R18 扫描面扩展）：静态扫描面开关（默认全开）。configFiles → cordis.yml/patch 的
+   * !!js 检测（P2/G-3 面）；instructionFiles → AGENTS.md/skills 指令注入观测（G-1/P20/P30 面）。
+   * 关闭只影响新面（旧面照扫）；产出以 info 为主，误报容忍度低的部署可整面关闭或逐规则关。 */
+  scanSurface: { configFiles: boolean; instructionFiles: boolean }
+  /** round-13（Phase 3）：本地 API 回环观测（默认关）。开启后插件对 127.0.0.1 的请求计入 N3 台账，
+   * 且命中 DSH 控制面路径（/api/、session.*、/plugins/）时出 yellow loopback-control 观测报警
+   * （alarm-only，可 dismiss）。观测不是修复——RPC 认证需 dsh 侧。 */
+  observeLoopback: boolean
+  /** round-13（Phase 3）：遥测配置敏感化（默认开）。周期读取 profile 配置中 telemetry exporter
+   * url/mode 字段哈希，冷启动只记录；主机变化 → yellow（要求重启校验）。只存哈希，内容不进档案。 */
+  telemetryDiff: boolean
+  /** round-13（Phase 4）：第三方安装后完整性基线（默认关）。对非官方包记录首装内容哈希，
+   * 后续加载内容变化（同版本字节不一致）→ red（可经 acknowledgedPackageHashes 豁免）。
+   * 定位是"变更检测"而非信任锚：first-seen 自动信任仍有窗口，叠加 deny/requireAudit 才完整。 */
+  thirdPartyBaseline: boolean
   /** N7：确认拦截块（0.1.14）：'block'（默认）族 1/2 确认即拦；'alarm' 只报警不拦；'off' 关闭。 */
   confirmBlock: 'block' | 'alarm' | 'off'
   /** N7 族 3 覆写（默认 alarm，仅报警）：显式 'block' 才拦截系统持久化/提权面写入（误拦风险自负）。 */
@@ -77,6 +92,13 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   acknowledgedPackageHashes: z.dict(z.array(z.string())).default({}),
   networkEgress: z.boolean().default(true),
   transitiveDeps: z.boolean().default(false),
+  scanSurface: z.object({
+    configFiles: z.boolean().default(true),
+    instructionFiles: z.boolean().default(true),
+  }).default({ configFiles: true, instructionFiles: true }),
+  observeLoopback: z.boolean().default(false),
+  telemetryDiff: z.boolean().default(true),
+  thirdPartyBaseline: z.boolean().default(false),
   confirmBlock: z.union([z.const('block'), z.const('alarm'), z.const('off')]).default('block'),
   confirmBlockFamily3: z.union([z.const('alarm'), z.const('block')]).default('alarm'),
   confirmBlockFamily4: z.union([z.const('alarm'), z.const('block')]).default('alarm'),

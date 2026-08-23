@@ -30,10 +30,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { VetConfig } from '../config.js'
 import { VetStatus } from './status.js'
 import type { WatchAlarm } from './runtime-watch.js'
-import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, extractNetworkTarget, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, chunkBytes, isTrackedNetHost, hookHeartbeat, registerHookTarget, brandVetHook } from './runtime-hooks.js'
+import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, extractNetworkTarget, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, chunkBytes, isTrackedNetHost, isLoopbackHost, isControlPlanePath, hookHeartbeat, registerHookTarget, brandVetHook } from './runtime-hooks.js'
 import { isStackTraceTampered } from './runtime-denoise.js'
 import { resolvePackageRoot } from '../scanner/package-sources.js'
-import { PACKAGE_NAME } from '../invariant.js'
+import { PACKAGE_NAME } from '../package-meta.js'
 import { ensureHoneypot, ensureIntegrityCanaries } from './honeypot.js'
 import { exfilLedger } from './exfil-ledger.js'
 import { canaryStore } from './canary.js'
@@ -343,6 +343,8 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
     : undefined
   const { sink, emitLedger, recordCanary, recordKeyLeak, ledgerFsObserver, ledgerNetObserver, netCanaryScan } = createT2Sink(status, contractResolver)
   const hookCfg = { ...DEFAULT_HOOK_CONFIG }
+  // round-13（Phase 3）：本地 API 回环观测（默认关）——T2 网络包装侧按此开关追踪回环出站
+  hookCfg.observeLoopback = config.observeLoopback === true
   // D27 蜜罐：guard watch 时按配置播种诱饵并登记蜜罐根（alarm-only；失败只告警）
   if (config.honeypot.enabled) {
     const hpRoot = ensureHoneypot(config.honeypot.dir, ctx.logger)
@@ -404,7 +406,7 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
             }
             // N3 台账：dgram 写出字节 + NET_WRITE token
             const host = address.toLowerCase()
-            if (isTrackedNetHost(host) && (hint === undefined || !isOfficial(hint))) {
+            if (isTrackedNetHost(host, hookCfg) && (hint === undefined || !isOfficial(hint))) {
               emitLedger(hint, exfilLedger.observeNet({
                 plugin: hint,
                 module: 'dgram',
@@ -460,6 +462,20 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
           if (alarm !== null && (hint === undefined || !isOfficial(hint))) {
             sink({ ...alarm, pluginHint: hint })
           }
+          // round-13（Phase 3）：fetch 侧本地 API 回环观测（与 patchNetworkModule 同语义）
+          if (hookCfg.observeLoopback === true && hint !== undefined && !isOfficial(hint)) {
+            const lp = extractNetworkTarget(args)
+            if (lp !== null && isLoopbackHost(lp.hostname) && isControlPlanePath(lp.path)) {
+              const lpTarget = lp.hostname + (lp.port !== undefined ? ':' + lp.port : '') + lp.path
+              sink({
+                severity: 'yellow',
+                kind: 'loopback-control',
+                message: '插件访问本地 DSH 控制面：' + lpTarget + '（fetch 回环观测，observeLoopback——无认证 RPC 面，P15/P17 形态）',
+                target: lpTarget.slice(0, 120),
+                pluginHint: hint,
+              })
+            }
+          }
           const target = extractNetworkTarget(args)
           // #1/#6 修复：fetch body 提取归一（一次计算，两处复用）。
           // 形态 1：fetch(url, init) —— body 在 init.body（字符串直接可读）。
@@ -482,7 +498,7 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
               requestBodyPromise = undefined
             }
           }
-          const tracked = target !== null && isTrackedNetHost(target.hostname) && (hint === undefined || !isOfficial(hint))
+          const tracked = target !== null && isTrackedNetHost(target.hostname, hookCfg) && (hint === undefined || !isOfficial(hint))
           if (tracked) {
             const bytes = stringBody !== undefined ? Buffer.byteLength(stringBody, 'utf8') : 0
             emitLedger(hint, exfilLedger.observeNet({

@@ -19,6 +19,8 @@ export interface ScanRequest {
   targetKind?: 'plugin' | 'generic'
   /** 扫描基础（与 scanner-bin 同步）：'git' = 仅源码仓（R12 入口/patch 缺失降 info 不误报）；'npm' = registry tarball 真实发布物（默认）。 */
   scanBasis?: 'git' | 'npm'
+  /** 扫描面扩展（与 scanner-bin 同步）：configFiles → R17 !!js 配置检测；instructionFiles → R18 指令/技能注入检测。undefined = 全开。 */
+  surface?: { configFiles?: boolean; instructionFiles?: boolean }
   /** OSV 已知漏洞核对（npm 生态）：仅 files 模式且存在 package.json 时生效；严格 opt-in（=== true）。 */
   osv?: boolean
   /** 宿主侧计划超时（与 scanner-bin/protocol.ts 同步）：engine 据此对齐扫描预算（P2-1）。 */
@@ -67,8 +69,8 @@ export interface CapabilityManifest {
 }
 
 export interface ScanReport {
-  /** 与 scanner-bin/protocol.ts 同步；0.1.21（round-11，P0-2 #9）起为 static-v13（含 R16 幽灵/僵尸依赖审计）。 */
-  engine: 'static-v13'
+  /** 与 scanner-bin/protocol.ts 同步；0.2.6（round-14，异常流对抗回归）起为 static-v16。 */
+  engine: 'static-v16'
   sourceCount: number
   findings: Finding[]
   staticScore: number

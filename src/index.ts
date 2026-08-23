@@ -8,6 +8,7 @@ import { registerAuditProtocolSkill } from './skills/audit-protocol.js'
 import { installInternalPluginGuard } from './guards/internal-plugin.js'
 import { installToolExecuteGuard } from './guards/tool-execute.js'
 import { installInvariant } from './invariant.js'
+import { installConfigDiff } from './guard/config-diff.js'
 import { VetStatus } from './guard/status.js'
 import { installRuntimeGuard } from './guard/runtime-guard.js'
 import { installStatusRoute } from './guard/status-route.js'
@@ -16,6 +17,11 @@ export const name = 'plugin-vet'
 export const inject = ['tools', 'skills'] as const
 export const Config = VetConfigSchema
 
+/**
+ * 插件装配入口：注册 scan_plugin / vet_diff / vet_label 工具、vet-audit-protocol skill、
+ * T1/T2 运行时守卫（含全局资源的显式清理：fs/child_process 补丁与哨兵子进程）、
+ * /vet 状态路由、internal/plugin 自动扫描 + tools/execute 执行守卫与包级 invariant。
+ */
 export function apply(ctx: Context, config: VetConfig): void {
   const status = new VetStatus()
   ctx.tools.register(createScanPluginTool(config))
@@ -33,5 +39,9 @@ export function apply(ctx: Context, config: VetConfig): void {
   installStatusRoute(ctx, config, status)
   installInternalPluginGuard(ctx, config, status)
   installToolExecuteGuard(ctx, config, status)
+  // round-13（Phase 3）：遥测配置敏感化（G-3；alarm-only，独立于 runtimeGuard——纯读轮询）
+  // 生命周期：清定时器（重载/卸载安全，与 runtime-guard disposer 同纪律）
+  const configDiffDisposer = installConfigDiff(ctx, config, status)
+  ctx.effect(() => () => configDiffDisposer(), 'vet: config-diff cleanup')
   installInvariant(ctx, config)
 }

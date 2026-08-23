@@ -31,10 +31,26 @@ const EGRESS_ALLOWLIST = [
   'unpkg.com',
 ]
 
-/** 网络主机是否参与台账/外泄观测（回环/白名单/unix socket 不算——本地与受信服务不计数）。 */
-export function isTrackedNetHost(hostname: string): boolean {
+/** 回环主机判定（observeLoopback 观测用）。 */
+export function isLoopbackHost(hostname: string): boolean {
   const h = hostname.toLowerCase()
-  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === 'unix-socket') return false
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1'
+}
+
+/** DSH 控制面路径判定（observeLoopback 观测用，round-13）：本地 API 的敏感路径形状——
+   * /api/ 前缀段、session.list/session.prompt（报告 P15/P17 无认证 RPC 面）、/plugins/ 管理路由。 */
+export function isControlPlanePath(path: string): boolean {
+  const p = path.split('?')[0]
+  return /\/api\//.test(p) || /session\.(list|prompt)\b/.test(p) || /^\/plugins\//.test(p)
+}
+
+/** 网络主机是否参与台账/外泄观测。
+ * 回环默认不追踪（本地与受信流量不算外泄）；observeLoopback=true 时回环也进台账
+ * （Phase 3：观测本地 API 接触面——只观测，报警由控制面路径判定单独产出）。 */
+export function isTrackedNetHost(hostname: string, opts?: { observeLoopback?: boolean }): boolean {
+  const h = hostname.toLowerCase()
+  if (h === 'unix-socket') return false
+  if (isLoopbackHost(h)) return opts?.observeLoopback === true
   return !EGRESS_ALLOWLIST.includes(h)
 }
 

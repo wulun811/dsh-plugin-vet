@@ -3,11 +3,11 @@ import { basename, dirname, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import { scan } from '../scanner/client.js'
-import { listSourceFiles } from '../scanner/package-sources.js'
+import { listSourceFiles, listInstructionFiles } from '../scanner/package-sources.js'
 import type { ScanRequest } from '../scanner/protocol.js'
 import type { PluginScorecard } from '../report/types.js'
 import { renderScorecard } from '../report/render.js'
-import { PACKAGE_NAME } from '../invariant.js'
+import { PACKAGE_NAME } from '../package-meta.js'
 import { resolvePkgRoot } from '../pkg-root.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
 import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline } from '../guards/content-baseline.js'
@@ -153,9 +153,12 @@ export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; plug
     if (typeof args.packagePath !== 'string') throw new Error('vet: package 需要 packagePath')
     const packagePath = args.packagePath // 闭包内 TS 不保留属性 narrowing（同 status-route 修法）
     // P2-2：列目录/读 package.json 属 vet 审计操作——vetSelfIo 直通，.dsh 下不自报警
-    // vet 本体自扫：用权威自扫范围（排除 lib/dsh-src/plugin-scan-tmp 等非本体目录），
-    // 与钉扎/门禁同集——否则 pin 算不一致、豁免失效（普通插件仍全量扫安装产物）。
-    const files = withVetSelfIo(() => (isSelfPackage(packagePath) ? listSelfSourceFiles(packagePath) : listSourceFiles(packagePath)))
+    // vet 本体自扫：用权威自扫范围（排除 lib/dsh-src/plugin-scan-tmp 等非本体目录，且已含
+    // 经 self-scope 过滤的指令/技能文件——R18 面），与钉扎/门禁同集——否则 pin 算不一致、
+    // 豁免失效（普通插件仍全量扫安装产物 + 追加指令文件）。
+    const files = withVetSelfIo(() => isSelfPackage(packagePath)
+      ? listSelfSourceFiles(packagePath)
+      : [...listSourceFiles(packagePath), ...listInstructionFiles(packagePath)])
     if (files.length === 0) throw new Error('vet: ' + packagePath + ' 下没有可扫描的源码')
     return {
       pluginName: basename(packagePath),

@@ -8,7 +8,7 @@ import type { LedgerFsEvent, LedgerNetEvent } from './exfil-ledger.js'
 import { confirmBlock, BLOCK_FS_OPS, type BlockDecision } from './confirm-block.js'
 import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact, isDshAtomicStagingPath } from './runtime-denoise.js'
 import { classifyOp } from './runtime-classify.js'
-import { classifyNetworkOp, extractNetworkTarget, isTrackedNetHost, NET_OPS } from './runtime-net.js'
+import { classifyNetworkOp, extractNetworkTarget, isTrackedNetHost, isLoopbackHost, isControlPlanePath, NET_OPS } from './runtime-net.js'
 import { fsOpBytes, attachWriteCounter, attachCanaryScanner, attachReadCounter } from './runtime-count.js'
 import { isOfficial, pluginFromStack } from './runtime-attrib.js'
 import { brandVetHook, registerHookTarget } from './runtime-heartbeat.js'
@@ -175,7 +175,7 @@ export function patchNetworkModule(
       // C4：归因链被篡改 → 网络归因同样不可信（置空归因，操作照报）
       const stackTampered = isStackTraceTampered()
       let hint: string | undefined
-      if (alarm !== null || observe !== undefined || canaryScan !== undefined) {
+      if (alarm !== null || observe !== undefined || canaryScan !== undefined || cfg.observeLoopback === true) {
         try { if (!stackTampered) hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
       }
       if (stackTampered && alarm !== null) {
@@ -189,7 +189,7 @@ export function patchNetworkModule(
       const result = (fn as (...a: unknown[]) => unknown).apply(this, args)
       if (observe !== undefined && !isRootIndexing() && !isVetSelfIo()) {
         const target = extractNetworkTarget(args)
-        if (target !== null && isTrackedNetHost(target.hostname)) {
+        if (target !== null && isTrackedNetHost(target.hostname, cfg)) {
           const base: LedgerNetEvent = { plugin: hint, module: moduleName, op: opName, hostname: target.hostname, bytes: 0 }
           const res = result as { write?: unknown } | null | undefined
           if (typeof res === 'object' && res !== null && typeof res.write === 'function') {
@@ -205,7 +205,7 @@ export function patchNetworkModule(
         if (t !== null) {
           const urlText = typeof args[0] === 'string' ? args[0] : t.hostname + t.path
           canaryScan(hint, urlText, 'url')
-          if (isTrackedNetHost(t.hostname)) {
+          if (isTrackedNetHost(t.hostname, cfg)) {
             const res = result as { write?: unknown } | null | undefined
             if (typeof res === 'object' && res !== null && typeof res.write === 'function') {
               attachCanaryScanner(res, (text) => canaryScan(hint, text, 'body'))
@@ -216,6 +216,21 @@ export function patchNetworkModule(
       if (alarm !== null) {
         if (hint === undefined || !isOfficial(hint)) {
           sink({ ...alarm, pluginHint: hint })
+        }
+      }
+      // round-13（Phase 3）：本地 API 回环观测——observeLoopback=true、命中 DSH 控制面路径、
+      // 归因第三方插件（非官方/非无主）→ yellow 观测（alarm-only；观测不是修复，RPC 认证需 dsh 侧）
+      if (cfg.observeLoopback === true && hint !== undefined && !isOfficial(hint)) {
+        const lp = extractNetworkTarget(args)
+        if (lp !== null && isLoopbackHost(lp.hostname) && isControlPlanePath(lp.path)) {
+          const lpTarget = lp.hostname + (lp.port !== undefined ? ':' + lp.port : '') + lp.path
+          sink({
+            severity: 'yellow',
+            kind: 'loopback-control',
+            message: '插件访问本地 DSH 控制面：' + lpTarget + '（回环观测，observeLoopback——无认证 RPC 面，P15/P17 形态）',
+            target: lpTarget.slice(0, 120),
+            pluginHint: hint,
+          })
         }
       }
       return result

@@ -19,6 +19,9 @@ export interface HookConfig {
   honeypotRoots: string[]
   /** 完整性金丝雀路径（N4，仅 ~/.dsh 内）：写/删即 red kind=integrity（与凭据蜜罐语义分离）。 */
   integrityRoots: string[]
+  /** round-13（Phase 3）：本地 API 回环观测（默认关）。true 时 127.0.0.1 出站进台账，
+   * 命中 DSH 控制面路径（/api/、session.*、/plugins/）且归因第三方插件 → yellow loopback-control。 */
+  observeLoopback?: boolean
 }
 
 export const DEFAULT_HOOK_CONFIG: HookConfig = {
@@ -27,7 +30,10 @@ export const DEFAULT_HOOK_CONFIG: HookConfig = {
   // 此前 readdirSync('~/.dsh') 这类凭据狩猎第一步完全不可见（M7 只覆盖 .ssh/.aws 等）。
   // 官方包（@deepseek-ai/*）高频读写 ~/.dsh（会话/配置/存储）由 sink 的官方信任降噪吸收；
   // vet 自身对 patch 文件的轮询读取经 withVetSelfIo 直通，不会自报警。
-  sensitiveSegments: ['.dsh', '.ssh', '.aws', '.gnupg', '.npmrc', '.env', '.netrc', '.pgpass', '.gitconfig', 'credentials', 'credential', 'secrets', 'secret', 'tokens', 'token', 'passwd', 'shadow', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.git-credentials', '.kube', 'vault'],
+  /** 敏感段名：路径任一段整体等于其中一项（大小写不敏感）即敏感。
+ * round-13（Phase 3/计划 §3.3）：追加 skills——技能目录写删复用 fs-write/fs-destroy 语义
+ *（G-1 技能库投毒的运行时面；合法写入面极窄，误报走 dismiss 路径）。 */
+  sensitiveSegments: ['.dsh', '.ssh', '.aws', '.gnupg', '.npmrc', '.env', '.netrc', '.pgpass', '.gitconfig', 'credentials', 'credential', 'secrets', 'secret', 'tokens', 'token', 'passwd', 'shadow', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.git-credentials', '.kube', 'vault', 'skills'],
   sensitiveKeywords: ['secret', 'secrets', 'credential', 'credentials', 'passwd', 'shadow', 'private', 'auth', 'vault'],
   sensitiveExts: ['.pem', '.key', '.p12', '.pfx', '.keystore', '.jks', '.env'],
   shellTokens: ['sh', 'bash', 'zsh', 'cmd', 'powershell', 'pwsh', 'curl', 'wget', 'nc', 'ncat', 'telnet'],

@@ -15,7 +15,7 @@ import { VetStatus } from './status.js'
 import { readHostMetrics } from './metrics.js'
 import { withVetSelfIo } from './runtime-hooks.js'
 import type { VetConfig } from '../config.js'
-import { PLUGIN_ENTRY_ID } from '../invariant.js'
+import { PLUGIN_ENTRY_ID } from '../package-meta.js'
 import { getStats } from './stats.js'
 
 interface WebServerLike {

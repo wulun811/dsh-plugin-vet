@@ -2,10 +2,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import { scan } from './scanner/client.js'
 import type { VetConfig } from './config.js'
 import { sidecarSpawned } from './guard/runtime-guard.js'
-
-export const PACKAGE_NAME = '@jieai/dsh-plugin-vet'
-/** bundle cordis.patch.yml 里 insert 的条目 id（profile patch 层按它覆盖配置）。 */
-export const PLUGIN_ENTRY_ID = 'plugin-vet'
+// 常量定义已拆到 package-meta.ts（断 invariant ↔ runtime-guard 循环依赖）；
+// 此处 import 供本模块使用 + re-export 保持外部 import 路径与符号不变（lib/invariant.js API 兼容）。
+import { PACKAGE_NAME } from './package-meta.js'
+export { PACKAGE_NAME, PLUGIN_ENTRY_ID } from './package-meta.js'
 
 interface InvariantRegistryLike {
   register(packageName: string, installer: (child: Context, fail: (message: string) => never) => void | Promise<void>): () => void
