@@ -1,6 +1,20 @@
 import { existsSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, relative } from 'node:path'
 import type { Finding } from '../protocol.js'
+
+/**
+ * round-15 review（R12 越界探测）：manifest 里的路径（dsh.bundle.patch / main）可能被
+ * 恶意构造为 `../../../../etc/hosts` 等穿越串——resolve 后落在包根之外，existsSync 就
+ * 变成对任意主机路径的「存在性探测」侧信道（探测结果进报告给人看，不直接外泄，但
+ * 扫描面必须约束在包根内：包根之外的存在性不在契约判定范围，一律视为「未命中」）。
+ */
+function existsWithinPkgRoot(pkgRoot: string, p: string): boolean {
+  const resolved = resolve(pkgRoot, p)
+  const rel = relative(pkgRoot, resolved)
+  // 越界（.. 前缀）或绝对路径逃逸 → 不探测
+  if (rel.startsWith('..') || rel.startsWith('/') || resolved === pkgRoot) return false
+  return existsSync(resolved)
+}
 
 /**
  * R12 Cordis/DSH bundle 契约（P-2 计划项，三审后落地）：
@@ -41,7 +55,7 @@ export function runContract(content: string, file: string, targetKind?: 'plugin'
   // 1) dsh.bundle.patch 声明 vs 实际文件
   const patch = pickBundlePatch(dshField)
   if (patch !== undefined) {
-    if (!existsSync(resolve(pkgRoot, patch))) {
+    if (!existsWithinPkgRoot(pkgRoot, patch)) {
       found.push({
         rule: 'R12',
         severity: 'high',
@@ -64,7 +78,7 @@ export function runContract(content: string, file: string, targetKind?: 'plugin'
       evidence: '',
       file,
     })
-  } else if (entry !== undefined && !existsSync(resolve(pkgRoot, entry))) {
+  } else if (entry !== undefined && !existsWithinPkgRoot(pkgRoot, entry)) {
     found.push({
       rule: 'R12',
       severity: gitBasis ? 'info' : 'high',

@@ -76,17 +76,41 @@ export function cacheKey(
   rules: Record<string, boolean> | undefined,
   context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm'; deps?: string; surface?: { configFiles?: boolean; instructionFiles?: boolean } } = {},
 ): string {
-  const body = files.map(f => `${f.path}\u0000${f.content}`).join('\u0001')
+  // round-15 review：哈希改为增量 update + 每段长度前缀——
+  // 1) 旧实现先 map+join 出整条 body（全量文件内容的第二份拷贝）再整体 update，
+  //    大文件集（~1000×8MB）内存峰值 ≈ 2× 总字节；增量 update 不再复制内容。
+  // 2) 无长度 framing 时 `path\u0000content` 拼接可被构造出二阶碰撞（不同文件集
+  //    拼出相同串），长度前缀根除该碰撞面（路径与内容都带长度）。
+  const h = createHash('sha256')
+  for (const f of files) {
+    h.update(String(f.path.length))
+    h.update(':')
+    h.update(f.path)
+    h.update('\u0000')
+    h.update(String(f.content.length))
+    h.update(':')
+    h.update(f.content)
+    h.update('\u0001')
+  }
   // surface 改变输出形状（R17/R18 是否参与）→ 必须入 key，否则开关切换会命中旧形状缓存
   const sf = context.surface
   const surface = sf !== undefined ? `cf:${sf.configFiles !== false ? 1 : 0}|if:${sf.instructionFiles !== false ? 1 : 0}` : 'cf:1|if:1'
   const ctx = `tk:${context.targetKind ?? ''}|rt:${context.runtime ?? ''}|sb:${context.scanBasis ?? ''}|deps:${context.deps ?? ''}|${surface}`
-  return createHash('sha256').update(`${ENGINE_VERSION}|${ctx}|${JSON.stringify(rules ?? {})}|${body}`).digest('hex')
+  h.update(`${ENGINE_VERSION}|${ctx}|${JSON.stringify(rules ?? {})}|`)
+  return 'sha256:' + h.digest('hex')
+}
+
+/**
+ * 缓存条目文件名（Windows 兼容）：key 含 `sha256:` 前缀，冒号在 Windows 文件名里非法
+ * （Linux 合法——vet1 开发环境未暴露）。统一替换为 `_`，读写两侧对称。
+ */
+function cacheEntryFile(key: string): string {
+  return key.replace(/[:]/g, '_') + '.json'
 }
 
 export function readCached(key: string, dir?: string, nonce?: string): ScanReport | undefined {
   try {
-    const file = join(cacheDirFor(dir), `${key}.json`)
+    const file = join(cacheDirFor(dir), cacheEntryFile(key))
     if (!existsSync(file)) return undefined
     const parsed = JSON.parse(readFileSync(file, 'utf8')) as { report: ScanReport; nonce?: string }
     // C3（0.1.16 加固）：写入时嵌宿主 nonce，读时校验——无 nonce 的旧条目/伪造条目全部视为无效自动重扫
@@ -103,7 +127,7 @@ export function writeCached(key: string, report: ScanReport, dir?: string, nonce
     const cacheRoot = cacheDirFor(dir)
     mkdirSync(cacheRoot, { recursive: true, mode: 0o700 })
     // 防本地其他用户读扫描报告/伪造缓存（F26）：文件 0600
-    writeFileSync(join(cacheRoot, `${key}.json`), JSON.stringify({ report, ts: Date.now(), nonce: nonce ?? '' }), { mode: 0o600 })
+    writeFileSync(join(cacheRoot, cacheEntryFile(key)), JSON.stringify({ report, ts: Date.now(), nonce: nonce ?? '' }), { mode: 0o600 })
   } catch {
     // cache must never fail a scan
   }

@@ -228,10 +228,43 @@ function collectSpawns(body: ts.Node, out: ts.Node[]): void {
   visit(body)
 }
 
-/** while(true) or for(;;) - statically provable unbounded loops. */
-function unboundedLoop(n: ts.Node): ts.WhileStatement | ts.ForStatement | undefined {
-  if (ts.isWhileStatement(n) && n.expression.kind === ts.SyntaxKind.TrueKeyword) return n
-  if (ts.isForStatement(n) && n.initializer === undefined && n.condition === undefined && n.incrementor === undefined) return n
+/**
+ * 条件表达式是否静态恒真。识别范围（保守，避免误报）：
+ * - true / 非零数值字面量（while(1) 是压缩混淆最常见的死循环形态，round-15 补漏）
+ * - 括号包裹、一元非（!0 → true，minified 惯用）
+ * 不做表达式求值（不追变量绑定，防误报；退出信号检测兜底其余形态）。
+ */
+function isStaticallyTrue(expr: ts.Expression): boolean {
+  if (expr.kind === ts.SyntaxKind.TrueKeyword) return true
+  if (ts.isParenthesizedExpression(expr)) return isStaticallyTrue(expr.expression)
+  // 数值字面量：非零即恒真（while(1) / for(;1;))——数值解析失败按不恒真
+  if (ts.isNumericLiteral(expr)) {
+    const v = Number(expr.text.replace(/_/g, ''))
+    return Number.isFinite(v) && v !== 0
+  }
+  // 一元非：!0 / !0n —— 内层是 falsy 字面量则恒真（minified 惯用 while(!0)）
+  if (ts.isPrefixUnaryExpression(expr) && expr.operator === ts.SyntaxKind.ExclamationToken) {
+    const inner = expr.operand
+    if (ts.isNumericLiteral(inner)) {
+      const v = Number(inner.text.replace(/_/g, ''))
+      return Number.isFinite(v) && v === 0
+    }
+    if (inner.kind === ts.SyntaxKind.FalseKeyword || inner.kind === ts.SyntaxKind.NullKeyword) return true
+  }
+  return false
+}
+
+/** 无出口循环：while(true/1/!0) 或 for(;;) / for(;1;)（do-while 同判，round-15 补漏）。 */
+function unboundedLoop(n: ts.Node): ts.WhileStatement | ts.ForStatement | ts.DoStatement | undefined {
+  // for(;;)：三处全空。for(;1;)：只有 condition 且恒真（无 init/inc 即不可能靠自增跳出）
+  if (ts.isForStatement(n)) {
+    if (n.initializer === undefined && n.incrementor === undefined) {
+      if (n.condition === undefined || isStaticallyTrue(n.condition)) return n
+    }
+    return undefined
+  }
+  if (ts.isWhileStatement(n) && isStaticallyTrue(n.expression)) return n
+  if (ts.isDoStatement(n) && isStaticallyTrue(n.expression)) return n
   return undefined
 }
 

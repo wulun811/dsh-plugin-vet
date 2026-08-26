@@ -1,6 +1,7 @@
 import ts from 'typescript'
 import type { Finding, RuleContext } from '../protocol.js'
 import { walk, stringyValue, lineOf } from '../ast.js'
+import { tryDecodeLiteral } from '../decode.js'
 
 /**
  * R1 constructor-chain escape: `x.constructor("return process")` — the receiver's
@@ -23,13 +24,19 @@ export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
     if (!isConstructorCallee(callee, sf)) return
     const arg = args?.[0]
     if (arg === undefined) return
+    // round-15 review（R1/R2 N2 语料盲区）：stringyValue 只认静态字符串；base64/hex/
+    // charCode 混淆的参数（atob('cmV0dXJuIHByb2Nlc3M=')、Buffer.from(...,'base64')）此前
+    // 完全漏报——引擎已采集 decodedLiterals 且 R13/R7/R11 消费，这里对参数表达式直接
+    // 走 tryDecodeLiteral 兜底（与 collectDecodedLiterals 同源判定）。
     const sv = stringyValue(arg, sf)
-    if (sv === undefined) return
-    if (!ESCAPE_RE.test(sv.text)) return
+    const decoded = sv === undefined ? tryDecodeLiteral(arg, sf) : undefined
+    const text = sv?.text ?? decoded?.text
+    if (text === undefined) return
+    if (!ESCAPE_RE.test(text)) return
     found.push({
       rule: 'R1',
       severity: 'critical',
-      confidence: sv.exact ? 'certain' : 'likely',
+      confidence: sv?.exact === true ? 'certain' : 'likely',
       message: ts.isNewExpression(n)
         ? '构造器链逃逸（new 形态）：new (...constructor...) 指向宿主 Function，可借此返回 process'
         : '构造器链逃逸：宿主函数的 constructor 指向宿主 Function，可借此返回 process',

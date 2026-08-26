@@ -67,6 +67,20 @@ export interface ScanOptions {
   timeoutMs?: number
 }
 
+/**
+ * 扫描超时预算（round-5 review，B-A5 单源）：按文件数放大、封顶 60s。
+ * 曾散落 gate.ts / scan-plugin.ts / internal-plugin.ts 三份拷贝且口径已分歧（gate 支持
+ * 显式值优先、另两处把显式配置当下限放大）——统一为：
+ *   budget = clamp(max(explicitMs ?? 15_000, files × 2000), 上限)
+ * 调用方如需「显式优先」（gate CLI），自行 `explicit ?? scanBudget(files)`。
+ * P2-1 背景：engine 的扫描预算 = min(files×2s, 超时-余量)，守卫超时若小于它，
+ * 大包会在 engine 发出 R8-skip 前被 kill → 扫描静默失败；放大让 engine 优雅降级。
+ */
+export function scanBudget(fileCount: number, explicitMs?: number, capMs = 60_000): number {
+  const base = Number.isFinite(explicitMs as number) && (explicitMs as number) > 0 ? (explicitMs as number) : 15_000
+  return Math.min(Math.max(base, fileCount * 2000), capMs)
+}
+
 /** 导出仅供测试（并发上限回归）：生产代码一律走 scan/scanSync。 */
 export const _withScanSlotForTest = withScanSlot
 
@@ -97,7 +111,11 @@ export async function scan(request: ScanRequest, options: ScanOptions = {}): Pro
 }
 
 async function scanInner(request: ScanRequest, options: ScanOptions = {}): Promise<ScanResponse> {
-  const timeoutMs = options.timeoutMs ?? 15_000
+  // round-5 review（B-A2）：timeoutMs 非有限/≤0（CLI 传 NaN、0、负值）回退默认——
+  // NaN 会让 setTimeout(NaN)=0ms 立即杀 scanner、spawnSync timeout:NaN 同理。
+  const timeoutMs = Number.isFinite(options.timeoutMs as number) && (options.timeoutMs as number) > 0
+    ? (options.timeoutMs as number)
+    : 15_000
   // P2-1：把宿主计划超时带给 engine——它按 min(files×2s, timeout-余量) 收敛预算，
   // R8-skip 先于本进程的 kill 触发，大包不再报 scan-fail
   const payload: ScanRequest = {
@@ -122,15 +140,42 @@ async function scanInner(request: ScanRequest, options: ScanOptions = {}): Promi
       finish({ ok: false, error: `scanner timeout after ${timeoutMs}ms` })
     }, timeoutMs)
     child.stdout.setEncoding('utf8')
-    child.stdout.on('data', chunk => { stdout += chunk })
+    // round-15 review（async 路径无输出上限修复）：stdout 全量缓冲无 cap——被替换/损坏的
+    // scanner-bin 可以流式喷出无限输出把宿主内存打爆（sync 路径有 maxBuffer 64MB，async
+    // 路径此前没有对等护栏）。扫描报告 ≤ 数百 KB；64MB 上限与 sync 路径同值，超限即按
+    // 协议违约处理（kill + 失败，不信任超过上限的输出）。
+    const STDOUT_MAX = 64 * 1024 * 1024
+    let stdoutOversize = false
+    child.stdout.on('data', chunk => {
+      if (!stdoutOversize) {
+        stdout += chunk
+        if (stdout.length > STDOUT_MAX) stdoutOversize = true
+      }
+    })
     child.stderr.setEncoding('utf8')
-    child.stderr.on('data', chunk => { stderr += chunk })
+    child.stderr.on('data', chunk => {
+      stderr += chunk
+      if (stderr.length > 8 * 1024 * 1024) stderr = stderr.slice(stderr.length - 8 * 1024 * 1024) // 尾部保留，防模糊排查信息被冲掉
+    })
     child.on('error', err => finish({ ok: false, error: String(err) }))
-    child.on('close', () => {
+    child.on('close', (code) => {
+      // round-15 review（exit code 未检查修复）：close 时若已超量输出 → 不解析（输出不可信）。
+      // 另：非零退出码即使 stdout 有合法行也不该被当作成功报告——退出码 0 且 close 无异常
+      // 才可能产出可信报告（sync 路径同时检查 status 的既有纪律）。
+      if (stdoutOversize) {
+        finish({ ok: false, error: withCrashDiag(describeScannerCrash(stderr), `scanner output exceeded ${STDOUT_MAX} bytes`) })
+        return
+      }
       const line = stdout.trim().split('\n').pop()
       const diag = describeScannerCrash(stderr)
       if (line === undefined) {
         finish({ ok: false, error: withCrashDiag(diag, `scanner produced no output; stderr: ${stderr.slice(0, 200)}`) })
+        return
+      }
+      // 非零退出码：打印了行也不能当成功——可能是崩溃前残留 stdout（R8-skip 超时也靠
+      // 进程内返回，正常路径退出码恒 0；非零 = scanner 自身故障，报告不可信）
+      if (code !== 0) {
+        finish({ ok: false, error: withCrashDiag(diag, `scanner exited non-zero (${code}); stderr: ${stderr.slice(0, 200)}`) })
         return
       }
       try {
@@ -157,7 +202,10 @@ async function scanInner(request: ScanRequest, options: ScanOptions = {}): Promi
  * 同步扫描（spawnSync）：internal/plugin 守卫 deny 路径需要同步判定才能在 observer 内抛错回滚挂载。
  */
 export function scanSync(request: ScanRequest, options: ScanOptions = {}): ScanResponse {
-  const timeoutMs = options.timeoutMs ?? 15_000
+  // round-5 review（B-A2）：同 async 路径，非有限/≤0 timeout 回退默认
+  const timeoutMs = Number.isFinite(options.timeoutMs as number) && (options.timeoutMs as number) > 0
+    ? (options.timeoutMs as number)
+    : 15_000
   // P2-1：同 async 路径，把超时带给 engine（deny 同步路径同样受益于 R8-skip 先于 kill）
   const payload: ScanRequest = {
     ...request,

@@ -1,6 +1,7 @@
 import ts from 'typescript'
 import type { Finding, RuleContext, Severity, Confidence } from '../protocol.js'
 import { walk, stringyValue, lineOf, isShadowed } from '../ast.js'
+import { tryDecodeLiteral } from '../decode.js'
 
 // F2：globalThis/global/window 前缀 + 括号访问都算逃逸特征（return globalThis.process /
 // process['exit'] 此前漏报）
@@ -161,10 +162,14 @@ function checkNew(n: ts.NewExpression, sf: ts.SourceFile, add: (n: ts.Node, sev:
     if (ts.isIdentifier(expr) && isShadowed(name, expr)) return
     const arg = n.arguments?.[0]
     if (arg !== undefined) {
+      // round-15 review（R1/R2 N2 语料盲区）：字符串求值失败时回退解码器——
+      // new Function(atob('cmV0dXJuIHByb2Nlc3M=')) 此前漏报逃逸升级（解码语料已采集，R1/R2 不读）
       const sv = stringyValue(arg, sf)
-      if (sv !== undefined && ESCAPE_RE.test(sv.text)) {
+      const decoded = sv === undefined ? tryDecodeLiteral(arg, sf) : undefined
+      const esctext = sv?.text ?? decoded?.text
+      if (esctext !== undefined && ESCAPE_RE.test(esctext)) {
         // 参数含逃逸字符串 → 升级 critical（复用 R1 特征）
-        add(n, 'critical', sv.exact ? 'certain' : 'likely', '动态构造（new Function）参数含逃逸字符串')
+        add(n, 'critical', sv?.exact === true ? 'certain' : 'likely', '动态构造（new Function）参数含逃逸字符串')
         return
       }
     }

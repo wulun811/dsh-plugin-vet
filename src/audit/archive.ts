@@ -24,6 +24,25 @@ export function setArchiveDirForTest(dir: string): void {
   ARCHIVE_DIR = dir
 }
 
+/** round-16 review（S9）：档案目录不可读告警钩子（installInternalPluginGuard 注入，默认空）。
+ * readdir 失败此前完全静默——requireAudit 判定按「无档案」处理，deny 模式会以假阴性理由
+ * 拦截合法插件，用户却不知道是目录权限问题。一次性告警（进程内只提醒一次，避免每个插件
+ * 加载都刷一条）。 */
+let archiveIoWarn: ((msg: string) => void) | undefined
+export function setArchiveIoWarn(fn: ((msg: string) => void) | undefined): void {
+  archiveIoWarn = fn
+}
+let readDirWarned = false
+function warnUnreadable(dir: string): void {
+  if (readDirWarned) return
+  readDirWarned = true
+  try {
+    archiveIoWarn?.(`vet: 审计档案目录不可读：${dir}——requireAudit 将按无档案判定（deny 会拦截第三方插件），请检查目录权限`)
+  } catch {
+    // 告警自身失败不影响主流程
+  }
+}
+
 /**
  * 某插件是否已有健康档案。匹配规则（D30 修漏 M1 + P-1 版本精确绑定）：
  * 档案名必须严格是 <pluginName>-<version>-<yyyyMMdd-HHmmss>.md——只靠前缀匹配会被伪造
@@ -39,22 +58,10 @@ export function hasAuditRecord(pluginName: string, version?: string): boolean {
     const dir = archiveDir()
     if (!existsSync(dir)) return false
     try {
-      return readdirSync(dir).some(name => {
-        // 时间戳尾兼容两种格式：
-        //   v0.2.1 规范：-yyyyMMdd-HHmmss.md（19 字符，中间有 -）
-        //   旧格式兼容：-yyyyMMddHHmmss.md（15 字符，无中间 -）——升级后不误报 audit-required
-        let tsLen = 0
-        if (/-[0-9]{8}-[0-9]{6}[.]md$/.test(name)) tsLen = 19
-        else if (/-[0-9]{14}[.]md$/.test(name)) tsLen = 18 // -yyyyMMddHHmmss.md（1+14+3）
-        if (tsLen === 0) return false
-        const prefix = name.slice(0, name.length - tsLen)
-        if (version !== undefined) return prefix === esc + '-' + version
-        // 宽松：版本段必须以数字开头（保持 M1 反前缀伪造——lodash-foo-… 不命中 lodash）
-        if (!prefix.startsWith(esc + '-')) return false
-        const rest = prefix.slice(esc.length + 1)
-        return rest.length > 0 && rest[0] >= '0' && rest[0] <= '9'
-      })
+      return readdirSync(dir).some(name => matchesArchiveFile(name, esc, version))
     } catch {
+      // S9：目录存在但不可读（权限/损坏）——不再是静默 false，告警一次
+      warnUnreadable(dir)
       return false
     }
   })
@@ -70,6 +77,54 @@ function escapeName(name: string): string {
     else out += c
   }
   return out
+}
+
+/** 档案文件名匹配（单条与批量共用）：时间戳尾解析 + 前缀/版本段校验（语义同 hasAuditRecord 注释）。 */
+function matchesArchiveFile(fileName: string, escName: string, version?: string): boolean {
+  let tsLen = 0
+  //   v0.2.1 规范：-yyyyMMdd-HHmmss.md（19 字符，中间有 -）
+  //   旧格式兼容：-yyyyMMddHHmmss.md（18 字符，无中间 -）——升级后不误报 audit-required
+  if (/-[0-9]{8}-[0-9]{6}[.]md$/.test(fileName)) tsLen = 19
+  else if (/-[0-9]{14}[.]md$/.test(fileName)) tsLen = 18
+  if (tsLen === 0) return false
+  const prefix = fileName.slice(0, fileName.length - tsLen)
+  if (version !== undefined) return prefix === escName + '-' + version
+  // 宽松：版本段必须以数字开头（保持 M1 反前缀伪造——lodash-foo-… 不命中 lodash）
+  if (!prefix.startsWith(escName + '-')) return false
+  const rest = prefix.slice(escName.length + 1)
+  return rest.length > 0 && rest[0] >= '0' && rest[0] <= '9'
+}
+
+export interface AuditRecordProbe {
+  name: string
+  version?: string
+}
+
+/**
+ * 批量审计档案探测（P2 审计中心/插件索引用）：一次 readdir 判多个包。
+ * 面板 5s 轮询 × N 包场景下，逐包调 hasAuditRecord 会放大为 N 次目录扫描——本函数一次读完共享。
+ * 匹配语义与 hasAuditRecord 完全一致（传版本要求精确；不传走宽松数字开头规则）。
+ */
+export function hasAuditRecordBatch(entries: AuditRecordProbe[]): Record<string, boolean> {
+  return withVetSelfIo(() => {
+    const result: Record<string, boolean> = {}
+    for (const e of entries) result[e.name] = false
+    const dir = archiveDir()
+    if (!existsSync(dir) || entries.length === 0) return result
+    let files: string[] = []
+    try {
+      files = readdirSync(dir)
+    } catch {
+      // S9：目录存在但不可读（权限/损坏）——告警一次
+      warnUnreadable(dir)
+      return result
+    }
+    for (const e of entries) {
+      const esc = escapeName(e.name)
+      result[e.name] = files.some(f => matchesArchiveFile(f, esc, e.version))
+    }
+    return result
+  })
 }
 
 /** 提示消息（拦截/报警共用）：引用协议 skill，说明如何完成审查。 */

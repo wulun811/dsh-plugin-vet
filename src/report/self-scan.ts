@@ -30,10 +30,13 @@ import type { Finding, Severity, Verdict } from '../scanner/protocol.js'
 // ── ① 能力声明（vet 安全层自身声明的合法能力面）──────────────────────────────
 // 精确到具体 token；新增能力若不在清单内 → 不豁免。改这份声明 = 改字节 = 钉扎失效。
 
-/** 合法引用的内建模块（T1/T2 监视对象 + 宿主实现）。worker_threads/vm/cluster/inspector 不声明。 */
+/** 合法引用的内建模块（T1/T2 监视对象 + 宿主实现）。worker_threads/vm/cluster/inspector 不声明。
+ * round-4 review（M1）：补 'http2'——vet 的 runtime-guard 确实 import http2 并 patch 之
+ * （export 观测对象），是声明侧能力；此前不在声明集也不在禁区集，且子串 'http2' 会
+ * 误命中已声明的 'http' → vet 自身的 http2 触达被静默归入 declared（有界豁免名不副实）。 */
 export const DECLARED_MODULES = [
   'child_process', 'fs', 'fs/promises', 'path', 'os', 'crypto',
-  'http', 'https', 'url', 'module', 'net', 'tls', 'dgram',
+  'http', 'https', 'http2', 'url', 'module', 'net', 'tls', 'dgram',
 ] as const
 
 /** 出现即视为危险 IPC/动态执行原语（vet 不合法使用）——这些不是"未声明"，是明确禁区。 */
@@ -49,8 +52,10 @@ export const DECLARED_ENV = [
 ] as const
 
 /** 合法网络目标：仅回环 + 相对路径（向宿主要状态）+ osv.dev（OSV opt-in，仅发送依赖名/版本）。
- *  其它任何 host（外传端点/内网段/真实域名）出现 → 未声明，retain。 */
-export const DECLARED_HOSTS = ['localhost', '127.0.0.1', '::1', 'unix-socket', 'osv.dev'] as const
+ *  round-15 review：补 registry.npmjs.org —— vet 生产代码 registry-verify.ts 的固定对账源
+ *  （TLS + origin 钉死，仅官方包 mismatch 修复路径），此前不在声明列表 → 自扫保留成未声明
+ *  出站主机（误报 retained）。其它任何 host（外传端点/内网段/真实域名）出现 → 未声明，retain。 */
+export const DECLARED_HOSTS = ['localhost', '127.0.0.1', '::1', 'unix-socket', 'osv.dev', 'registry.npmjs.org'] as const
 
 /** 合法敏感路径段：vet 自身存储区域（homedir()/.dsh/vet）。凭据/密钥相关不声明。 */
 export const DECLARED_FS_SEGMENTS = ['.dsh', 'vet', 'cache', 'archive', 'stats', 'baseline'] as const
@@ -66,13 +71,21 @@ export const UNDECLARED_FS_SEGMENTS = [
 export const DECLARED_SPAWN = ['process.execPath', 'upstream-radar'] as const
 
 /** 检测数据集文件（按 basename 匹配）：命中即数据集自引用（规则数据/黑名单/诱饵/文案）。
- *  仅在 pinned-match 下豁免——否则按实名代码逐 token 判。 */
+ *  仅 pinned-match 下豁免——否则按实名代码逐 token 判。
+ *  round-4 review（M3 补漏）：此前清单只列了 rules/ 下 6 个文件，network-exfil.ts（Discord/
+ *  Telegram/Slack 外泄端点正则）、secrets.ts、host-capture.ts、destructive-ops.ts 等其余规则
+ *  文件漏列——vet 自扫命中这些规则文件里的真实样例端点时 critical finding 落入 declared 桶
+ *  （被当成「已声明能力面」），自扫卡片失真。现把 scanner-bin/rules/ 全部规则文件 + 网关
+ *  规则词表（gate.ts/registry-verify.ts 的封锁名单）纳入；注释承诺「rules/* 全量豁免」落实。 */
 export const DETECTION_DATA_FILES = [
+  // scanner-bin/rules/ 全部规则文件（检测规则数据 = 数据集自引用）
   'non-js-scripts', 'string-heuristics', 'dynamic-exec', 'capability',
-  'runtime-net', 'honeypot', 'i18n',
-  // round-12（R17/R18）：规则词表文件（config-scan/instruction-scan）——含 !!js/注入特征串
-  // 的自引用数据集；仅 pinned-match 下豁免（改字节即失效）
   'config-scan', 'instruction-scan', 'supply-chain',
+  'secrets', 'host-capture', 'destructive-ops', 'constructor-chain',
+  'process-direct', 'resource-safety', 'network-exfil', 'dynamic-targets',
+  'ctx-verbs', 'contract', 'typosquat',
+  // 规则词表/封锁名单
+  'runtime-net', 'honeypot', 'i18n',
 ] as const
 
 /** 开发夹具（test/spec 文件）：R13/R14 探测器实测样本（Discord/Telegram webhook、AWS 元数据、

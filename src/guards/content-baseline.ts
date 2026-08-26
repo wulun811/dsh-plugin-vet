@@ -56,15 +56,24 @@ const SNAPSHOT_BASELINE_DIR: string | undefined = (() => {
 
 let baselineDirOverride: string | undefined
 
-/** 基线文件路径：~/.dsh/vet/baseline.json（快照 env；测试用 setBaselineDirForTest 覆盖）。 */
+/** C3（第二轮补漏）：默认基线目录同样在模块加载时定值——homedir() 在 POSIX 优先 $HOME，
+ * 仅快照 env 不够：进程内插件改 process.env.HOME 后，未快照的默认回退仍会被重定向（与
+ * confirm-block/archive 同款纪律，覆盖 memory 面而非存储面）。 */
+const SNAPSHOT_DEFAULT_BASELINE_DIR = join(homedir(), '.dsh', 'vet')
+
+/** 基线文件路径：~/.dsh/vet/baseline.json（快照 env + homedir；测试用 setBaselineDirForTest 覆盖）。 */
 export function baselinePath(): string {
-  const dir = baselineDirOverride ?? SNAPSHOT_BASELINE_DIR ?? join(homedir(), '.dsh', 'vet')
+  const dir = baselineDirOverride ?? SNAPSHOT_BASELINE_DIR ?? SNAPSHOT_DEFAULT_BASELINE_DIR
   return join(dir, 'baseline.json')
 }
 
-/** 测试专用：覆盖快照目录（生产路径不调用）。 */
+/** 测试专用：覆盖快照目录（生产路径不调用）。
+ * round-5 review（B-A21）：切换目录同时失效模块级缓存——旧实现换目录后 getBaseline()
+ * 仍返回旧目录数据（与 stats.setStatsDirForTest / version-diff.setCapabilitiesDirForTest
+ * 的缓存失效语义不一致），测试结果错位且难排查。 */
 export function setBaselineDirForTest(dir?: string): void {
   baselineDirOverride = dir
+  baselineCache = undefined
 }
 
 /**
@@ -228,28 +237,33 @@ function hashOf(content: string): string {
 
 /**
  * 保存基线文件（原子写：临时文件 + rename）。
+ * round-16 review（S10）：返回是否成功——调用方（internal-plugin/scan-plugin）此前
+ * 收到静默 false，磁盘满/权限问题完全不可见且无人知晓；现在由调用方决定告警方式
+ * （黄色告警/日志）。失败时不做任何清理（tmp 残留无害，下次覆盖）。
  */
-export function saveBaseline(store: BaselineStore): void {
-  withVetSelfIo(() => {
+export function saveBaseline(store: BaselineStore): boolean {
+  return withVetSelfIo(() => {
     try {
       const path = baselinePath()
       const dir = dirname(path)
-      
+
       // 确保目录存在
       try {
         mkdirSync(dir, { recursive: true, mode: 0o700 })
       } catch {
         // 目录已存在
       }
-      
+
       // 原子写：临时文件 + rename
       const tmpPath = path + '.tmp.' + process.pid
       const serialized = JSON.stringify(store, null, 2)
       writeFileSync(tmpPath, serialized, { mode: 0o600 })
       renameSync(tmpPath, path)
       writtenBaselineHashes.set(path, hashOf(serialized))
+      return true
     } catch {
-      // 保存失败：静默忽略（下次启动会重新计算）
+      // 保存失败：返回 false，由调用方告警（不再静默）
+      return false
     }
   })
 }

@@ -44,7 +44,10 @@ function renderDiff(value: VersionDiffHistory): string {
     else lines.push('  （无新增能力）')
     if (removed.length > 0) lines.push('  移除能力（不报警，仅供审计）:', ...removed)
   }
-  if (value.note !== null) lines.push('  ' + value.note)
+  // round-4 review（L1）：note 键经 execute 的 `...(h.note !== null ? { note } : {})` 透传——
+  // 多记录（≥2 条）时 history 返回 note: null，execute 省略该键 → render 收到 undefined，
+  // `!== null` 判断穿透后输出字面 '  undefined' 尾行（vet_label 同款早已双守卫，此处漏）
+  if (value.note !== null && value.note !== undefined) lines.push('  ' + value.note)
   return lines.join('\n')
 }
 

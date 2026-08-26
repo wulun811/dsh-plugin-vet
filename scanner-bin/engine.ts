@@ -5,7 +5,7 @@
  */
 import { readFileSync, statSync } from 'node:fs'
 import { basename, dirname, join, sep } from 'node:path'
-import { createRequire } from 'node:module'
+import { createRequire, builtinModules } from 'node:module'
 import { parseSource } from './ast.js'
 import { extractCapabilities, aggregateCapabilities } from './capability.js'
 import { collectDecodedLiterals } from './decode.js'
@@ -23,6 +23,12 @@ import { queryOsv, type OsvVuln } from './osv.js'
 import type { CapabilityManifest, Finding, ScanReport, ScanRequest, ScanResponse } from './protocol.js'
 
 const SCANNABLE_EXT = new Set(['js', 'ts', 'mjs', 'cjs'])
+
+/** Node 内建模块集合（R16 幽灵依赖排除用）：代码里 import 'fs'/'path' 等裸内建
+ * 是 CJS 惯用写法，不是「引用了未声明的第三方包」——require('fs') 从不依赖
+ * package.json 的 dependencies（capability.ts packageName 已排除 node: 前缀，
+ * 裸内建名如 fs/path 会漏进来 → 每个传统 CJS 插件都误报 R16 幽灵依赖 info）。 */
+export const NODE_BUILTINS = new Set(builtinModules.map(m => m.split('/')[0]))
 
 /** 大文件预检上限（技术债偿还）：超过该大小的源码文件不做整文件 readFileSync——
  * 直接产出 R8-scan-skipped info（规则扫不到≠干净，但绝不让大文件把引擎内存打爆）。 */
@@ -207,10 +213,14 @@ function skipFinding(file: string): Finding {
   }
 }
 
-/** 大文件预检（round-12 供 R17/R18 分支复用）：整读前先 stat，超限即 R8-skip（不整读、不 OOM）。 */
+/** 大文件预检（round-12 供 R17/R18 分支复用）：整读前先 stat，超限即 R8-skip（不整读、不 OOM）。
+ * round-16 review（D3）：非常规文件（fifo/设备/socket）一律视为超限跳过——/dev/zero 等
+ * 无限流 readFileSync 无 EOF 会打爆扫描子进程内存、fifo 会挂死到宿主超时（size 恒 0 骗过
+ * 旧的大小预检）。 */
 function sizeWithinBudget(file: string): boolean {
   try {
-    return statSync(file).size <= PRE_FILE_SIZE_LIMIT
+    const st = statSync(file)
+    return st.isFile() && st.size <= PRE_FILE_SIZE_LIMIT
   } catch {
     return true // stat 失败（消失/不可读）→ 交给 readOrDefault 的空串兜底
   }
@@ -265,7 +275,10 @@ function scanFiles(request: ScanRequest): ScanResponse {
     request.files.map(file => {
       try {
         const st = statSync(file)
-        if (st.size > PRE_FILE_SIZE_LIMIT) return { path: file, content: 'vet-skipped:size=' + st.size }
+        // round-16 review（D3）：非常规文件（fifo/设备）在 cacheKey 阶段就跳读——
+        // 否则 readOrDefault 在缓存散列前就会 readFileSync 挂死/吸入无限流（size 恒 0
+        // 骗过大小预检；此阶段发生在 sizeWithinBudget 护栏之前）。
+        if (!st.isFile() || st.size > PRE_FILE_SIZE_LIMIT) return { path: file, content: 'vet-skipped:size=' + (st.isFile() ? st.size : 0) }
       } catch {
         // stat 失败 → 走 readOrDefault 的空串兜底
       }
@@ -299,6 +312,12 @@ function scanFiles(request: ScanRequest): ScanResponse {
     }
     // R10/R12: package.json manifests are JSON, not source; scan them directly.
     if (basename(file) === 'package.json') {
+      // round-15 review：package.json 同样可能被恶意构造为超大文件（多 GB 假清单）——
+      // 与 AST/R17/R18 同款 8MB 预检，避免 R10/R12/R19 分支全量读入打爆扫描子进程
+      if (!sizeWithinBudget(file)) {
+        findings.push(skipFinding(file))
+        continue
+      }
       const json = readOrDefault(file)
       if (json === '') continue
       if (request.rules?.['R10'] !== false) {
@@ -319,9 +338,15 @@ function scanFiles(request: ScanRequest): ScanResponse {
     // text scan for download-and-exec primitives — the AST rules do not see them.
     if (ext !== undefined && NON_JS_SCRIPT_EXT.has(ext)) {
       if (request.rules?.['R14'] !== false) {
-        const script = readOrDefault(file)
-        if (script !== '') {
-          findings.push(...runNonJsScript(script, basename(file), request.targetKind))
+        // round-15 review：R14 分支此前无 8MB 预检（AST/R17/R18 都有）——多 GB 的
+        // .sh/.ps1 恶意脚本会被整读进内存，正是 PRE_FILE_SIZE_LIMIT 要防的 OOM。
+        if (!sizeWithinBudget(file)) {
+          findings.push(skipFinding(file))
+        } else {
+          const script = readOrDefault(file)
+          if (script !== '') {
+            findings.push(...runNonJsScript(script, basename(file), request.targetKind))
+          }
         }
       }
       continue
@@ -358,9 +383,11 @@ function scanFiles(request: ScanRequest): ScanResponse {
     }
     if (ext === undefined || !SCANNABLE_EXT.has(ext)) continue
     // 大文件预检（技术债偿还）：readFileSync 前先 stat，超限即 R8-skip（不整读、不 OOM）
+    // round-16 review（D3）：非常规文件同判跳过（见 sizeWithinBudget 注释——/dev/zero 等
+    // 无限流/fifo 不能进 readOrDefault）
     try {
       const st = statSync(file)
-      if (st.size > PRE_FILE_SIZE_LIMIT) {
+      if (!st.isFile() || st.size > PRE_FILE_SIZE_LIMIT) {
         findings.push(skipFinding(file))
         continue
       }
@@ -395,7 +422,8 @@ function scanFiles(request: ScanRequest): ScanResponse {
   if (depsInfo !== null && request.rules?.['R16'] !== false) {
     const declaredSet = depsInfo.declared
     const ghost = capabilities.imports
-      .filter(i => !i.startsWith('@deepseek-ai/') && !declaredSet.includes(i))
+      // 内建排除按首段：import { x } from 'fs/promises' → 首段 'fs' 在内建集合内
+      .filter(i => !i.startsWith('@deepseek-ai/') && !NODE_BUILTINS.has(i.split('/')[0]) && !declaredSet.includes(i))
       .slice(0, R16_DEP_CAP)
     const installed = depsInfo.installed
     const zombie = installed === null
