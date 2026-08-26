@@ -13,9 +13,10 @@ const { hashScanFiles, pinStateFor, loadSelfPins } = await import('../lib/report
 
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
 const version = pkg.version
-// 扫描集 = vet 本体自扫权威范围（src/report/self-scope.ts），与工具/钉扎一致。
-import { listSelfSourceFiles } from '../lib/report/self-scope.js'
-const files = listSelfSourceFiles(ROOT)
+// 扫描集 = vet 本体自扫权威范围（src/report/self-scope.ts listShippedFiles：发布物），
+// 与工具/钉扎一致（round-16 决策 2：发布物范围，生产安装自扫同样 pinned-match）。
+import { listShippedFiles } from '../lib/report/self-scope.js'
+const files = listShippedFiles(ROOT)
 const resp = await scan({ kind: 'files', files, targetKind: 'generic', runtime: 'host' }, { timeoutMs: 60000 })
 if (!resp.ok || resp.report === undefined) {
   console.error('vet: 本体自扫失败：', resp.error ?? 'unknown')

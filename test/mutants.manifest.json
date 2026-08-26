@@ -1,0 +1,288 @@
+{
+  "$comment": "变异语料权威登记表——击杀率门禁（scripts/mutant-score.mjs --gate）的唯一基线。恶意 mutants 必须全杀（任一 expect.rules 命中即击杀）；良性 controls 必须干净（verdict=clean）。新增逃逸形态 = 加条目 + 加语料文件；仅运行时层（T2）在拦的形态标 layer=runtime，静态 gate 跳过、报告单列。击杀判据用规则命中而非 verdict：多数 R 规则 severity 不升级 verdict（如 R19 恒 info、间接 require medium、R5/R9-2/R17/R18 均 clean+观测）。所有条目的 expect.rules 均经 engine 实证后登记，禁止拍脑袋写预期。",
+  "mutants": [
+    {
+      "id": "M01",
+      "name": "构造器链逃逸（宿主闭包）",
+      "evasion": "constructor-chain",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/escape-dynamic-plugin.fixture.js"],
+      "expect": { "rules": ["R1"] },
+      "origin": "沙箱逃生对抗面"
+    },
+    {
+      "id": "M02",
+      "name": "run_code 宿主域 process 直访",
+      "evasion": "process-direct",
+      "layer": "static",
+      "kind": "code",
+      "language": "ts",
+      "runtime": "host",
+      "refs": ["test/fixtures/escape-run-code.ts"],
+      "expect": { "rules": ["R3"] },
+      "origin": "run_code 宿主 AsyncFunction 逃生面（files 模式仅 info，须 code 模式评测）"
+    },
+    {
+      "id": "M03",
+      "name": "workflow agent 构造器链",
+      "evasion": "constructor-chain",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/escape-workflow.fixture.js"],
+      "expect": { "rules": ["R1"] },
+      "origin": "workflow 沙箱逃生对抗面"
+    },
+    {
+      "id": "M04",
+      "name": "字符串拼接混淆逃逸",
+      "evasion": "obfuscation",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/obfuscated-concat.fixture.js"],
+      "expect": { "rules": ["R1"] },
+      "origin": "R1 静态求值对抗面"
+    },
+    {
+      "id": "M05",
+      "name": "硬编码凭据",
+      "evasion": "secret",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/secret-in-plugin.fixture.js"],
+      "expect": { "rules": ["R7"] },
+      "origin": "凭据泄漏面"
+    },
+    {
+      "id": "M06",
+      "name": "间接 require 绕直接匹配",
+      "evasion": "indirect-require",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/indirect-require.fixture.js"],
+      "expect": { "rules": ["R2"] },
+      "origin": "round-5 对抗面：变量间接装载危险模块"
+    },
+    {
+      "id": "M07",
+      "name": "多文件恶意包（良性入口 + 逃逸 helper）",
+      "evasion": "multi-file",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/malicious-pkg/index.js", "test/fixtures/malicious-pkg/helper.js"],
+      "expect": { "rules": ["R1"] },
+      "origin": "鸡尾酒包形态：入口干净、内部逃逸"
+    },
+    {
+      "id": "M08",
+      "name": "全角 scope 仿冒官方包名",
+      "evasion": "typosquat",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/typosquat-fullwidth/package.json"],
+      "expect": { "rules": ["R19"] },
+      "origin": "R19 对抗面：NFKC 全角化 @deepseek-ai/dshh（编辑距离 1）"
+    },
+    {
+      "id": "M09",
+      "name": "动态执行原语 eval",
+      "evasion": "dynamic-exec",
+      "layer": "static",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/dynamic-exec.js"],
+      "expect": { "rules": ["R2"] },
+      "origin": "动态执行基础形态"
+    },
+    {
+      "id": "M10",
+      "name": "new Function 含逃逸串",
+      "evasion": "dynamic-exec",
+      "layer": "static",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/escape-new-function.js"],
+      "expect": { "rules": ["R2"] },
+      "origin": "Function 构造器动态执行面"
+    },
+    {
+      "id": "M11",
+      "name": "node:vm 跨界执行",
+      "evasion": "dynamic-exec",
+      "layer": "static",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/escape-vm-runincontext.js"],
+      "expect": { "rules": ["R2"] },
+      "origin": "vm.runInContext 沙箱执行面"
+    },
+    {
+      "id": "M12",
+      "name": "charCode 还原 + eval 组合证据",
+      "evasion": "obfuscation",
+      "layer": "static",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/obfuscated-charcode-eval.js"],
+      "expect": { "rules": ["R2", "R6"] },
+      "origin": "组合证据面：独立 charCode 不报（C03），与执行原语组合才报"
+    },
+    {
+      "id": "M13",
+      "name": "fork 炸弹",
+      "evasion": "resource-exhaustion",
+      "layer": "static",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/fork-bomb.js"],
+      "expect": { "rules": ["R9"] },
+      "origin": "资源安全面：无出口 spawn 循环"
+    },
+    {
+      "id": "M14",
+      "name": "ReDoS 嵌套量词",
+      "evasion": "resource-exhaustion",
+      "layer": "static",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/redos-nested.js"],
+      "expect": { "rules": ["R9"] },
+      "origin": "R9-2 观测档：verdict clean 但 R9 命中（判据=规则的活样本）"
+    },
+    {
+      "id": "M15",
+      "name": "删除敏感路径 /etc/passwd",
+      "evasion": "destructive-op",
+      "layer": "static",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/destroy-unlink.fixture.js"],
+      "expect": { "rules": ["R11"] },
+      "origin": "破坏性行为面：敏感路径 unlink"
+    },
+    {
+      "id": "M16",
+      "name": "写入敏感路径 /etc/hosts",
+      "evasion": "destructive-op",
+      "layer": "static",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/destroy-write.fixture.js"],
+      "expect": { "rules": ["R11"] },
+      "origin": "破坏性行为面：系统配置篡改（hosts 劫持形态）"
+    },
+    {
+      "id": "M17",
+      "name": "未声明服务挂载 ctx.plugin",
+      "evasion": "ctx-escape",
+      "layer": "static",
+      "kind": "code",
+      "language": "js",
+      "runtime": "sandbox",
+      "refs": ["test/fixtures/ctx-plugin-undeclared.js"],
+      "expect": { "rules": ["R5"] },
+      "origin": "ctx 服务面：withheld 观测，verdict 不升级"
+    },
+    {
+      "id": "M18",
+      "name": "Discord webhook 外传端点",
+      "evasion": "network-exfil",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/exfil-discord-webhook.fixture.js"],
+      "expect": { "rules": ["R13"] },
+      "origin": "硬编码外联 sink：消息平台 webhook 数据外泄通道"
+    },
+    {
+      "id": "M19",
+      "name": "云元数据端点探测",
+      "evasion": "network-exfil",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/exfil-cloud-metadata.fixture.js"],
+      "expect": { "rules": ["R13"] },
+      "origin": "IAM 凭据外泄面：169.254.169.254 元数据端点"
+    },
+    {
+      "id": "M20",
+      "name": "AGENTS.md 指令注入（G-1 形态）",
+      "evasion": "instruction-injection",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/instruction-inject/AGENTS.md"],
+      "expect": { "rules": ["R18"] },
+      "origin": "指令改写 + 外联组合；本语料曾在代理会话中被实时加载触发注入尝试（已加显式语料标注，不影响命中）"
+    },
+    {
+      "id": "M21",
+      "name": "cordis.patch.yml !!js 注入",
+      "evasion": "config-injection",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/config-patch-yml/cordis.patch.yml"],
+      "expect": { "rules": ["R17"] },
+      "origin": "配置面：yaml !!js/function 标签 = patch 装载期代码执行"
+    },
+    {
+      "id": "M22",
+      "name": "postinstall 供应链钩子",
+      "evasion": "supply-chain",
+      "layer": "static",
+      "kind": "files",
+      "refs": ["test/fixtures/pkg-install-hooks/package.json", "test/fixtures/pkg-install-hooks/index.js"],
+      "expect": { "rules": ["R10"] },
+      "origin": "npm postinstall 经典供应链攻击面：安装期 curl|sh，插件代码本身干净"
+    }
+  ],
+  "controls": [
+    {
+      "id": "C01",
+      "name": "良性工具插件",
+      "kind": "files",
+      "refs": ["test/fixtures/clean-plugin.ts"],
+      "expect": { "verdict": "clean" }
+    },
+    {
+      "id": "C02",
+      "name": "参数遮蔽 process（合法）",
+      "kind": "files",
+      "refs": ["test/fixtures/shadowed-process.js"],
+      "expect": { "verdict": "clean" }
+    },
+    {
+      "id": "C03",
+      "name": "独立 charCode 还原（合法编码场景）",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/control-charcode.js"],
+      "expect": { "verdict": "clean" }
+    },
+    {
+      "id": "C04",
+      "name": "异步常驻服务循环（合法后台服务）",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/control-async-service.js"],
+      "expect": { "verdict": "clean" }
+    },
+    {
+      "id": "C05",
+      "name": "有条件递归（合法算法形态）",
+      "kind": "code",
+      "language": "js",
+      "runtime": "host",
+      "refs": ["test/fixtures/control-cond-recursion.js"],
+      "expect": { "verdict": "clean" }
+    }
+  ]
+}

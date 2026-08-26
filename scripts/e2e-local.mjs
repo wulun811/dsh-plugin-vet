@@ -33,8 +33,8 @@ console.log(`e2e: profile=${profile} DEEPSEEK_API_KEY=${HAS_KEY ? 'present' : 'a
 // ---- 1) scanner 对 3 个正例 fixture 返回 critical（无 key 也可跑） ----
 // 正例按各自 runtime 语义扫描：workflow/动态插件 → sandbox；run_code → host（R3 分级）
 for (const [fixture, lang, runtime] of [
-  ['escape-workflow.js', 'js', 'sandbox'],
-  ['escape-dynamic-plugin.js', 'js', 'sandbox'],
+  ['escape-workflow.fixture.js', 'js', 'sandbox'],
+  ['escape-dynamic-plugin.fixture.js', 'js', 'sandbox'],
   ['escape-run-code.ts', 'ts', 'host'],
 ]) {
   const code = readFileSync(join(FIX, fixture), 'utf8')
