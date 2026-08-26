@@ -94,9 +94,13 @@ const SNAPSHOT_BASELINE_DIR: string | undefined = (() => {
 
 let baselineDirOverride: string | undefined
 
-/** 存储文件路径：~/.dsh/vet/capabilities.json（快照 env；测试可用 setCapabilitiesDirForTest 覆盖）。 */
+/** C3（第二轮补漏）：默认目录在模块加载时定值——homedir() 随 $HOME 变，运行时回退可被
+ * 进程内插件改 env 重定向（伪造 capabilities.json 预植 N6 基线）。与 archive.ts 同款纪律。 */
+const SNAPSHOT_DEFAULT_DIR = join(homedir(), '.dsh', 'vet')
+
+/** 存储文件路径：~/.dsh/vet/capabilities.json（快照 env + homedir；测试可用 setCapabilitiesDirForTest 覆盖）。 */
 export function capabilitiesPath(): string {
-  const dir = baselineDirOverride ?? SNAPSHOT_BASELINE_DIR ?? join(homedir(), '.dsh', 'vet')
+  const dir = baselineDirOverride ?? SNAPSHOT_BASELINE_DIR ?? SNAPSHOT_DEFAULT_DIR
   return join(dir, 'capabilities.json')
 }
 
@@ -111,7 +115,10 @@ export function setCapabilitiesDirForTest(dir?: string): void {
 const writtenStoreHashes = new Map<string, string>()
 let storeTampered = false
 
-/** 加载存储；文件不存在/损坏 → 空存储。文件被外部（非 vet 自写）改写 → 置篡改标志（可消费）。 */
+/** 加载存储；文件不存在/损坏 → 空存储。文件被外部（非 vet 自写）改写 → 置篡改标志（可消费）。
+ * 说明：单条记录损坏（capabilities 缺/非对象，如旧布局残留/手工编辑）**不在此丢弃**——
+ * 保留以便 M7 篡改标志可观测；但对账层（diffManifests）有形状守卫：损坏记录不再让
+ * recordScan/history/label 抛 TypeError 整包静默（round-4 review H2，守卫见 diffManifests）。 */
 export function loadCapabilities(): CapabilityStore {
   return withVetSelfIo(() => {
     try {
@@ -121,7 +128,7 @@ export function loadCapabilities(): CapabilityStore {
       if (recorded !== undefined && sha256Of(content) !== recorded) storeTampered = true
       const parsed = JSON.parse(content) as { records?: Record<string, CapabilityRecord> }
       if (parsed.records !== undefined && typeof parsed.records === 'object') {
-        return { records: parsed.records }
+        return { records: parsed.records as Record<string, CapabilityRecord> }
       }
       return { records: {} }
     } catch {
@@ -165,7 +172,8 @@ export function saveCapabilities(store: CapabilityStore): void {
   })
 }
 
-/** LRU 清理：按 recordedAt 降序保留最近 maxKept 个记录，超出部分删除。 */
+/** LRU 清理：按 recordedAt 降序保留最近 maxKept 个记录，超出部分删除。
+ * round-15：recordedAt 非有限值的损坏记录排到最末直接淘汰（NaN 比较恒 false）。 */
 export function pruneCapabilities(store: CapabilityStore, maxKept = VERSION_DIFF_MAX_KEPT): void {
   if (maxKept <= 0) {
     store.records = {}
@@ -173,18 +181,24 @@ export function pruneCapabilities(store: CapabilityStore, maxKept = VERSION_DIFF
   }
   const entries = Object.entries(store.records)
   if (entries.length <= maxKept) return
-  entries.sort((a, b) => b[1].recordedAt - a[1].recordedAt)
+  entries.sort((a, b) => {
+    const ar = Number.isFinite(a[1].recordedAt) ? a[1].recordedAt : -Infinity
+    const br = Number.isFinite(b[1].recordedAt) ? b[1].recordedAt : -Infinity
+    return br - ar
+  })
   const keptKeys = new Set(entries.slice(0, maxKept).map(e => e[0]))
   for (const key of entries.map(e => e[0])) {
     if (!keptKeys.has(key)) delete store.records[key]
   }
 }
 
-/** 上一个版本：同名、异版、recordedAt 最大者（不引入 semver 解析，规划 v2）。 */
+/** 上一个版本：同名、异版、recordedAt 最大者（不引入 semver 解析，规划 v2）。
+ * round-15：recordedAt 非有限值的损坏记录不参与（否则 NaN 比较恒 false，排序任意）。 */
 export function findPreviousRecord(store: CapabilityStore, name: string, version: string): CapabilityRecord | null {
   let best: CapabilityRecord | null = null
   for (const record of Object.values(store.records)) {
     if (record.name !== name || record.version === version) continue
+    if (!Number.isFinite(record.recordedAt)) continue
     // >=：同毫秒记录的 tie-break 取后插入者（object key 保持插入序，确定性）
     if (best === null || record.recordedAt >= best.recordedAt) best = record
   }
@@ -217,8 +231,19 @@ function arrayDelta(prev: string[], next: string[]): { added: string[]; removed:
   return { added: next.filter(x => !p.has(x)), removed: prev.filter(x => !n.has(x)) }
 }
 
-/** 两份清单的差分（added/removed；布尔字段 = 是否新增/移除该能力）。 */
+const emptyDelta = (): ManifestDelta => ({
+  hosts: [], fsPaths: [], spawnCmds: [], imports: [], ghostDeps: [], zombieDeps: [],
+  hasNetwork: false, hasExec: false,
+})
+
+/** 两份清单的差分（added/removed；布尔字段 = 是否新增/移除该能力）。
+ * round-4 review（H2）：prev/next 非对象（损坏记录/旧布局残留）时返回空差分而非抛
+ * TypeError——记录损坏不再是「该包差分永久静默且无提示」的隐形失效（此前 recordScan
+ * catch 吞掉 + history/label 也整体报「存储不可读」）；损坏段按无变化处理，不瘫痪对账。 */
 export function diffManifests(prev: CapabilityManifest, next: CapabilityManifest): { added: ManifestDelta; removed: ManifestDelta } {
+  if (typeof prev !== 'object' || prev === null || typeof next !== 'object' || next === null) {
+    return { added: emptyDelta(), removed: emptyDelta() }
+  }
   const hosts = arrayDelta(prev.hosts ?? [], next.hosts ?? [])
   const fsPaths = arrayDelta(prev.fsPaths ?? [], next.fsPaths ?? [])
   const spawnCmds = arrayDelta(prev.spawnCmds ?? [], next.spawnCmds ?? [])
@@ -300,10 +325,10 @@ export function recordScan(
     try {
       const store = loadCapabilities()
       const prev = findPreviousRecord(store, plugin, version)
-      const key = plugin + '@' + version
-      store.records[key] = { name: plugin, version, recordedAt: Date.now(), capabilities: manifest }
-      pruneCapabilities(store)
-      saveCapabilities(store)
+      // round-4 review（H2）：差分必须在写盘之前完成——旧实现先写 store 再 diff，
+      // diff 抛错时 catch 返回 no-op，但新记录已落盘（「no-op = 不写存储」的语义被破坏，
+      // 且坏数据已固化）。先算差分（纯内存），成功后才写盘；diff 抛错 → 不写、返回 noop。
+      let outcome: VersionDiffOutcome
       if (prev === null) {
         // 冷启动：只记录；exec + network 双高组合给一条提示，不完全静默
         // 0.1.20：upgrade-cold 联审计——已有审计档案则不报（用户审查行为有可见回报）
@@ -315,24 +340,33 @@ export function recordScan(
                 message: '新安装插件 ' + plugin + '@' + version + ' 声明 执行+网络 双高能力（首次记录，无旧版本可差分）——建议审查其能力面（N6 冷启动提示）',
               }
             : null
-        return { plugin, from: null, to: version, added: null, removed: null, severity: alarm?.severity ?? null, alarm }
+        outcome = { plugin, from: null, to: version, added: null, removed: null, severity: alarm?.severity ?? null, alarm }
+      } else {
+        const { added, removed } = diffManifests(prev.capabilities, manifest)
+        const alarm = buildUpgradeAlarm(plugin, prev.version, version, added)
+        outcome = { plugin, from: prev.version, to: version, added, removed, severity: alarm?.severity ?? null, alarm }
       }
-      const { added, removed } = diffManifests(prev.capabilities, manifest)
-      const alarm = buildUpgradeAlarm(plugin, prev.version, version, added)
-      return { plugin, from: prev.version, to: version, added, removed, severity: alarm?.severity ?? null, alarm }
+      const key = plugin + '@' + version
+      store.records[key] = { name: plugin, version, recordedAt: Date.now(), capabilities: manifest }
+      pruneCapabilities(store)
+      saveCapabilities(store)
+      return outcome
     } catch {
       return noop
     }
   })
 }
 
-/** 某包的全部版本历史 + 最近两版差分（vet_diff 工具数据源；只读，不写存储）。 */
+/** 某包的全部版本历史 + 最近两版差分（vet_diff 工具数据源；只读，不写存储）。
+ * round-15 review（corrupt recordedAt）：旧存储里的损坏记录（recordedAt 非有限值）
+ * 会让排序产出任意「上一个版本」与假差分——shape 校验按「设计保留」损坏记录，这里
+ * 在排序前过滤非有限值（NaN/Infinity 一律丢弃，不参与历史/差分）。 */
 export function history(pkg: string): VersionDiffHistory {
   return withVetSelfIo(() => {
     try {
       const store = loadCapabilities()
       const records = Object.values(store.records)
-        .filter(r => r.name === pkg)
+        .filter(r => r.name === pkg && Number.isFinite(r.recordedAt))
         .sort((a, b) => a.recordedAt - b.recordedAt)
       const versions = records.map(r => ({ version: r.version, recordedAt: r.recordedAt }))
       if (records.length === 0) {
@@ -377,8 +411,9 @@ export function label(pkg: string): CapabilityLabel {
   return withVetSelfIo(() => {
     try {
       const store = loadCapabilities()
+      // round-15：recordedAt 非有限值过滤（与 history 同款——损坏记录不参与排序/判定）
       const records = Object.values(store.records)
-        .filter(r => r.name === pkg)
+        .filter(r => r.name === pkg && Number.isFinite(r.recordedAt))
         .sort((a, b) => a.recordedAt - b.recordedAt)
       const versions = records.map(r => ({ version: r.version, recordedAt: r.recordedAt }))
       if (records.length === 0) {
