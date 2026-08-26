@@ -9,7 +9,7 @@ import { setCapabilitiesDirForTest, capabilitiesPath } from '../lib/guard/versio
 import type { ScanRequest } from '../lib/scanner-bin/protocol.js'
 
 const FIX = join(import.meta.dirname, 'fixtures')
-const secretFixture = join(FIX, 'secret-in-plugin.js')
+const secretFixture = join(FIX, 'secret-in-plugin.fixture.js')
 
 describe('0.1.16 加固——缓存反投毒与 env 快照（C3）', () => {
   describe('缓存 nonce 校验', () => {

@@ -6,6 +6,11 @@ import { tmpdir } from 'node:os'
 // Mock scan and buildRequest before importing gate
 vi.mock('../src/scanner/client.js', () => ({
   scan: vi.fn(),
+  // round-5（B-A5）：gate 的预算已收敛到 scanBudget 单源——mock 补真实实现
+  scanBudget: (files: number, explicitMs?: number, capMs?: number) => {
+    const base = explicitMs !== undefined && Number.isFinite(explicitMs) && explicitMs > 0 ? explicitMs : 15_000
+    return Math.min(Math.max(base, files * 2000), capMs ?? 60_000)
+  },
 }))
 
 vi.mock('../src/tools/scan-plugin.js', () => ({

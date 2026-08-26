@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { Context } from '@deepseek-ai/cordis'
 import * as vetPlugin from '../lib/index.js'
 import { apply } from '../lib/index.js'
@@ -13,7 +14,10 @@ import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
 import { resolvePackageRoot } from '../lib/scanner/package-sources.js'
 import { VetConfigSchema } from '../lib/config.js'
 import { VetStatus } from '../lib/guard/status.js'
-import { setArchiveDirForTest } from '../lib/audit/archive.js'
+import { setArchiveDirForTest, hasAuditRecord, setArchiveIoWarn } from '../lib/audit/archive.js'
+import { setBaselineDirForTest } from '../lib/guards/content-baseline.js'
+import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
+import { setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
 import type { VetConfig } from '../lib/config.js'
 import { explainScore, renderScorecard } from '../lib/report/render.js'
 
@@ -150,6 +154,56 @@ describe('scan_plugin tool', () => {
     })
     expect(text).toContain('verdict: clean')
   })
+
+  it('D3：file target 定界——拒绝相对路径/不存在/目录/设备/FIFO/符号链接', async () => {
+    const tool = createScanPluginTool()
+    const exec = fakeExec('scan_plugin', {}) as never
+    await expect(tool.execute({ target: 'file', source: 'relative/x.js' }, exec)).rejects.toThrow(/绝对路径/)
+    await expect(tool.execute({ target: 'file', source: '/definitely/not/exists-xyz.js' }, exec)).rejects.toThrow(/不存在/)
+    if (process.platform !== 'win32') {
+      // /dev/null 是 Linux 设备文件（Windows 上不存在 → 走"不存在"分支，语义不同）
+      await expect(tool.execute({ target: 'file', source: '/dev/null' }, exec)).rejects.toThrow(/常规文件/)
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'vet-filetarget-'))
+    try {
+      await expect(tool.execute({ target: 'file', source: dir }, exec)).rejects.toThrow(/常规文件/)
+      writeFileSync(join(dir, 'linked.js'), CLEAN)
+      // 符号链接 → 拒绝（与扫描面 walk 纪律一致）
+      if (process.platform !== 'win32') {
+        const outside = join(dir, '..', 'vet-filetarget-outside-' + Date.now() + '.js')
+        writeFileSync(outside, CLEAN)
+        try {
+          symlinkSync(outside, join(dir, 'link.js'))
+          await expect(tool.execute({ target: 'file', source: join(dir, 'link.js') }, exec)).rejects.toThrow(/常规文件/)
+        } finally {
+          rmSync(outside, { force: true })
+        }
+      }
+      // FIFO（Linux）→ 拒绝（/dev/zero 同族：无限流/挂死面）
+      if (process.platform === 'linux') {
+        const fifo = join(dir, 'fifo.js')
+        const mr = spawnSync('mkfifo', [fifo])
+        if (mr.status === 0) {
+          await expect(tool.execute({ target: 'file', source: fifo }, exec)).rejects.toThrow(/常规文件/)
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('D3：file target 常规文件照常扫描（插件形态识别 + 严重度正常）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-filetarget2-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'evil-file', dependencies: { '@deepseek-ai/cordis': '^4' } }))
+      writeFileSync(join(dir, 'evil.js'), ESCAPE)
+      const tool = createScanPluginTool()
+      const value = await tool.execute({ target: 'file', source: join(dir, 'evil.js') }, fakeExec('scan_plugin', {}) as never)
+      expect(value.static.verdict).toBe('critical')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('tools/execute guard', () => {
@@ -198,6 +252,31 @@ describe('tools/execute guard', () => {
     const result = await handler(fakeExec('workflow', { script: ESCAPE, meta: { name: 'w' } }), next)
     expect(result.isError).toBe(true)
   })
+
+  it('S8：cordis_run 现行 schema 无 code 载荷 → 透传（守卫位 dormant，零误报）', async () => {
+    const { handler } = install(cfg())
+    const next = vi.fn(async () => okResult)
+    const result = await handler(fakeExec('cordis_run', { pluginId: '@deepseek-ai/some-plugin', mode: 'run' }), next)
+    expect(next).toHaveBeenCalled()
+    expect(result.content[0].text).toBe('OK')
+  })
+
+  it('S8：cordis_run 未来 schema 携带 code 形载荷 → 立即进扫描面（tripwire）', async () => {
+    const { handler } = install(cfg())
+    const next = vi.fn(async () => okResult)
+    const result = await handler(fakeExec('cordis_run', { pluginId: '@deepseek-ai/some-plugin', code: ESCAPE }), next)
+    expect(next).toHaveBeenCalled()
+    expect(result.content[0].text).toMatch(/^VET cordis_run: critical/)
+  })
+
+  it('S8：cordis_run tripwire deny 模式 → 拦截', async () => {
+    const { handler } = install(cfg({ mode: 'deny', denyOn: 'critical' }))
+    const next = vi.fn(async () => okResult)
+    const result = await handler(fakeExec('cordis_run', { source: ESCAPE }), next)
+    expect(next).not.toHaveBeenCalled()
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/^VET BLOCKED/)
+  })
 })
 
 describe('internal/plugin guard', () => {
@@ -214,13 +293,91 @@ describe('internal/plugin guard', () => {
     expect(ctx.logger.info).not.toHaveBeenCalled()
   })
 
-  it('自身与 @deepseek-ai/* 豁免', () => {
+  it('自身与 @deepseek-ai/* 豁免（内容基线关闭 = 用户显式选择 → 完全跳过）', () => {
     const ctx = new FakeCtx()
-    installInternalPluginGuard(ctx as never, cfg())
+    installInternalPluginGuard(ctx as never, cfg({ contentBaseline: false }))
     const h = ctx.handlers.get('internal/plugin')![0]
     h(fiber({ entry: { options: { name: PACKAGE_NAME } } }))
     h(fiber({ entry: { options: { name: '@deepseek-ai/dsh-tools' } } }))
     expect(ctx.logger.info).not.toHaveBeenCalled()
+  })
+
+  it('决策 1：官方包 first-seen/match 也跑静态扫描，仅豁免 deny 升级（critical 不拦截）', async () => {
+    const profile = mkdtempSync(join(tmpdir(), 'vet-official-'))
+    const bdir = mkdtempSync(join(tmpdir(), 'vet-bl-'))
+    const pkg = join(profile, 'node_modules', '@deepseek-ai', 'evil-official')
+    mkdirSync(pkg, { recursive: true })
+    writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/evil-official', version: '1.0.0', main: 'index.js' }))
+    writeFileSync(join(pkg, 'index.js'), 'module.exports = ' + ESCAPE)
+    setBaselineDirForTest(join(bdir, 'baseline'))
+    try {
+      const ctx = new FakeCtx()
+      ctx.baseUrl = profile
+      const status = new VetStatus()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'deny', denyOn: 'critical', contentBaseline: true }), status)
+      const h = ctx.handlers.get('internal/plugin')![0]
+      // first-seen：扫描跑（info 留档）但 deny 升级豁免（TOFU 窗口修复：扫描是唯一能识别
+      // 冒名 tarball 的确定性检查；官方信任锚不因静态 verdict 拦截）
+      const f = fiber({ entry: { options: { name: '@deepseek-ai/evil-official' } } })
+      expect(() => h(f)).not.toThrow()
+      expect(f.dispose).not.toHaveBeenCalled()
+      expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining('auto-scan @deepseek-ai/evil-official'))
+      // match（内容一致）：同样扫描、同样不拦截
+      ctx.logger.info.mockClear()
+      const f2 = fiber({ entry: { options: { name: '@deepseek-ai/evil-official' } } })
+      expect(() => h(f2)).not.toThrow()
+      expect(f2.dispose).not.toHaveBeenCalled()
+      expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining('auto-scan @deepseek-ai/evil-official'))
+    } finally {
+      setBaselineDirForTest(undefined)
+      rmSync(profile, { recursive: true, force: true })
+      rmSync(bdir, { recursive: true, force: true })
+    }
+  })
+
+  it('S10：官方包基线落盘失败 → yellow baseline-save-fail（不再静默）', async () => {
+    const profile = mkdtempSync(join(tmpdir(), 'vet-official2-'))
+    const bdir = mkdtempSync(join(tmpdir(), 'vet-blfile-'))
+    const blocker = join(bdir, 'not-a-dir')
+    writeFileSync(blocker, 'file') // baselinePath 指向此文件路径 → mkdirSync 失败 → save 失败
+    const pkg = join(profile, 'node_modules', '@deepseek-ai', 'official-x')
+    mkdirSync(pkg, { recursive: true })
+    writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/official-x', version: '1.0.0', main: 'index.js' }))
+    writeFileSync(join(pkg, 'index.js'), 'module.exports = 1')
+    setBaselineDirForTest(blocker)
+    try {
+      const ctx = new FakeCtx()
+      ctx.baseUrl = profile
+      const status = new VetStatus()
+      installInternalPluginGuard(ctx as never, cfg({ contentBaseline: true }), status)
+      const h = ctx.handlers.get('internal/plugin')![0]
+      await h(fiber({ entry: { options: { name: '@deepseek-ai/official-x' } } }))
+      const kinds = status.snapshot().alarms.map(a => a.kind)
+      expect(kinds).toContain('baseline-save-fail')
+    } finally {
+      setBaselineDirForTest(undefined)
+      rmSync(profile, { recursive: true, force: true })
+      rmSync(bdir, { recursive: true, force: true })
+    }
+  })
+
+  it('S9：档案目录不可读 → 一次性 warn + 按无档案判定', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-archive-warn-'))
+    const blockerFile = join(dir, 'not-a-dir')
+    writeFileSync(blockerFile, 'x')
+    const warns: string[] = []
+    setArchiveIoWarn((m) => warns.push(m))
+    setArchiveDirForTest(blockerFile)
+    try {
+      expect(hasAuditRecord('some-pkg')).toBe(false)
+      expect(hasAuditRecord('some-pkg')).toBe(false) // 第二次不重复告警
+      expect(warns.length).toBe(1)
+      expect(warns[0]).toContain('不可读')
+    } finally {
+      setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+      setArchiveIoWarn(undefined)
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('report 模式：第三方包自动扫描 → logger.info（异步，P0-4 不再同步阻塞）', async () => {
@@ -336,6 +493,46 @@ describe('internal/plugin guard', () => {
       expect(() => h(f2)).not.toThrow()
     } finally {
       setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+    }
+  })
+
+  it('round-17：官方包（first-seen/match）不进 requireAudit 门槛——不报 audit-required（回归：官方包告警风暴）', async () => {
+    const profile = mkdtempSync(join(tmpdir(), 'vet-official3-'))
+    const bdir = mkdtempSync(join(tmpdir(), 'vet-bl3-'))
+    const pkg = join(profile, 'node_modules', '@deepseek-ai', 'ok-official')
+    mkdirSync(pkg, { recursive: true })
+    writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/ok-official', version: '1.0.0', main: 'index.js' }))
+    writeFileSync(join(pkg, 'index.js'), 'module.exports = 1')
+    setBaselineDirForTest(join(bdir, 'baseline'))
+    setArchiveDirForTest(join(bdir, 'audits')) // 空档案目录：第三方必经门槛
+    setSummariesDirForTest(join(bdir, 'summaries')) // 扫描留档改 tmp，不污染真实 ~/.dsh/vet
+    setCapabilitiesDirForTest(join(bdir, 'caps'))
+    try {
+      const ctx = new FakeCtx()
+      ctx.baseUrl = profile
+      const status = new VetStatus()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'report', requireAudit: true, contentBaseline: true }), status)
+      const h = ctx.handlers.get('internal/plugin')![0]
+      // first-seen：无档案也不报 audit-required（官方包门槛 = 内容哈希基线 + 静态扫描，非人工档案）
+      const f = fiber({ entry: { options: { name: '@deepseek-ai/ok-official' } } })
+      const p = h(f)
+      await p // 等 report 异步扫描收尾（留档走 tmp 目录）
+      expect(ctx.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
+      // match（内容一致，二次加载）：同样不报
+      await h(fiber({ entry: { options: { name: '@deepseek-ai/ok-official' } } }))
+      expect(ctx.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
+      expect(status.snapshot().alarms.map(a => a.kind)).not.toContain('audit-required')
+      // 对照：第三方名（resolve 不到根 → not-official）同配置下仍被门槛命中
+      expect(() => h(fiber({ entry: { options: { name: '@vet-test/needs-audit' } } }))).not.toThrow()
+      expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
+      expect(status.snapshot().alarms.map(a => a.kind)).toContain('audit-required')
+    } finally {
+      setBaselineDirForTest(undefined)
+      setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+      setSummariesDirForTest(undefined)
+      setCapabilitiesDirForTest(undefined)
+      rmSync(profile, { recursive: true, force: true })
+      rmSync(bdir, { recursive: true, force: true })
     }
   })
 })

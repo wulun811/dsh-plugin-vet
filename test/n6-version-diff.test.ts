@@ -19,6 +19,7 @@ import {
   type VersionDiffOutcome,
   setCapabilitiesDirForTest,
 } from '../lib/guard/version-diff.js'
+import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { VetStatus } from '../lib/guard/status.js'
 
@@ -46,10 +47,15 @@ describe('n6 version diff (upgrade behavioral diff)', () => {
     testDir = mkdtempSync(join(tmpdir(), 'vet-n6-'))
     // C3（0.1.16 加固）：目录经显式 setter 覆盖——env 已改为模块加载快照，测试不再改 env
     setCapabilitiesDirForTest(testDir)
+    // round-20 review（测试写穿真实环境）：internal/plugin 接线用例走真实扫描链路，
+    // recordScanSummary 会写 scan-summaries——caps 与 summaries 一并重定向 tmp，
+    // 否则 @vet-test/n6pkg 会残留进真实 ~/.dsh/vet/scan-summaries.json。
+    setSummariesDirForTest(testDir)
   })
 
   afterEach(() => {
     setCapabilitiesDirForTest(undefined)
+    setSummariesDirForTest(undefined)
     rmSync(testDir, { recursive: true, force: true })
   })
 

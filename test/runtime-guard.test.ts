@@ -1,14 +1,17 @@
-import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest'
+import { beforeAll, afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { VetStatus } from '../lib/guard/status.js'
-import { analyzeSample, detectGrowth, type ProcSample, type RssSample, type WatchConfig } from '../lib/guard/runtime-watch.js'
+import { analyzeSample, detectGrowth, hostPpidChanged, type ProcSample, type RssSample, type WatchConfig } from '../lib/guard/runtime-watch.js'
 import {
   classifyOp, isSensitivePath, isTransientTempPath, patchModule, pluginFromStack, setRootIndexing, extractNetworkTarget, DEFAULT_HOOK_CONFIG,
 } from '../lib/guard/runtime-hooks.js'
 import { isSessionLogFile } from '../lib/guard/runtime-hooks.js'
 import { readHostMetrics } from '../lib/guard/metrics.js'
 import { ensureHoneypot, DEFAULT_HONEYPOT_DIR } from '../lib/guard/honeypot.js'
-import { registerStatusRouteOnce, writeRuntimeGuardConfig, readPatchRuntimeGuard } from '../lib/guard/status-route.js'
-import { decideRespawn, t2AlarmId, t2Severity, installRuntimeGuard, isAttributableEntry, isSuppressUnattributedSessionLog, sidecarSupportedOn } from '../lib/guard/runtime-guard.js'
+import { registerStatusRouteOnce, writeRuntimeGuardConfig, writeVetTierConfig, readPatchRuntimeGuard, setGuardToggleHook } from '../lib/guard/status-route.js'
+import { setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
+import { recordScanSummary, setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
+import { decideRespawn, t2AlarmId, t2Severity, installRuntimeGuard, applyRuntimeGuardImmediate, disposeActiveGuard, isAttributableEntry, isSuppressUnattributedSessionLog, sidecarSupportedOn } from '../lib/guard/runtime-guard.js'
+import { envSidecarPid } from '../lib/guard/runtime-sidecar.js'
 import { hasAuditRecord, setArchiveDirForTest } from '../lib/audit/archive.js'
 import { setDismissedFileForTest } from '../lib/guard/dismissed-alerts.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
@@ -260,6 +263,16 @@ describe('analyzeSample（T1 差分判定）', () => {
 
   it('稳态无报警', () => {
     expect(analyzeSample(sample({}), sample({}), CFG)).toHaveLength(0)
+  })
+})
+
+describe('round-16 S6：hostPpidChanged（宿主 PID 复用复检）', () => {
+  it('本进程 ppid 未变 → false（不误杀）', () => {
+    expect(hostPpidChanged(process.ppid)).toBe(false)
+  })
+  it.skipIf(process.platform === 'win32')('ppid 与快照不符 → true（宿主退出后哨兵被 init 收养——kill(0) 在 PID 复用下误判存活的对冲）', () => {
+    // 传一个不可能等于当前 ppid 的期望值（快照语义：宿主死亡后本进程 ppid 必变）
+    expect(hostPpidChanged(process.ppid + 1)).toBe(true)
   })
 })
 
@@ -855,7 +868,7 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('vet 条目 config 含嵌套列表也能完整剥离（D29：缩进边界）', () => {
+  it('vet 条目 config 含嵌套列表也能完整保留（D29：缩进边界；关闭守卫不删其他显式键）', () => {
     const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const patch = join(dir, 'cordis.patch.yml')
     writeFileSync(patch, '- id: settings\n  config:\n    watch: false\n- id: plugin-vet\n  config:\n    runtimeGuard: watch\n    allowlist:\n      - foo\n      - bar\n- id: other\n  config:\n    x: 1\n')
@@ -863,11 +876,70 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     const r = writeRuntimeGuardConfig(mkCtx(dir), false)
     expect(r.ok).toBe(true)
     const content = readFileSync(patch, 'utf8')
-    expect(content).not.toContain('plugin-vet')
-    expect(content).not.toContain('allowlist')
+    // 0.3 fix（review）：关闭守卫只移除 runtimeGuard 键——allowlist/档位等显式配置不能丢
+    expect(content).toContain('plugin-vet')
+    expect(content).toContain('allowlist')
+    expect(content).not.toContain('runtimeGuard')
     expect(content).toContain('- id: settings')
     expect(content).toContain('- id: other')
     expect(content).toContain('x: 1')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('0.3.1 联动：关闭守卫档位回轻度（profile 行删除）；重开守卫恢复中级，requireAudit 保留', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: plugin-vet\n  config:\n    runtimeGuard: watch\n    profile: hardened\n    requireAudit: true\n')
+
+    const off = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(off.ok).toBe(true)
+    const afterOff = readFileSync(patch, 'utf8')
+    expect(afterOff).not.toContain('profile:')
+    expect(afterOff).toContain('requireAudit: true')
+    expect(afterOff).not.toContain('runtimeGuard')
+
+    // 重开守卫：档位恢复中级，requireAudit 仍在（旧实现会把整个条目删掉，档位静默丢失回 standard）
+    const on = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(on.ok).toBe(true)
+    const afterOn = readFileSync(patch, 'utf8')
+    expect(afterOn).toContain('runtimeGuard: watch')
+    expect(afterOn).toContain('profile: hardened')
+    expect(afterOn).toContain('requireAudit: true')
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('0.3.1 联动：已设高级防御时开启守卫不降级（保持 paranoid）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: plugin-vet\n  config:\n    runtimeGuard: watch\n    profile: paranoid\n- id: settings\n  config:\n    watch: false\n')
+    const r = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(r.ok).toBe(true)
+    expect(r.profile).toBe('paranoid')
+    const content = readFileSync(patch, 'utf8')
+    expect(content).toContain('profile: paranoid')
+    expect(content).toContain('runtimeGuard: watch')
+    expect(content).toContain('- id: settings')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('0.3.1 联动：开启→关闭→开启 往返字节一致（无档位初始态的典型路径）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: settings\n  config:\n    watch: false\n')
+    const on = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(on.ok).toBe(true)
+    const withGuard = readFileSync(patch, 'utf8')
+    expect(withGuard).toContain('profile: hardened')
+    const off = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(off.ok).toBe(true)
+    const afterOff = readFileSync(patch, 'utf8')
+    expect(afterOff).not.toContain('profile:')
+    expect(afterOff).not.toContain('runtimeGuard')
+    expect(afterOff).toContain('- id: settings')
+    const on2 = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(on2.ok).toBe(true)
+    expect(readFileSync(patch, 'utf8')).toBe(withGuard)
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -936,6 +1008,19 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('0.3 fix（review）：runtimeGuard 扫描不越出 vet 条目——后续插件条目的同名字段不误读', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    // vet 条目自身没有 runtimeGuard（off）；后面的条目（可能是任意插件）带同名字段
+    writeFileSync(patch, '- id: plugin-vet\n  config:\n    profile: hardened\n- id: other-plugin\n  config:\n    runtimeGuard: true\n')
+    // 旧实现整文件扫描：会误读 other-plugin 的 runtimeGuard: true → 'watch'；必须为 'off'
+    expect(readPatchRuntimeGuard(mkCtx(dir))).toBe('off')
+    // 反例：vet 条目内 watch 仍正确读回（边界 break 不吞自身字段）
+    writeFileSync(patch, '- id: plugin-vet\n  config:\n    runtimeGuard: watch\n    profile: hardened\n- id: other-plugin\n  config:\n    runtimeGuard: false\n')
+    expect(readPatchRuntimeGuard(mkCtx(dir))).toBe('watch')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('patch 文件不存在时 disable 视为未开启', () => {
     const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const r = writeRuntimeGuardConfig(mkCtx(dir), false)
@@ -943,22 +1028,188 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('对象操作：含 --- 分隔符的现有文件被自动修复（不崩溃 DSH）', () => {
+  it('对象操作：含 --- 分隔符的现有文件拒绝写入（round-15：多文档合法，不重排不破坏）', () => {
     const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
-    // 现有文件含 --- 文档分隔符 → 旧版字符串拼接会拼出坏 YAML → DSH 启动崩溃
-    // 新版用 js-yaml.load + dump 对象操作 → 自动修复，输出合法 YAML
+    // 现有文件含 --- 文档分隔符 —— 多文档是合法 YAML stream（用户手写合并形态）。
+    // 旧版 js-yaml.load + dump 对象操作会把其余文档抹掉（2026-08-26 !!js 事故同族
+    // 破坏面）；round-15 起拒绝写入并提示手动合并，文件原样保留。
     const patch = join(dir, 'cordis.patch.yml')
-    writeFileSync(patch, '---\n- id: settings\n---\n- id: other\n')
+    const multi = '---\n- id: settings\n---\n- id: other\n'
+    writeFileSync(patch, multi)
     const r = writeRuntimeGuardConfig(mkCtx(dir), true)
-    expect(r.ok).toBe(true)
-    // 文件被修复为合法 YAML（js-yaml.load 只解析第一个文档，但 dump 输出合法）
-    const content = readFileSync(patch, 'utf8')
-    // 验证输出是合法 YAML（能被 js-yaml 解析）
-    expect(() => yaml.load(content)).not.toThrow()
-    // 包含 vet 条目
-    expect(content).toContain('plugin-vet')
-    expect(content).toContain('runtimeGuard: watch')
+    expect(r.ok).toBe(false)
+    expect(r.note).toContain('多文档')
+    expect(readFileSync(patch, 'utf8')).toBe(multi)
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('writeVetTierConfig（档位写入，保留既有配置键）', () => {
+  const mkCtx = (baseUrl: string): { baseUrl: string } => ({ baseUrl })
+
+  it('写入 profile 档位并保留 runtimeGuard/requireAudit 等既有键与其他条目', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-vet-tier-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: plugin-vet\n  config:\n    runtimeGuard: watch\n    requireAudit: true\n- id: settings\n  config:\n    watch: false\n')
+
+    const r = writeVetTierConfig(mkCtx(dir), 'hardened')
+    expect(r.ok).toBe(true)
+    const content = readFileSync(patch, 'utf8')
+    expect(content).toContain('profile: hardened')
+    expect(content).toContain('runtimeGuard: watch')
+    expect(content).toContain('requireAudit: true')
+    expect(content).toContain('- id: settings')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('无 vet 条目时新建；非法档位拒绝；file: URL 形态可用', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-vet-tier-'))
+    const r1 = writeVetTierConfig(mkCtx(dir), 'paranoid')
+    expect(r1.ok).toBe(true)
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('profile: paranoid')
+
+    const r2 = writeVetTierConfig(mkCtx('file:' + dir), 'standard')
+    expect(r2.ok).toBe(true)
+    // 0.3.1 联动：轻度防御 ⇔ 守卫关——档位与 runtimeGuard 行都删除，空壳条目整块移除
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8').trim()).toBe('[]')
+
+    const r3 = writeVetTierConfig(mkCtx(dir), 'bogus')
+    expect(r3.ok).toBe(false)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('切回 standard：档位与守卫行全删（轻度防御 = 无显式配置；空壳条目移除）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-vet-tier-'))
+    writeFileSync(join(dir, 'cordis.patch.yml'), '- id: plugin-vet\n  config:\n    profile: paranoid\n')
+    const r = writeVetTierConfig(mkCtx(dir), 'standard')
+    expect(r.ok).toBe(true)
+    const content = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+    expect(content.trim()).toBe('[]')
+    expect(content).not.toContain('paranoid')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('0.3.1 联动：选中级防御自动开启守卫（空文件形态）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-vet-tier-'))
+    const r = writeVetTierConfig(mkCtx(dir), 'hardened')
+    expect(r.ok).toBe(true)
+    expect(r.profile).toBe('hardened')
+    const content = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')
+    expect(content).toContain('profile: hardened')
+    expect(content).toContain('runtimeGuard: watch')
+    expect(() => yaml.load(content)).not.toThrow()
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('/vet/profile 端点', () => {
+  const mkHandler = (): ((req: never, res: never) => void) => {
+    const routes: { handler: (req: never, res: never) => void }[] = []
+    const ctx = {
+      get: (name: string) => name === 'webServer' ? { register: (r: never) => { routes.push(r as never) } } : undefined,
+      effect: (fn: () => unknown): unknown => fn(),
+    }
+    const ok = registerStatusRouteOnce(ctx as never, { profile: 'standard' } as never, new VetStatus())
+    expect(ok).toBe(true)
+    return routes[0]!.handler
+  }
+  const mkRes = (): { code: number; body: unknown } => {
+    const r = { code: 0, body: null as unknown }
+    return Object.assign(r, {
+      writeHead: (c: number) => { r.code = c },
+      end: (b: string) => { r.body = JSON.parse(b) },
+    })
+  }
+
+  it('无 Origin → 403（跨站防护）', () => {
+    const handler = mkHandler()
+    const res = mkRes()
+    handler({ method: 'POST', url: '/vet/profile', headers: {} }, res as never)
+    expect(res.code).toBe(403)
+  })
+
+  it('同源 + 非法档位 → 400（写入拒绝）', () => {
+    const handler = mkHandler()
+    const res = mkRes()
+    handler({
+      method: 'POST',
+      url: '/vet/profile',
+      headers: { origin: 'http://x', host: 'x' },
+      on: (ev: string, cb: (c?: Buffer) => void) => {
+        if (ev === 'data') cb(Buffer.from(JSON.stringify({ tier: 'bogus' })))
+        if (ev === 'end') cb()
+      },
+    }, res as never)
+    expect(res.code).toBe(400)
+    expect((res.body as { note: string }).note).toContain('非法档位')
+  })
+})
+
+describe('/vet/plugin 端点（0.3.1：作用域包名合法回归）', () => {
+  const mkHandler = (): ((req: never, res: never) => void) => {
+    // 数据隔离：capabilities/scan-summaries 指向空目录，避免命中开发机真实留档
+    const iso = mkdtempSync(join(tmpdir(), '.tmp-plugin-detail-'))
+    setCapabilitiesDirForTest(iso)
+    setSummariesDirForTest(iso)
+    const routes: { handler: (req: never, res: never) => void }[] = []
+    const ctx = {
+      get: (name: string) => name === 'webServer' ? { register: (r: never) => { routes.push(r as never) } } : undefined,
+      effect: (fn: () => unknown): unknown => fn(),
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }
+    const ok = registerStatusRouteOnce(ctx as never, { profile: 'standard' } as never, new VetStatus())
+    expect(ok).toBe(true)
+    return routes[0]!.handler
+  }
+  afterEach(() => {
+    setCapabilitiesDirForTest(undefined)
+    setSummariesDirForTest(undefined)
+  })
+  const mkRes = (): { code: number; body: unknown } => {
+    const r = { code: 0, body: null as unknown }
+    return Object.assign(r, {
+      writeHead: (c: number) => { r.code = c },
+      end: (b: string) => { r.body = JSON.parse(b) },
+    })
+  }
+  const get = (handler: (req: unknown, res: unknown) => void, url: string): { code: number; body: unknown } => {
+    const res = mkRes()
+    handler({ method: 'GET', url, headers: {} }, res as never)
+    return res
+  }
+
+  it('作用域包名（@scope/name 含 /）→ 未见过 404，绝不再 400（用户事故回归）', () => {
+    const handler = mkHandler()
+    const res = get(handler, '/vet/plugin?name=@deepseek-ai/dsh-client-connection')
+    expect(res.code).toBe(404) // 名字合法：不应 400「name 非法」
+    expect((res.body as { note: string }).note).toContain('未见过')
+  })
+
+  it('round-18：插件详情带 official 标记——官方包不再显示为「未审核陌生包」', () => {
+    const handler = mkHandler()
+    // mkHandler 已把 summaries 目录隔离；写入官方包 + 第三方包的扫描摘要
+    recordScanSummary({ name: '@deepseek-ai/dsh-tools', version: '0.1.1-rc.2', at: Date.now(), verdict: 'clean', staticScore: 95, ruleCodes: [] })
+    recordScanSummary({ name: 'third-party', version: '1.0.0', at: Date.now(), verdict: 'clean', staticScore: 90, ruleCodes: [] })
+    const official = get(handler, '/vet/plugin?name=' + encodeURIComponent('@deepseek-ai/dsh-tools'))
+    expect(official.code).toBe(200)
+    expect((official.body as { plugin: { official?: boolean } }).plugin.official).toBe(true)
+    expect((official.body as { plugin: { audited?: boolean } }).plugin.audited).toBe(false)
+    const third = get(handler, '/vet/plugin?name=third-party')
+    expect(third.code).toBe(200)
+    expect((third.body as { plugin: { official?: boolean } }).plugin.official).toBe(false)
+  })
+
+  it('无 name / 空 name → 400', () => {
+    const handler = mkHandler()
+    expect(get(handler, '/vet/plugin').code).toBe(400)
+    expect(get(handler, '/vet/plugin?name=').code).toBe(400)
+  })
+
+  it('路径穿越（..）/ 反斜杠 / 控制字符 → 400 拒绝', () => {
+    const handler = mkHandler()
+    expect(get(handler, '/vet/plugin?name=a/../b').code).toBe(400)
+    expect(get(handler, '/vet/plugin?name=a%5Cb').code).toBe(400)
+    expect(get(handler, '/vet/plugin?name=a%00b').code).toBe(400)
   })
 })
 
@@ -1015,7 +1266,9 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
     handler({ method: 'GET', url: '/vet/status.json', headers: {} }, gres)
     expect(getRes.code).toBe(200)
     expect((getRes.body as { level: string }).level).toBe('yellow')
-    expect((getRes.body as { runtimeGuard: string }).runtimeGuard).toBe('off')
+    // 0.3：runtimeGuard = 档位展开后的生效值（= config）；patchRuntimeGuard = 文件级实际状态
+    expect((getRes.body as { runtimeGuard: string }).runtimeGuard).toBe('watch')
+    expect((getRes.body as { patchRuntimeGuard: string }).patchRuntimeGuard).toBe('off')
 
     // POST /vet/runtime-guard 无 Origin → 403（跨站防护，M4）
     const postRes: { code: number; body: unknown } = { code: 0, body: null }
@@ -1266,5 +1519,312 @@ describe('sidecar 单例锁（D30 修漏：配置热重载重复 apply 不再叠
     // 前者还活着
     expect(first.exitCode).toBeNull()
     first.kill()
+  })
+})
+describe('2026-08-26 事故回归：!!js patch 行级手术（不重排、不丢条目）', () => {
+  const mkCtx = (baseUrl: string): { baseUrl: string } => ({ baseUrl })
+  // 事故现场同款文件：注释头 + webserver 的 !!js 表达式 + insert polyfill + 多行哈希
+  const JS_HEADER = '# Your patch layer for this dsh profile, applied after every bundle layer:'
+  const PATCH_WITH_JS = [
+    JS_HEADER,
+    '- id: settings',
+    '  config:',
+    '    watch: false',
+    '- id: plugin-vet',
+    '  config:',
+    '    runtimeGuard: watch',
+    '    profile: hardened',
+    '    requireAudit: true',
+    '    acknowledgedPackageHashes:',
+    '      "@deepseek-ai/dsh-client-connection@0.1.0-rc.8":',
+    '        - "e396626b275719de626a3338ed5566f7b556846cee52e7e85e947f00ced8442d"',
+    '- id: webserver',
+    '  config:',
+    '    host: 0.0.0.0',
+    '    port: !!js ctx.webStartup.port ?? 3456',
+    '- insert:',
+    "    - name: '/home/chen/.dsh/profiles/web/lan-uuid-polyfill.mjs'",
+    '',
+  ].join('\n')
+
+  it('开启守卫：只插入 runtimeGuard 行——注释头/!!js webserver/insert/哈希全部原样', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-jstag-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    // 事故时点：vet 条目无 runtimeGuard（off 状态），用户点「开启」
+    writeFileSync(patch, PATCH_WITH_JS.replace('    runtimeGuard: watch\n', ''))
+    const r = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(r.ok).toBe(true)
+    expect(r.profile).toBe('hardened') // 0.3.1 联动：开守卫 → 档位=中级防御
+    const content = readFileSync(patch, 'utf8')
+    // 事故核心：!!js 行与注释头必须原样保留（旧实现把整文件重排成只剩 vet 条目）
+    expect(content).toContain('port: !!js ctx.webStartup.port ?? 3456')
+    expect(content).toContain(JS_HEADER)
+    expect(content).toContain('- id: webserver')
+    expect(content).toContain('host: 0.0.0.0')
+    expect(content).toContain('- insert:')
+    expect(content).toContain('lan-uuid-polyfill.mjs')
+    expect(content).toContain('runtimeGuard: watch')
+    expect(content).toContain('profile: hardened')
+    expect(content).toContain('requireAudit: true')
+    expect(content).toContain('acknowledgedPackageHashes')
+    expect(content).toContain('- id: settings')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('关闭守卫：删 runtimeGuard 与 profile 行——哈希/webserver/insert 保留，条目仍在', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-jstag-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, PATCH_WITH_JS)
+    const r = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(r.ok).toBe(true)
+    expect(r.profile).toBe('standard') // 0.3.1 联动：关守卫 → 档位=轻度防御
+    const content = readFileSync(patch, 'utf8')
+    expect(content).not.toContain('runtimeGuard')
+    expect(content).not.toContain('profile:') // 档位回默认：profile 行删除（轻度防御 = 无显式档位）
+    // 事故核心：其余行零触碰
+    expect(content).toContain('port: !!js ctx.webStartup.port ?? 3456')
+    expect(content).toContain(JS_HEADER)
+    expect(content).toContain('acknowledgedPackageHashes')
+    expect(content).toContain('requireAudit: true')
+    expect(content).toContain('lan-uuid-polyfill.mjs')
+    expect(content).toContain('host: 0.0.0.0')
+    expect(content).toContain('- id: plugin-vet') // 条目保留（还有其他显式键）
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('关→开往返：两次写入后文件与原始 !!js 文件逐字节一致', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-jstag-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, PATCH_WITH_JS)
+    const off = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(off.ok).toBe(true)
+    const on = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(on.ok).toBe(true)
+    expect(readFileSync(patch, 'utf8')).toBe(PATCH_WITH_JS)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('tier 档位写入：!!js 行与其他条目原样，profile 键正确增改（0.3.1 联动守卫同步）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-jstag-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    // 无档位行形态（旧配置）→ 选中级防御：插入 profile + 守卫保持/置为 watch
+    writeFileSync(patch, PATCH_WITH_JS.replace('    profile: hardened\n', '').replace('    runtimeGuard: watch\n', '    runtimeGuard: off\n'))
+    const r = writeVetTierConfig(mkCtx(dir), 'hardened')
+    expect(r.ok).toBe(true)
+    const content = readFileSync(patch, 'utf8')
+    expect(content).toContain('profile: hardened')
+    expect(content).toContain('runtimeGuard: watch') // 联动：中级防御 ⇒ 守卫开
+    expect(content).toContain('port: !!js ctx.webStartup.port ?? 3456')
+    expect(content).toContain(JS_HEADER)
+    expect(content).toContain('lan-uuid-polyfill.mjs')
+    // 旧档位 paranoid 形态 → 选轻度防御：profile 与 runtimeGuard 行都删除（条目因有哈希保留）
+    writeFileSync(patch, PATCH_WITH_JS.replace('    profile: hardened\n', '    profile: paranoid\n'))
+    const r2 = writeVetTierConfig(mkCtx(dir), 'standard')
+    expect(r2.ok).toBe(true)
+    const content2 = readFileSync(patch, 'utf8')
+    expect(content2).not.toContain('profile:')
+    expect(content2).not.toContain('paranoid')
+    expect(content2).not.toContain('runtimeGuard') // 轻度防御 ⇒ 守卫关
+    expect(content2).toContain('port: !!js ctx.webStartup.port ?? 3456')
+    expect(content2).toContain('lan-uuid-polyfill.mjs')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('旧形态 id 自愈：@jieai 引号条目在 !!js 文件上规范化为 plugin-vet', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-jstag-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    const legacy = PATCH_WITH_JS.replace('- id: plugin-vet', '- id: "@jieai/dsh-plugin-vet"')
+    writeFileSync(patch, legacy)
+    const r = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(r.ok).toBe(true)
+    const content = readFileSync(patch, 'utf8')
+    expect(content).toContain('- id: plugin-vet')
+    expect(content).not.toContain('@jieai/dsh-plugin-vet')
+    expect(content).toContain('port: !!js ctx.webStartup.port ?? 3456')
+    expect(content).toContain('lan-uuid-polyfill.mjs')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('vet 条目语法坏：行级手术自愈为合法 YAML，不抛错', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-jstag-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: plugin-vet\n  config:\n    runtimeGuard: [bad\n- id: settings\n  config:\n    watch: false\n')
+    const r = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(r.ok).toBe(true)
+    const content = readFileSync(patch, 'utf8')
+    expect(content).toContain('- id: plugin-vet')
+    expect(content).toContain('runtimeGuard: watch')
+    expect(content).toContain('- id: settings')
+    expect(() => yaml.load(content)).not.toThrow()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('其他条目语法坏：fail-closed 拒写，原文件不动（绝不叠写坏文件）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-jstag-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    const bad = PATCH_WITH_JS.replace('port: !!js ctx.webStartup.port ?? 3456', 'port: !!js [broken')
+    writeFileSync(patch, bad)
+    const r = writeRuntimeGuardConfig(mkCtx(dir), false)
+    expect(r.ok).toBe(false)
+    expect(readFileSync(patch, 'utf8')).toBe(bad)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('多文档 --- 文件：拒绝写入且文件不动（round-15：重排会抹掉用户手写的其他文档）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-jstag-'))
+    const patch = join(dir, 'cordis.patch.yml')
+    const multi = '---\n- id: settings\n---\n- id: other\n'
+    writeFileSync(patch, multi)
+    const r = writeRuntimeGuardConfig(mkCtx(dir), true)
+    expect(r.ok).toBe(false)
+    expect(r.note).toContain('多文档')
+    // 文件原样保留——多文档是合法 YAML stream（用户手写合并形态），vet 不重排不破坏
+    expect(readFileSync(patch, 'utf8')).toBe(multi)
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('即时装配（0.4.1）：setGuardToggleHook 接线 + 进程内切换', () => {
+  afterEach(() => {
+    setGuardToggleHook(undefined)
+    disposeActiveGuard()
+  })
+
+  const mkConfig = (runtimeGuard: 'off' | 'watch'): {
+    runtimeGuard: 'off' | 'watch'
+    runtimeIntervalMs: number
+    runtimeMemLimitMb: number
+    runtimeForkBurstN: number
+    runtimeFdLimit: number
+    runtimeGrowthMb: number
+    runtimeGrowthWindowMs: number
+    honeypot: { enabled: boolean; dir: string }
+    networkEgress: boolean
+  } => ({
+    runtimeGuard,
+    runtimeIntervalMs: 2000,
+    runtimeMemLimitMb: 1024,
+    runtimeForkBurstN: 5,
+    runtimeFdLimit: 512,
+    runtimeGrowthMb: 256,
+    runtimeGrowthWindowMs: 600_000,
+    honeypot: { enabled: false, dir: '' },
+    networkEgress: true,
+  })
+
+  const mkHandlerCtx = (dir: string): unknown => {
+    const routes: unknown[] = []
+    return {
+      baseUrl: dir,
+      get: (name: string) => (name === 'webServer' ? { register: (r: unknown) => { routes.push(r); return () => {} } } : undefined),
+      effect: (fn: () => unknown) => { fn() },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }
+  }
+  const mkRes = (): { code: number; body: unknown } & { writableEnded: boolean } => {
+    const r = { code: 0, body: null as unknown, writableEnded: false }
+    return Object.assign(r, {
+      writeHead: (c: number) => { r.code = c },
+      end: (b: string) => { r.body = JSON.parse(b) },
+    })
+  }
+  const post = (handler: (req: unknown, res: unknown) => void, body: unknown, origin = true): { code: number; body: unknown } => {
+    const res = mkRes()
+    const req = {
+      method: 'POST',
+      url: '/vet/runtime-guard',
+      headers: origin ? { origin: 'http://x', host: 'x' } : {},
+      on: (ev: string, cb: (c?: Buffer) => void) => {
+        if (ev === 'data') cb(Buffer.from(JSON.stringify(body)))
+        if (ev === 'end') cb()
+      },
+    }
+    handler(req as never, res as never)
+    return res
+  }
+
+  it('未注入 hook：同源 POST 仅持久化（旧行为，note 为写路径文案）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-instant-'))
+    const status = new VetStatus()
+    const config = { ...mkConfig('off'), profile: 'standard' }
+    const routes: unknown[] = []
+    const ctx = {
+      baseUrl: dir,
+      get: (name: string) => (name === 'webServer' ? { register: (r: unknown) => { routes.push(r); return () => {} } } : undefined),
+      effect: (fn: () => unknown) => { fn() },
+    }
+    const ok = registerStatusRouteOnce(ctx as never, config as never, status)
+    expect(ok).toBe(true)
+    const handler = (routes[0] as { handler: (req: unknown, res: unknown) => void }).handler
+    const res = post(handler, { enable: true })
+    expect(res.code).toBe(200)
+    expect((res.body as { note: string }).note).toContain('已写入')
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('runtimeGuard: watch')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('注入 hook：同源 POST 持久化 + 调 hook + 返回即时生效文案', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-instant-'))
+    const status = new VetStatus()
+    const config = { ...mkConfig('off'), profile: 'standard' }
+    const calls: boolean[] = []
+    setGuardToggleHook((enable) => { calls.push(enable); return { ok: true } })
+    const routes: unknown[] = []
+    const ctx = {
+      baseUrl: dir,
+      get: (name: string) => (name === 'webServer' ? { register: (r: unknown) => { routes.push(r); return () => {} } } : undefined),
+      effect: (fn: () => unknown) => { fn() },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }
+    registerStatusRouteOnce(ctx as never, config as never, status)
+    const handler = (routes[0] as { handler: (req: unknown, res: unknown) => void }).handler
+    const res = post(handler, { enable: true })
+    expect(res.code).toBe(200)
+    expect(calls).toEqual([true])
+    expect((res.body as { note: string }).note).toContain('即时开启')
+    // 文件已持久化（重启后保持一致）
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toContain('runtimeGuard: watch')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('hook 返回失败：note 提示配置已持久化但即时失败', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-instant-'))
+    const status = new VetStatus()
+    setGuardToggleHook(() => ({ ok: false, note: 'spawn boom' }))
+    const routes: unknown[] = []
+    const ctx = {
+      baseUrl: dir,
+      get: (name: string) => (name === 'webServer' ? { register: (r: unknown) => { routes.push(r); return () => {} } } : undefined),
+      effect: (fn: () => unknown) => { fn() },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }
+    registerStatusRouteOnce(ctx as never, { ...mkConfig('off'), profile: 'standard' } as never, status)
+    const handler = (routes[0] as { handler: (req: unknown, res: unknown) => void }).handler
+    const res = post(handler, { enable: true })
+    expect(res.code).toBe(200)
+    expect((res.body as { note: string }).note).toContain('即时生效失败')
+    expect((res.body as { note: string }).note).toContain('spawn boom')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it.skipIf(process.platform === 'win32')('applyRuntimeGuardImmediate：进程内即时切换 watch↔off，config 实时翻转，哨兵随之启停', () => {
+    const ctx = { logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }
+    const status = new VetStatus()
+    const config = mkConfig('off')
+    // off → watch：config 翻转 + 哨兵启动
+    const r1 = applyRuntimeGuardImmediate(ctx as never, config as never, status, true)
+    expect(r1.ok).toBe(true)
+    expect(config.runtimeGuard).toBe('watch')
+    expect(envSidecarPid()).toBeDefined()
+    // watch → off：config 翻转 + 哨兵终止（env 注册表清空）
+    const r2 = applyRuntimeGuardImmediate(ctx as never, config as never, status, false)
+    expect(r2.ok).toBe(true)
+    expect(config.runtimeGuard).toBe('off')
+    expect(envSidecarPid()).toBeUndefined()
+    // 再打开：重入安全（prevGuardDisposer 卸载旧实例，不叠加）
+    const r3 = applyRuntimeGuardImmediate(ctx as never, config as never, status, true)
+    expect(r3.ok).toBe(true)
+    expect(config.runtimeGuard).toBe('watch')
+    expect(envSidecarPid()).toBeDefined()
   })
 })

@@ -117,6 +117,18 @@ describe('0.1.16 加固批次——scanner 规则补丁', () => {
       const f = ofRule(rulesOf("for (;;) { require('child_process').spawnSync('ls') }"), 'R9')
       expect(f.some(x => x.severity === 'high')).toBe(true)
     })
+    it('round-15：while(1)（压缩混淆惯用）→ R9 high（此前漏检）', () => {
+      const f = ofRule(rulesOf("while (1) { require('child_process').execSync('echo x') }"), 'R9')
+      expect(f.some(x => x.severity === 'high')).toBe(true)
+    })
+    it('round-15：for(;1;) → R9 high（此前漏检）', () => {
+      const f = ofRule(rulesOf("for (;1;) { require('child_process').spawnSync('ls') }"), 'R9')
+      expect(f.some(x => x.severity === 'high')).toBe(true)
+    })
+    it('round-15：do{}while(!0) → R9 high（此前漏检）', () => {
+      const f = ofRule(rulesOf("do { require('child_process').execSync('echo x') } while (!0)"), 'R9')
+      expect(f.some(x => x.severity === 'high')).toBe(true)
+    })
     it('isRedosPattern: (a+)+ → true（回归）', () => {
       expect(isRedosPattern('(a+)+')).toBe(true)
     })

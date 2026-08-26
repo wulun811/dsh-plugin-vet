@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { patchModule, DEFAULT_HOOK_CONFIG, isSensitivePath } from '../lib/guard/runtime-hooks.js'
 import { isSensitiveFsPath, saveCapabilities, loadCapabilities, consumeCapabilitiesTamper, setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
+import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
 import { saveBaseline, loadBaseline, consumeBaselineTamper, setBaselineDirForTest } from '../lib/guards/content-baseline.js'
 import { pidCmdlineIsVetSidecar, safeKillSidecar } from '../lib/guard/runtime-guard.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
@@ -117,7 +118,7 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
 
   describe('M9 侧车 PID 身份校验', () => {
     it.skipIf(process.platform === 'win32')('cmdline 含 vet-sidecar 才杀；非侧车进程拒绝终止（PID 复用保护）', () => {
-      const sidecar = spawn(process.execPath, ['--vet-sidecar'], { stdio: 'ignore' })
+      const sidecar = spawn(process.execPath, ['-e', 'setInterval(()=>{},1e9)', '--vet-sidecar'], { stdio: 'ignore' })
       const pid1 = sidecar.pid!
       expect(pidCmdlineIsVetSidecar(pid1)).toBe(true)
       const killed = safeKillSidecar(pid1)
@@ -131,6 +132,20 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
   })
 
   describe('C2 ESM 具名导入盲区标记 + 接线', () => {
+    // round-20 review（测试写穿真实环境）：internal/plugin 接线用例会触发
+    // recordScanSummary/recordVersionScan 写盘——不隔离 caps/summaries 就会把
+    // @esm-test/pkg 写进真实 ~/.dsh/vet/（用户环境残留之一）。与 plugin.test.ts 同纪律。
+    let sandbox: string
+    beforeEach(() => {
+      sandbox = mkdtempSync(join(tmpdir(), 'vet-esm-iso-'))
+      setCapabilitiesDirForTest(join(sandbox, 'caps'))
+      setSummariesDirForTest(join(sandbox, 'summaries'))
+    })
+    afterEach(() => {
+      setCapabilitiesDirForTest(undefined)
+      setSummariesDirForTest(undefined)
+      rmSync(sandbox, { recursive: true, force: true })
+    })
     it('具名/命名空间导入内建危险模块 → capabilities.esmNamedBuiltins = true', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'vet-esm-'))
       try {

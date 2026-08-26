@@ -26,8 +26,8 @@ function findingOf(report: { findings: Finding[] }, rule: string, severity?: str
 // ---------------------------------------------------------------------------
 
 describe('fixture matrix', () => {
-  it('escape-workflow.js → R1 critical, no R3 (no process identifier), verdict critical', () => {
-    const res = scan(codeRequest({ code: fixture('escape-workflow.js'), runtime: 'sandbox' }))
+  it('escape-workflow.fixture.js → R1 critical, no R3 (no process identifier), verdict critical', () => {
+    const res = scan(codeRequest({ code: fixture('escape-workflow.fixture.js'), runtime: 'sandbox' }))
     expect(res.ok).toBe(true)
     const r = res.report!
     expect(r.verdict).toBe('critical')
@@ -36,8 +36,8 @@ describe('fixture matrix', () => {
     expect(findingOf(r, 'R6')).toBeDefined() // 字符串特征 info
   })
 
-  it('escape-dynamic-plugin.js → R1 + R4 critical, verdict critical', () => {
-    const res = scan(codeRequest({ code: fixture('escape-dynamic-plugin.js'), runtime: 'sandbox' }))
+  it('escape-dynamic-plugin.fixture.js → R1 + R4 critical, verdict critical', () => {
+    const res = scan(codeRequest({ code: fixture('escape-dynamic-plugin.fixture.js'), runtime: 'sandbox' }))
     expect(res.ok).toBe(true)
     const r = res.report!
     expect(r.verdict).toBe('critical')
@@ -70,8 +70,8 @@ describe('fixture matrix', () => {
     expect(r.staticScore).toBeGreaterThanOrEqual(90)
   })
 
-  it('obfuscated-concat.js → R1 likely (static concat resolution), verdict critical', () => {
-    const res = scan(codeRequest({ code: fixture('obfuscated-concat.js') }))
+  it('obfuscated-concat.fixture.js → R1 likely (static concat resolution), verdict critical', () => {
+    const res = scan(codeRequest({ code: fixture('obfuscated-concat.fixture.js') }))
     expect(res.ok).toBe(true)
     const r = res.report!
     expect(r.verdict).toBe('critical')
@@ -89,8 +89,8 @@ describe('fixture matrix', () => {
     expect(r.verdict).toBe('clean')
   })
 
-  it('secret-in-plugin.js → R7 high, verdict suspicious', () => {
-    const res = scan(codeRequest({ code: fixture('secret-in-plugin.js') }))
+  it('secret-in-plugin.fixture.js → R7 high, verdict suspicious', () => {
+    const res = scan(codeRequest({ code: fixture('secret-in-plugin.fixture.js') }))
     expect(res.ok).toBe(true)
     const r = res.report!
     expect(findingOf(r, 'R7', 'high')).toBeDefined()
@@ -157,7 +157,7 @@ describe('protocol', () => {
 
   it('stdio round-trip: files mode over real fixture → critical', () => {
     const bin = join(baseDir(), 'lib/scanner-bin/index.js')
-    const req: ScanRequest = { kind: 'files', files: [join(FIX, 'escape-workflow.js'), join(FIX, 'clean-plugin.ts')] }
+    const req: ScanRequest = { kind: 'files', files: [join(FIX, 'escape-workflow.fixture.js'), join(FIX, 'clean-plugin.ts')] }
     const out = spawnSync(process.execPath, [bin], { input: JSON.stringify(req), encoding: 'utf8' })
     expect(out.status).toBe(0)
     const parsed = JSON.parse(out.stdout.trim())
@@ -193,7 +193,7 @@ describe('cache', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-cache2-'))
     try {
       // C3（0.1.16 加固）：目录经 request.cacheDir 显式注入（不再依赖 env）
-      const req: ScanRequest = { kind: 'files', files: [join(FIX, 'secret-in-plugin.js')], cacheDir: dir }
+      const req: ScanRequest = { kind: 'files', files: [join(FIX, 'secret-in-plugin.fixture.js')], cacheDir: dir }
       const a = scan(req)
       const b = scan(req)
       expect(a.ok).toBe(true)

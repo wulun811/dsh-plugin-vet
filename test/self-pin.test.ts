@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { hashScanFiles, pinStateFor, type SelfPins } from '../lib/report/self-pin.js'
+import { listShippedFiles } from '../lib/report/self-scope.js'
 
 function tmpTree(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'vet-pin-'))
   for (const [rel, content] of Object.entries(files)) {
     const p = join(dir, rel)
+    mkdirSync(join(p, '..'), { recursive: true })
     writeFileSync(p, content)
   }
   return dir
@@ -38,17 +40,84 @@ describe('hashScanFiles', () => {
   })
 })
 
-describe('pinStateFor', () => {
-  const pins: SelfPins = { '0.1.20': 'sha256:AAA' }
-  it('版本缺 pin → unpinned', () => {
-    expect(pinStateFor(pins, '0.1.21', 'sha256:AAA')).toBe('unpinned')
-    expect(pinStateFor(undefined, '0.1.20', 'sha256:AAA')).toBe('unpinned')
-    expect(pinStateFor(pins, undefined, 'sha256:AAA')).toBe('unpinned')
+describe('pinStateFor（round-16：any-pin 匹配 + 升级窗口）', () => {
+  const pins: SelfPins = { '0.3.0': 'sha256:AAA', '0.3.1': 'sha256:BBB' }
+  it('字节 == 本版 pin → pinned-match（常规）', () => {
+    expect(pinStateFor(pins, '0.3.1', 'sha256:BBB')).toBe('pinned-match')
   })
-  it('字节一致 → pinned-match（升级后同版自扫不误报）', () => {
-    expect(pinStateFor(pins, '0.1.20', 'sha256:AAA')).toBe('pinned-match')
+  it('字节 == 任一其他版本 pin → pinned-match（升级窗口：宿主进程版本滞后/交错更新，字节是被审计发布物）', () => {
+    // 宿主还报 0.3.0、磁盘已是 0.3.1 字节（pin 表先行写入）——不再「两个 vet 互不认」
+    expect(pinStateFor(pins, '0.3.0', 'sha256:BBB')).toBe('pinned-match')
+    // 版本未知但字节匹配某已发布 pin（表里只有旧版条目、磁盘已是新版字节）
+    expect(pinStateFor(pins, undefined, 'sha256:BBB')).toBe('pinned-match')
+    expect(pinStateFor(pins, '9.9.9', 'sha256:AAA')).toBe('pinned-match')
   })
-  it('字节不符 → dev-tree（本地改码/被篡改）', () => {
-    expect(pinStateFor(pins, '0.1.20', 'sha256:BBB')).toBe('dev-tree')
+  it('本版有 pin 但字节不符任何 pin → dev-tree（本地改码/未构建/被篡改）', () => {
+    expect(pinStateFor(pins, '0.3.1', 'sha256:CCC')).toBe('dev-tree')
+  })
+  it('版本无条目且字节无匹配 → unpinned', () => {
+    expect(pinStateFor(pins, '9.9.9', 'sha256:CCC')).toBe('unpinned')
+    expect(pinStateFor(pins, undefined, 'sha256:CCC')).toBe('unpinned')
+    expect(pinStateFor(undefined, '0.3.1', 'sha256:BBB')).toBe('unpinned')
+  })
+})
+
+describe('listShippedFiles（round-16：发布物范围，生产安装可 pinned-match）', () => {
+  it('白名单：lib/ + 根级清单 + docs/ 进面；src/ 与 vet-self-pins.json 不进面', () => {
+    const dir = tmpTree({
+      'lib/index.js': 'a',
+      'lib/scanner/x.js': 'b',
+      'package.json': '{}',
+      'README.md': 'x',
+      'docs/ARCHITECTURE.md': 'y',
+      'src/report/self-pin.ts': 'z',
+      'vet-self-pins.json': '{}',
+      'cordis.patch.yml': 'p',
+    })
+    try {
+      const rels = listShippedFiles(dir).map(f => f.slice(dir.length + 1).split('\\').join('/')).sort()
+      expect(rels).toEqual([
+        'README.md',
+        'cordis.patch.yml',
+        'docs/ARCHITECTURE.md',
+        'lib/index.js',
+        'lib/scanner/x.js',
+        'package.json',
+      ])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  it('vet-self-pins.json 自引用排除：改动它不改变 hash（钉扎表不可哈希自身）', () => {
+    const dir = tmpTree({ 'lib/index.js': 'a', 'package.json': '{}' })
+    try {
+      const h1 = hashScanFiles(listShippedFiles(dir), dir)
+      writeFileSync(join(dir, 'vet-self-pins.json'), '{ "pins": { "x": "y" } }')
+      expect(hashScanFiles(listShippedFiles(dir), dir)).toBe(h1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  it('未构建的裸源码树（无 lib/）→ 集合只有根级文件；与发布物 hash 不一致（dev-tree 的诚实来源）', () => {
+    const dir = tmpTree({ 'src/foo.ts': 'x', 'package.json': '{}', 'README.md': 'r' })
+    try {
+      const rels = listShippedFiles(dir).map(f => f.slice(dir.length + 1)).sort()
+      expect(rels).toEqual(['README.md', 'package.json'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  it('符号链接不进面（与 listSourceFiles walk 纪律一致）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-pin-link-'))
+    const target = tmpTree({ 'evil.js': 'x' })
+    try {
+      writeFileSync(join(dir, 'package.json'), '{}')
+      symlinkSync(join(target, 'evil.js'), join(dir, 'lib-evil.js'))
+      const rels = listShippedFiles(dir).map(f => f.slice(dir.length + 1))
+      expect(rels).toEqual(['package.json'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(target, { recursive: true, force: true })
+    }
   })
 })

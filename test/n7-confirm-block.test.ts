@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   confirmBlock, resetConfirmBlock, decideBlock, isPersistenceWriteTarget, isInstallWriteTarget,
-  BLOCK_FS_OPS,
+  BLOCK_FS_OPS, setCredentialHomeForTest,
 } from '../lib/guard/confirm-block.js'
 import {
   DEFAULT_HOOK_CONFIG, patchModule, classifyOp, withVetSelfIo,
@@ -15,16 +15,16 @@ const patches: (() => void)[] = []
 afterAll(() => { for (const dispose of patches.splice(0)) { try { dispose() } catch { /* 清理失败不吞单测结果 */ } } })
 
 describe('N7 decideBlock：族 2 凭据本体（精确文件级）', () => {
-  const oldHome = process.env.HOME
   let dir = ''
   beforeEach(() => {
     resetConfirmBlock()
     dir = mkdtempSync(join(tmpdir(), '.n7-h-'))
-    process.env.HOME = dir
+    // C3（review）：凭据清单基准 = 模块加载快照——测试经 setCredentialHomeForTest 覆写，
+    // 不再依赖运行时改 process.env.HOME（快照后 env 注入对拦截面无效，见下方回归用例）
+    setCredentialHomeForTest(dir)
   })
   afterEach(() => {
-    if (oldHome === undefined) delete process.env.HOME
-    else process.env.HOME = oldHome
+    setCredentialHomeForTest(undefined)
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -160,8 +160,7 @@ describe('N7 接线：hooks 包装器拦截矩阵（每族三向）', () => {
 
   it('族 2 单次即时：凭据本体删除 → 抛错拦截（真实栈归因到测试路径）', () => {
     const dir = mkdtempSync(join(tmpdir(), '.n7-w-'))
-    const oldHome = process.env.HOME
-    process.env.HOME = dir
+    setCredentialHomeForTest(dir)
     try {
       const mod: Record<string, unknown> = { unlink: (p: string) => true }
       const sunk: string[] = []
@@ -169,9 +168,32 @@ describe('N7 接线：hooks 包装器拦截矩阵（每族三向）', () => {
       expect(() => (mod.unlink as (p: string) => unknown)(join(dir, '.ssh', 'id_rsa'))).toThrow(/vet.*拦截/)
       expect(sunk).toContain('n7-block')
     } finally {
+      setCredentialHomeForTest(undefined)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('C3（review）：进程内改 process.env.HOME 无法重定向凭据拦截面', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.n7-c3-'))
+    setCredentialHomeForTest(dir)
+    // 模拟恶意插件改 env（快照后注入对拦截面无效——home 基准已固定在加载时刻）
+    const oldHome = process.env.HOME
+    process.env.HOME = join(tmpdir(), '.n7-fake-')
+    try {
+      // 快照基准下的真实凭据路径：照常拦截（env 重定向不生效）
+      expect(decideBlock('evil', 'unlinkSync', [join(dir, '.ssh', 'id_rsa')])).not.toBeNull()
+      // 伪造 HOME 下的同形状路径：不拦截（不是凭据基准，说明判定与运行时 env 无关）
+      expect(decideBlock('evil', 'unlinkSync', [join(tmpdir(), '.n7-fake-', '.ssh', 'id_rsa')])).toBeNull()
+      // 真实凭据路径删除 → 拦截决策仍为族 2
+      const d = decideBlock('evil', 'rmSync', [join(dir, '.dsh', '.credentials.yaml')])
+      expect(d).not.toBeNull()
+      expect(d!.family).toBe(2)
+    } finally {
       if (oldHome === undefined) delete process.env.HOME
       else process.env.HOME = oldHome
+      setCredentialHomeForTest(undefined)
       rmSync(dir, { recursive: true, force: true })
+      rmSync(join(tmpdir(), '.n7-fake-'), { recursive: true, force: true })
     }
   })
 

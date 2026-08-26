@@ -66,7 +66,8 @@ describe('registry-verify 加固（三轮审查）', () => {
     let calls = 0
     vi.stubGlobal('fetch', async () => {
       calls++
-      return new Response(JSON.stringify({ dist: { tarball: 'https://evil.example/x.tgz' } }), { status: 200 })
+      const body = JSON.stringify({ dist: { tarball: 'https://evil.example/x.tgz' } })
+      return new Response(body, { status: 200, headers: { 'content-length': String(body.length) } })
     })
     try {
       const r = await verifyAgainstRegistry('@vet-test/hostile-tarball', '1.0.0', 2000)

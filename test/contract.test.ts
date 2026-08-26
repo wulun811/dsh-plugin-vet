@@ -129,9 +129,13 @@ describe('路径/主机/命令模式匹配', () => {
     expect(patternMatchHost('API.EXAMPLE.COM', 'api.example.com')).toBe(true)
     expect(patternMatchHost('*', 'webhook.site')).toBe(false)
   })
-  it('命令匹配：basename / 完整路径 / argv 任一项', () => {
+  it('命令匹配：basename / 完整路径（round-15 严格化：完整路径只认精确 token）', () => {
     expect(patternMatchCommand('git', 'git clone x')).toBe(true)
-    expect(patternMatchCommand('/usr/bin/gh', 'gh pr list')).toBe(true)
+    // round-15：完整路径声明只精确匹配完整路径 token——此前 /usr/bin/gh 会通过 basename
+    // 匹配掉 'gh pr list'，同一漏洞面让 /tmp/evil/git 冒充 /usr/bin/git（契约假解释违约）
+    expect(patternMatchCommand('/usr/bin/gh', '/usr/bin/gh pr list')).toBe(true)
+    expect(patternMatchCommand('/usr/bin/gh', 'gh pr list')).toBe(false) // 裸名调用：路径不受契约约束
+    expect(patternMatchCommand('/usr/bin/git', '/tmp/evil/git status')).toBe(false) // 冒充面根除
     expect(patternMatchCommand('git', 'sh -c git status')).toBe(true)
     expect(patternMatchCommand('curl', 'wget -q url')).toBe(false)
   })

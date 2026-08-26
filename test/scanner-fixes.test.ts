@@ -3,6 +3,7 @@ import { scan } from '../lib/scanner-bin/engine.js'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import type { Finding, ScanRequest } from '../lib/scanner-bin/protocol.js'
 
 function codeRequest(overrides: Partial<ScanRequest>): ScanRequest {
@@ -46,6 +47,30 @@ describe('P1-9：isFactoryParamRequire 嵌套函数向上查找（factory 注入
       const res = scan({ kind: 'files', files: [join(dir, 'index.js')] })
       expect(res.ok).toBe(true)
       expect(findingOf(res.report!, 'R2', 'high')).toBeDefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('round-16 D3：非常规文件（fifo/设备）不进读取面——cacheKey 阶段与扫描循环都要跳过', () => {
+  it('扫描集含 FIFO → 不挂死、R8-skip 兜底、正常返回', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-fifo-'))
+    writeFileSync(join(dir, 'index.js'), 'module.exports = 1')
+    const fifo = join(dir, 'x.sh')
+    let made = false
+    if (process.platform === 'linux' || process.platform === 'darwin') {
+      const mr = spawnSync('mkfifo', [fifo])
+      made = mr.status === 0
+    }
+    try {
+      if (!made) return // 非 POSIX/无 mkfifo：跳过（护栏逻辑与平台无关，路径已由单元断言覆盖）
+      const res = scan({ kind: 'files', files: [join(dir, 'index.js'), fifo] })
+      expect(res.ok).toBe(true)
+      const r8 = res.report!.findings.find(f => f.rule === 'R8' && f.file === 'x.sh')
+      expect(r8).toBeDefined()
+      // 正常文件不受影响（index.js 照常计数）
+      expect(res.report!.sourceCount).toBeGreaterThanOrEqual(1)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -314,5 +339,28 @@ describe('P2-9：R7 占位符按段排除（真实 key 混 example 文本不再�
     const res = scan(codeRequest({ code }))
     expect(res.ok).toBe(true)
     expect(findingOf(res.report!, 'R7')).toBeUndefined()
+  })
+})
+
+describe('round-15：R1/R2 解码语料盲区修复（base64/hex 混淆的逃逸字符串不再漏报）', () => {
+  it('R1: x.constructor(atob("cmV0dXJuIHByb2Nlc3M=")) → critical（此前零命中）', () => {
+    // atob('cmV0dXJuIHByb2Nlc3M=') 解码 = "return process" —— 纯 base64 混淆的构造器链逃逸
+    const res = scan(codeRequest({ code: `const x = {}; x.constructor(atob("cmV0dXJuIHByb2Nlc3M="))()` }))
+    expect(res.ok).toBe(true)
+    const f = findingOf(res.report!, 'R1', 'critical')
+    expect(f).toBeDefined()
+  })
+  it('R2: new Function(Buffer.from(...,"base64")) → critical 升级（此前只报 high 不升级）', () => {
+    // Buffer.from 解码出 "return process" —— new Function 参数含逃逸串应升级 critical
+    // （tryDecodeLiteral 的解码语料面：直接传解码调用，与 R1 atob 用例对称）
+    const res = scan(codeRequest({ code: `new Function(Buffer.from("cmV0dXJuIHByb2Nlc3M=", "base64"))` }))
+    expect(res.ok).toBe(true)
+    const f = findingOf(res.report!, 'R2', 'critical')
+    expect(f).toBeDefined()
+  })
+  it('解码结果不含逃逸特征 → 不升级（false positive 防护）', () => {
+    const res = scan(codeRequest({ code: `const x = {}; x.constructor(atob("aGVsbG8gd29ybGQ="))()` })) // "hello world"
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R1')).toBeUndefined()
   })
 })

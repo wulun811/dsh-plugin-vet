@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { hashPackTarball, verifyAgainstRegistry } from '../lib/guards/registry-verify.js'
 import { computePackageHash, refreshBaseline, setBaselineDirForTest } from '../lib/guards/content-baseline.js'
+import { setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
+import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { VetStatus } from '../lib/guard/status.js'
 import type { VetConfig } from '../lib/config.js'
@@ -93,9 +95,23 @@ describe('hashPackTarball（registry 对账的哈希管线）', () => {
 })
 
 describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁）', () => {
+  // round-20 review（测试写穿真实环境）：scan 完成时 recordScanSummary/recordVersionScan
+  // 无条件写盘——此前只隔离 baseline 目录，扫描夹具包会把记录写进真实 ~/.dsh/vet/
+  // （用户环境出现过 @vet-test/*、@esm-test/pkg、@deepseek-ai/vet-fixture 残留）。
+  // 与 plugin.test.ts 同纪律：capabilities/summaries 全部重定向 tmp。
+  let sandbox: string
+  beforeEach(() => {
+    sandbox = mkdtempSync(join(tmpdir(), 'vet-reconcile-'))
+    setBaselineDirForTest(join(sandbox, 'baseline'))
+    setCapabilitiesDirForTest(join(sandbox, 'caps'))
+    setSummariesDirForTest(join(sandbox, 'summaries'))
+  })
   afterAll(() => {
     setBaselineDirForTest(undefined)
+    setCapabilitiesDirForTest(undefined)
+    setSummariesDirForTest(undefined)
     rmSync(OFFICIAL_PKG, { recursive: true, force: true })
+    if (sandbox !== undefined) rmSync(sandbox, { recursive: true, force: true })
     vi.unstubAllGlobals()
   })
 
@@ -133,9 +149,10 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
       const u = String(url)
       if (u.endsWith(`/${VERSION}`)) {
-        return new Response(JSON.stringify({ dist: { tarball: 'https://registry.npmjs.org/x.tgz' } }))
+        const body = JSON.stringify({ dist: { tarball: 'https://registry.npmjs.org/x.tgz' } })
+        return new Response(body, { status: 200, headers: { 'content-length': String(body.length) } })
       }
-      return new Response(new Uint8Array(tgz))
+      return new Response(new Uint8Array(tgz), { status: 200, headers: { 'content-length': String(tgz.length) } })
     }))
     const status = new VetStatus()
     const ctx = new FakeCtx()
@@ -154,9 +171,10 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
       const u = String(url)
       if (u.endsWith(`/${VERSION}`)) {
-        return new Response(JSON.stringify({ dist: { tarball: 'https://registry.npmjs.org/x.tgz' } }))
+        const body = JSON.stringify({ dist: { tarball: 'https://registry.npmjs.org/x.tgz' } })
+        return new Response(body, { status: 200, headers: { 'content-length': String(body.length) } })
       }
-      return new Response(new Uint8Array(officialSnapshot))
+      return new Response(new Uint8Array(officialSnapshot), { status: 200, headers: { 'content-length': String(officialSnapshot.length) } })
     }))
     const status = new VetStatus()
     const ctx = new FakeCtx()

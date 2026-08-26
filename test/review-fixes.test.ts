@@ -50,25 +50,31 @@ describe('#2/#3：持久化忽略——内存缓存 + dirname 修复', () => {
     expect(parsed.dismissed['x:y']).toBeTruthy()
   })
 
-  it('#2 热路径：record 不会因持久化忽略执行同步读盘（缓存已加载后 dismissed 命中即拦截）', () => {
+  it('#2 热路径：持久化忽略的 alarm 照常入列但折叠进 dismissed（round-15 语义）', () => {
     persistentlyDismiss('t1:fd:512')
     const s = new VetStatus()
-    // 被持久化忽略的 alarm 在 record 收口层直接拦截，不进缓冲
-    expect(s.record({ id: 't1:fd:512', severity: 'red', source: 't1', kind: 'fd', message: 'x', at: Date.now() })).toBe('deduped')
-    expect(s.snapshot().alarmCount).toBe(0)
+    // round-15：record 不再对持久化忽略短路（旧行为返回 deduped 不入列 → 跨 session
+    // 彻底消失、无恢复入口）——照常入列（'new'），由 snapshot 折叠进 dismissed 区
+    expect(s.record({ id: 't1:fd:512', severity: 'red', source: 't1', kind: 'fd', message: 'x', at: Date.now() })).toBe('new')
+    const snap = s.snapshot()
+    expect(snap.alarmCount).toBe(0)
+    expect(snap.dismissed.length).toBe(1)
     // 未忽略的照常入列
     expect(s.record({ id: 't2:fs-write:/etc/passwd:plug', severity: 'red', source: 't2', kind: 'fs-write', message: 'x', at: Date.now() })).toBe('new')
   })
 
-  it('#2 mergeKey 一致：同一 mergeKey 的报警被记 ignored → 后续同类报警全部拦截', () => {
+  it('#2 mergeKey 一致：同一 mergeKey 的报警被记 ignored → 同类报警折叠进 dismissed', () => {
     persistentlyDismiss('t2:n3-key-leak:evil')
     const s = new VetStatus()
     const r = s.record({
       id: 'n3-key-leak-pem:evil:hash1', severity: 'red', source: 't2', kind: 'n3-key-leak',
       message: 'x', pluginHint: 'evil', mergeKey: 't2:n3-key-leak:evil', at: Date.now(),
     })
-    expect(r).toBe('deduped')
-    expect(s.snapshot().alarmCount).toBe(0)
+    // round-15：入列（'new'），折叠判定按 mergeKey 命中持久化忽略 → dismissed 区
+    expect(r).toBe('new')
+    const snap = s.snapshot()
+    expect(snap.alarmCount).toBe(0)
+    expect(snap.dismissed.length).toBe(1)
   })
 
   it('存储文件确凿持久化：列表读取与磁盘一致', () => {
@@ -107,6 +113,20 @@ describe('#10：取证文件时间戳轮转', () => {
     // 两文件时间戳（文件名中段）不同（会话轮转）
     const stampOf = (f: string): string => f.replace(/^evil-pkg-/, '').replace(/\.jsonl$/, '')
     expect(stampOf(files2[0])).not.toBe(stampOf(files2[1]))
+    resetForensics()
+  })
+
+  it('round-15：单文件超上限后停写（恶意插件事件风暴不填满磁盘）', () => {
+    const fdir = join(TMP, 'forensics-root-cap')
+    resetForensics()
+    setForensicsDirForTest(fdir)
+    armForensics('storm-pkg')
+    const path = join(fdir, require('node:fs').readdirSync(fdir)[0]!)
+    // 预先写超上限内容（模拟已记录大量事件）；随后 record 应静默跳过
+    require('node:fs').writeFileSync(path, 'x'.repeat(5 * 1024 * 1024 + 100), 'utf8')
+    recordForensics('storm-pkg', { module: 'fs', op: 'read', target: '/etc/passwd' })
+    const size = require('node:fs').statSync(path).size
+    expect(size).toBeLessThanOrEqual(5 * 1024 * 1024 + 200) // 未再增长
     resetForensics()
   })
 })

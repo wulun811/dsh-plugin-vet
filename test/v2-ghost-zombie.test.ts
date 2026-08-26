@@ -92,6 +92,16 @@ describe('R16 幽灵依赖（代码引用但 package.json 未声明）', () => {
     expect(res.ok).toBe(true)
     expect(res.report!.capabilities?.ghostDeps).toBeUndefined()
   })
+
+  it('round-15：Node 内建（fs/path/os 裸名 CJS 惯用）不列幽灵依赖', () => {
+    writeFile(root, 'package.json', JSON.stringify({ name: 'p', version: '1.0.0' }))
+    // 传统 CJS 裸名内建导入：不依赖 package.json dependencies，但也不是「引用了未声明的包」
+    writeFile(root, 'index.js', 'require("fs"); require("path"); require("os"); require("fs/promises")')
+    const res = scanPkg()
+    expect(res.ok).toBe(true)
+    expect(res.report!.capabilities?.ghostDeps).toBeUndefined()
+    expect(res.report!.findings.filter(f => f.rule === 'R16')).toHaveLength(0)
+  })
 })
 
 describe('R16 僵尸依赖（package.json 声明但 node_modules 缺失）', () => {

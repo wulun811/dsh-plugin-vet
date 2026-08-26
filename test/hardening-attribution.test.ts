@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { patchModule, isStackTraceTampered, DEFAULT_HOOK_CONFIG } from '../lib/guard/runtime-hooks.js'
-import { confirmBlock, resetConfirmBlock } from '../lib/guard/confirm-block.js'
+import { confirmBlock, resetConfirmBlock, setCredentialHomeForTest } from '../lib/guard/confirm-block.js'
 import type { HookAlarm } from '../lib/guard/runtime-hooks.js'
 
 describe('0.1.16 加固——归因链防篡改（C4）', () => {
@@ -13,13 +13,14 @@ describe('0.1.16 加固——归因链防篡改（C4）', () => {
 
   beforeEach(() => {
     fakeHome = mkdtempSync(join(tmpdir(), 'vet-home-'))
-    process.env.HOME = fakeHome
+    // C3（review）：凭据清单基准 = 快照，测试经 setCredentialHomeForTest 覆写（改 env 已无效）
+    setCredentialHomeForTest(fakeHome)
     resetConfirmBlock()
   })
   afterEach(() => {
     Error.prepareStackTrace = originalPrepare
     Error.stackTraceLimit = originalLimit
-    delete process.env.HOME
+    setCredentialHomeForTest(undefined)
     resetConfirmBlock()
     rmSync(fakeHome, { recursive: true, force: true })
   })
@@ -57,6 +58,21 @@ describe('0.1.16 加固——归因链防篡改（C4）', () => {
       const fsRead = sink.find(a => a.kind === 'fs-read')!
       expect(fsRead.pluginHint).toBeUndefined() // 归因不可信：不取栈
     } finally { disp() }
+  })
+
+  it('S3：mid-loop 抛错（只读属性）→ 已包装操作回滚，无半包装残留（装配失败可清理）', () => {
+    const unlink = (): string => 'u'
+    const mod: Record<string, unknown> = {
+      unlink, // DESTROY_OPS 先于 WRITE_OPS 处理 → unlink 会先被包装成功
+      writeFileSync: () => 'w',
+    }
+    Object.defineProperty(mod, 'writeFileSync', { value: mod.writeFileSync, writable: false })
+    expect(() => patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, () => {}, () => new Map())).toThrow(TypeError)
+    // 已成功的 unlink 包装必须被回滚：函数身份 == 原始函数（否则残留包装且调用方拿不到 disposer）
+    expect(mod.unlink).toBe(unlink)
+    expect((mod.unlink as () => string)()).toBe('u')
+    // 只读属性原样（回滚对它的赋值同样失败但不抛）
+    expect((mod.writeFileSync as () => string)()).toBe('w')
   })
 
   it('归因被篡改 + 族2 凭据本体删除 → 照样拦截（哨兵身份）', () => {
