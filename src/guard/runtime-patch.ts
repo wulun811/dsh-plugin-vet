@@ -6,6 +6,7 @@ import { DESTROY_OPS, WRITE_OPS, READ_OPS, PROBE_OPS, PROC_OPS, FS_LEDGER_OPS } 
 import type { HookModule, HookConfig, HookAlarm } from './runtime-ops.js'
 import type { LedgerFsEvent, LedgerNetEvent } from './exfil-ledger.js'
 import { confirmBlock, BLOCK_FS_OPS, type BlockDecision } from './confirm-block.js'
+import { incrementBlocked } from './stats.js'
 import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact, isDshAtomicStagingPath } from './runtime-denoise.js'
 import { classifyOp } from './runtime-classify.js'
 import { classifyNetworkOp, extractNetworkTarget, isTrackedNetHost, isLoopbackHost, isControlPlanePath, NET_OPS } from './runtime-net.js'
@@ -29,11 +30,12 @@ export function patchModule(
 ): () => void {
   const original = new Map<string, unknown>()
   const allOps = [...DESTROY_OPS, ...WRITE_OPS, ...READ_OPS, ...PROC_OPS, ...PROBE_OPS]
-  for (const opName of allOps) {
-    const fn = mod[opName]
-    if (typeof fn !== 'function') continue
-    original.set(opName, fn)
-    const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+  try {
+    for (const opName of allOps) {
+      const fn = mod[opName]
+      if (typeof fn !== 'function') continue
+      original.set(opName, fn)
+      const wrapped = function (this: unknown, ...args: unknown[]): unknown {
       // R31：rootIndex 归因阶段自身的 fs 探测直通（断开敏感包名 alarm→归因→fs→alarm 无限递归）
       // P2-6：vet 自身已知 IO（patch 配置读写）同样直通，不产生自报警
       if (isRootIndexing() || isVetSelfIo()) {
@@ -60,10 +62,15 @@ export function patchModule(
       // C4：归因被篡改 + 敏感操作 → 独立 red 报警（主动隐藏归因本身就是攻击信号）
       if (stackTampered && (alarm !== null || blockRelevant)) {
         const t = firstString(args) ?? ''
+        // round-16 review（S5）：拦截降级必须显式记录——stackTampered 时族 1（已确认插件
+        // 的后续破坏）无法按插件身份判定（哨兵身份不匹配任何 f1Blocked 条目）→ 拦截静默
+        // 降级。家族 2（凭据本体破坏）与 3/4 路径不受影响（凭据精确匹配不依赖归因）；
+        // 在既有 C4 红警文案里点明降级面，用户不会误以为拦截仍全覆盖。
         sink({
           severity: 'red',
           kind: 'attribution-tampered',
-          message: '栈归因被篡改（Error.prepareStackTrace/stackTraceLimit 被修改）——敏感操作无法归属，主动隐藏归因疑为攻击（C4）',
+          message: '栈归因被篡改（Error.prepareStackTrace/stackTraceLimit 被修改）——敏感操作无法归属，主动隐藏归因疑为攻击（C4）'
+            + (blockRelevant && confirmBlock.mode() === 'block' ? '；N7 族 1 拦截（已确认插件的后续破坏）因归因不可用而降级（族 2 凭据本体破坏仍拦截）' : ''),
           target: t.slice(0, 120),
         })
       }
@@ -110,6 +117,9 @@ export function patchModule(
           target: target.slice(0, 120),
           pluginHint: hint,
         })
+        // round-15 review：N7 钩子侧拦截此前不计入 stats.blockedCount（只由静态 deny 门禁
+        // 的 internal-plugin 路径递增）——面板「拦截次数」对运行时拦截长期显示 0。
+        incrementBlocked()
         throw new Error('vet 拦截（N7）：' + block.reason + '；如系误判请将 confirmBlock 降为 alarm 后重试')
       }
       const result = (fn as (...a: unknown[]) => unknown).apply(this, args)
@@ -140,9 +150,22 @@ export function patchModule(
       if (alarm !== null) sink({ ...alarm, pluginHint: hint })
       return result
     }
-    mod[opName] = wrapped
-    brandVetHook(wrapped)
-    registerHookTarget(moduleName, mod, [opName])
+      mod[opName] = wrapped
+      brandVetHook(wrapped)
+      registerHookTarget(moduleName, mod, [opName])
+    }
+  } catch (error) {
+    // round-16 review（S3）：mid-loop 抛错（冻结模块/只读属性/Proxy 拒绝等）→ 已包装的
+    // 操作必须回滚再抛——否则部分包装残留且调用方拿不到 disposer（installT2 装配失败
+    // 路径无法清理，热重载后旧包装永久叠加）。
+    for (const [opName, fn] of original) {
+      try {
+        mod[opName] = fn
+      } catch {
+        // 回滚失败（原属性本身不可写）——无害：该属性从未被改成功
+      }
+    }
+    throw error
   }
   return () => {
     for (const [opName, fn] of original) mod[opName] = fn
@@ -163,11 +186,12 @@ export function patchNetworkModule(
   canaryScan?: (hint: string | undefined, text: string, where: 'url' | 'body') => void,
 ): () => void {
   const original = new Map<string, unknown>()
-  for (const opName of NET_OPS) {
-    const fn = mod[opName]
-    if (typeof fn !== 'function') continue
-    original.set(opName, fn)
-    const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+  try {
+    for (const opName of NET_OPS) {
+      const fn = mod[opName]
+      if (typeof fn !== 'function') continue
+      original.set(opName, fn)
+      const wrapped = function (this: unknown, ...args: unknown[]): unknown {
       if (isRootIndexing() || isVetSelfIo()) {
         return (fn as (...a: unknown[]) => unknown).apply(this, args)
       }
@@ -238,6 +262,18 @@ export function patchNetworkModule(
     mod[opName] = wrapped
     brandVetHook(wrapped)
     registerHookTarget(moduleName, mod, [opName])
+  }
+  } catch (error) {
+    // round-16 review（S3）：mid-loop 抛错（冻结模块等）→ 已包装操作回滚再抛
+    // （与 patchModule 同纪律：装配失败不允许残留半包装状态）。
+    for (const [opName, fn] of original) {
+      try {
+        mod[opName] = fn
+      } catch {
+        // 回滚失败（原属性本身不可写）——无害：该属性从未被改成功
+      }
+    }
+    throw error
   }
   return () => {
     for (const [opName, fn] of original) mod[opName] = fn

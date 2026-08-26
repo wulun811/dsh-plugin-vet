@@ -9,7 +9,7 @@
  * 不做会话内容监听——只记录已归因插件的操作形状与目标，与 N3 台账同一数据面。
  * @module dsh-plugin-vet/forensics
  */
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
@@ -33,9 +33,13 @@ const SNAPSHOT_DIR: string | undefined = (() => {
 
 let dirOverride: string | undefined
 
-/** 取证目录根。 */
+/** C3（第二轮补漏）：默认取证目录在模块加载时定值——homedir() 随 $HOME 变，运行时
+ * 回退可被进程内插件改 env 重定向（伪造取证存储）。与 archive.ts 同款纪律。 */
+const SNAPSHOT_DEFAULT_DIR = join(homedir(), '.dsh', 'vet', 'forensics')
+
+/** 取证目录根（快照 env + homedir）。 */
 export function forensicsRoot(): string {
-  return dirOverride ?? SNAPSHOT_DIR ?? join(homedir(), '.dsh', 'vet', 'forensics')
+  return dirOverride ?? SNAPSHOT_DIR ?? SNAPSHOT_DEFAULT_DIR
 }
 
 /** 测试专用：覆盖快照目录。 */
@@ -83,6 +87,13 @@ export function isArmed(plugin: string | undefined): boolean {
   return plugin !== undefined && armed.has(plugin)
 }
 
+/**
+ * round-15 review（磁盘填满面）：单个取证文件大小上限——恶意插件被武装后操作频率
+ * 由攻击者控制（fs 事件风暴可秒级写爆磁盘；会话轮转只按重启分界，不防单会话内风暴）。
+ * 超过上限即停写该插件后续事件（fail-open 纪律：取证是增强，宁可截断不可拖垮宿主磁盘）。
+ */
+const FORENSICS_FILE_MAX_BYTES = 5 * 1024 * 1024
+
 /** 记录一条取证事件（仅对已武装插件；fail-open）。 */
 export function record(plugin: string | undefined, evt: Omit<ForensicsEvent, 'plugin' | 'at'>): void {
   if (plugin === undefined || !armed.has(plugin)) return
@@ -90,6 +101,12 @@ export function record(plugin: string | undefined, evt: Omit<ForensicsEvent, 'pl
     try {
       const path = fileCache.get(plugin)
       if (path === undefined) return
+      // 大小预检：超限 → 静默截断（fail-open；不 resolved 出副作用）
+      try {
+        if (statSync(path).size > FORENSICS_FILE_MAX_BYTES) return
+      } catch {
+        // 文件尚未创建/被删：stat 失败交给 appendFileSync 兜底（fail-open）
+      }
       const line: ForensicsEvent = { ...evt, plugin, at: Date.now() }
       appendFileSync(path, JSON.stringify(line) + '\n')
     } catch {

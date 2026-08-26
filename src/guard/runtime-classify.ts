@@ -16,6 +16,13 @@ const DESTRUCTIVE_TOKENS = new Set(['rm', 'mv', 'cp', 'dd', 'mkfs', 'mkfs.ext4',
 export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
   const { module, op: name, args } = op
   const target = firstString(args) ?? ''
+  // round-4 review（M5 补漏）：成对路径操作（cp/rename/copyFile）的第二个参数是目标侧——
+  // 蜜罐/完整性判定此前只查首参（源侧），`cp(/tmp/x, 诱饵文件)` / `rename(x, 金丝雀)` 的
+  // 目标侧触碰全部漏报（N7 族 3/4 与 fs-write 早已用 allStrings 查双路径，蜜罐/完整性是
+  // 两条高置信 red 信号，不应盲区）。成对操作=触碰判定候选取全部字符串参数。
+  const pairOp = (name === 'cp' || name === 'cpSync' || name === 'rename' || name === 'renameSync'
+    || name === 'copyFile' || name === 'copyFileSync')
+  const candTargets: string[] = pairOp ? allStrings(args) : [target]
   if (module === 'child_process' && PROC_OPS.has(name)) {
     const cmd = commandString(args)
     // 命令全貌（含 spawn argv 数组的元素）：exec('rm -rf ~/.ssh') 与 spawn('rm', ['-rf', '/home/u/.ssh'])
@@ -39,22 +46,31 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
       target: cmd.slice(0, 120),
     }
   }
-  if (module === 'fs' && isHoneypotPath(target, cfg.honeypotRoots)) {
-    // D27 蜜罐：触碰诱饵路径（读/写/删）→ 高置信的翻找密钥信号，独立报警类
-    if (DESTROY_OPS.has(name) || WRITE_OPS.has(name) || READ_OPS.has(name) || PROBE_OPS.has(name)) {
-      const severity = DESTROY_OPS.has(name) ? 'red' : 'yellow'
-      return { severity, kind: 'honeypot', message: `蜜罐命中：${name}(${target.slice(0, 120)}) — 诱饵密钥文件被触碰（疑似翻找密钥）`, target }
-    }
-  }
   if (module === 'fs') {
+    // D27 蜜罐：触碰诱饵路径（读/写/删）→ 高置信的翻找密钥信号，独立报警类。
+    // round-4 review（M5）：成对路径操作（cp/rename/copyFile）候选含目标侧——
+    // `cp(/tmp/x, 诱饵)` / `rename(x, 诱饵)` 覆盖诱饵、落位诱饵同样算触碰。
+    const hpHit = candTargets.find(t => isHoneypotPath(t, cfg.honeypotRoots))
+    if (hpHit !== undefined) {
+      if (DESTROY_OPS.has(name) || WRITE_OPS.has(name) || READ_OPS.has(name) || PROBE_OPS.has(name)) {
+        const severity = DESTROY_OPS.has(name) ? 'red' : 'yellow'
+        return { severity, kind: 'honeypot', message: `蜜罐命中：${name}(${hpHit.slice(0, 120)}) — 诱饵密钥文件被触碰（疑似翻找密钥）`, target: hpHit }
+      }
+    }
     // N4 完整性金丝雀（仅 ~/.dsh 内）：写/删即 red kind=integrity——勒索加密 profile 目录
-    // （配置/会话/凭据面）的最早触发信号；读不报（内容固定已知，无害）
-    if ((DESTROY_OPS.has(name) || WRITE_OPS.has(name)) && isIntegrityPath(target, cfg.integrityRoots) && !isLockSiblingPath(target)) {
-      return {
-        severity: 'red',
-        kind: 'integrity',
-        message: `完整性金丝雀被写删：${name}(${target.slice(0, 120)}) — ~/.dsh 关键文件被篡改（疑似勒索/破坏，N4）`,
-        target,
+    // （配置/会话/凭据面）的最早触发信号；读不报（内容固定已知，无害）。
+    // M5：成对路径操作的 dest 侧（`cp(x, 金丝雀)` 覆盖写 / `rename(x, 金丝雀)` 篡位）同样触发；
+    // src 侧是「读」（cp 金丝雀 → 备份）不触发（沿用读不报语义）。
+    if (DESTROY_OPS.has(name) || WRITE_OPS.has(name)) {
+      const destCandidates: string[] = pairOp ? allStrings(args).slice(1) : candTargets
+      const integrityHit = destCandidates.find(t => !isLockSiblingPath(t) && isIntegrityPath(t, cfg.integrityRoots))
+      if (integrityHit !== undefined) {
+        return {
+          severity: 'red',
+          kind: 'integrity',
+          message: `完整性金丝雀被写删：${name}(${integrityHit.slice(0, 120)}) — ~/.dsh 关键文件被篡改（疑似勒索/破坏，N4）`,
+          target: integrityHit,
+        }
       }
     }
     // N7 族 3/4：系统持久化/提权面写入、供应链/安装态篡改 → 报警（写操作判定前，更具体）

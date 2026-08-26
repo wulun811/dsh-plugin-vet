@@ -149,6 +149,16 @@ function trimWindow<T extends { at: number }>(arr: T[], now: number, windowMs: n
   while (arr.length > 0 && arr[0].at < cutoff) arr.shift()
 }
 
+/** 窗口数组计数上限（round-16 review S2）：窗口内事件爆发（如 10s 内 100 万次 unlink）
+ * 会让 deletes/writeEvents 等数组无界增长——内存 O(n) 且每次检查的线性扫描/reduce
+ * 变成 O(n²)。阈值最高只有 20 量级，截断到 2048 不影响任何签名判定；只丢最旧样本。
+ */
+const WINDOW_CAP = 2048
+function pushCap<T>(arr: T[], item: T): void {
+  arr.push(item)
+  if (arr.length > WINDOW_CAP) arr.splice(0, arr.length - WINDOW_CAP)
+}
+
 /** 改名是否呈现加密特征：扩展名变化 + 目标为加密标记/随机 hex 形态。 */
 export function isEncryptionRename(from: string, to: string): boolean {
   if (from === to) return false
@@ -310,7 +320,7 @@ export class ExfilLedger {
             const u = new URL(urlMatch[0])
             // IPv6 去括号：url.hostname 对 IPv6 返回 [addr]，net 侧返回 addr
             const hostname = u.hostname.replace(/^\[|\]$/g, '')
-            row.spawnTargets.push({ at: now, target: hostname })
+            pushCap(row.spawnTargets, { at: now, target: hostname })
             trimWindow(row.spawnTargets, now, this.spawnNetWindowMs)
           } catch {
             // URL 解析失败（罕见）——不记录，宁可漏不误报
@@ -323,40 +333,49 @@ export class ExfilLedger {
       const subject = evt.target
       if (!isNoisePath(subject)) {
         if (DESTROY_OPS.has(evt.op)) {
-          row.deletes.push({ at: now })
+          pushCap(row.deletes, { at: now })
           trimWindow(row.deletes, now, this.windowMs)
           // 0.1.20：写后删除关联检测
           const recentWrite = row.writeEvents.find(w => w.path === subject && now - w.at <= this.windowMs)
           if (recentWrite !== undefined) {
-            row.writeThenDeletes.push({ at: now, path: subject })
+            pushCap(row.writeThenDeletes, { at: now, path: subject })
             trimWindow(row.writeThenDeletes, now, this.windowMs)
           }
         } else if (WRITE_OPS.has(evt.op)) {
           // 仅纯内容写计入 writeEvents（copy/rename 是移动/复制——「写后删除」与放大写入
           // 的字节依据只针对真正落盘的内容写，避免 copy 后删源文件这类正常清理误报）
           if (WRITE_CONTENT_OPS.has(evt.op) && evt.bytes > 0) {
-            row.writeEvents.push({ at: now, bytes: evt.bytes, path: subject })
+            pushCap(row.writeEvents, { at: now, bytes: evt.bytes, path: subject })
             trimWindow(row.writeEvents, now, this.windowMs)
           }
           const readAt = row.readTimes.get(subject)
           const already = row.inPlace.some(p => p.path === subject && now - p.at <= this.windowMs)
           if (readAt !== undefined && now - readAt <= this.windowMs && !already) {
-            row.inPlace.push({ at: now, path: subject })
+            pushCap(row.inPlace, { at: now, path: subject })
           }
           if ((evt.op === 'rename' || evt.op === 'renameSync') && evt.paths.length >= 2 && isEncryptionRename(evt.paths[0], evt.paths[1])) {
-            row.renames.push({ at: now, from: evt.paths[0], to: evt.paths[1] })
+            pushCap(row.renames, { at: now, from: evt.paths[0], to: evt.paths[1] })
             trimWindow(row.renames, now, this.windowMs)
           }
         }
       }
       if (READ_OPS.has(evt.op) && !isNoisePath(subject)) {
         row.readTimes.set(subject, now)
+        // round-5 review（A#10）：readTimes 是唯一不修剪的增长面（deletes/renames/
+        // writeEvents 都在 push 时 trimWindow；readTimes 只靠 24h TTL 整行淘汰）——
+        // 插件遍历大量不同敏感路径时 Map 键线性累积。按窗口惰性修剪（保窗口内判定
+        // 所需），写到 256 键以上才触发扫描，兼顾热路径零开销。
+        if (row.readTimes.size > 256) {
+          for (const [p, at] of row.readTimes) {
+            if (now - at > this.windowMs) row.readTimes.delete(p)
+          }
+        }
         // 0.1.20：高频小文件读取检测（< 1KB 视为小文件；同窗口内按 path 去重——
         // 轮询同一文件不累加，只有扫描不同小文件才计数，贴近「凭据狩猎」语义）
         if (evt.bytes > 0 && evt.bytes < 1024) {
           const dup = row.smallFileReads.some(s => s.path === subject && now - s.at <= this.windowMs)
           if (!dup) {
-            row.smallFileReads.push({ at: now, path: subject })
+            pushCap(row.smallFileReads, { at: now, path: subject })
             trimWindow(row.smallFileReads, now, this.windowMs)
           }
         }
@@ -383,7 +402,7 @@ export class ExfilLedger {
     row.lastSeen = now
     // 0.1.20：网络目标记录（用于 spawn + network 关联）
     if (evt.hostname !== '') {
-      row.netTargets.push({ at: now, target: evt.hostname })
+      pushCap(row.netTargets, { at: now, target: evt.hostname })
       trimWindow(row.netTargets, now, this.spawnNetWindowMs)
     }
     const out = this.exfilChecks(row)
@@ -445,6 +464,14 @@ export class ExfilLedger {
   }
 
   private destroyChecks(row: LedgerRow, now: number): LedgerAlarm[] {
+    // round-5 review（A#1）：deletes/renames/writeEvents 只在「同类新事件」push 时
+    // trimWindow——插件在窗口内达成阈值后静默（如 1s 内 20 次 unlink 后停止活动），
+    // 陈旧计数永久保留：之后任何一次其他 fs 事件都会以过期计数再次产出
+    // n3-mass-delete/rename/write-amplify，status 的 60s 去重窗口一过就 replace 重入
+    // → 报警永久复燃、盾牌粘黄。统一在每次检查时对三个窗口修剪，计数反映真实窗口。
+    trimWindow(row.deletes, now, this.windowMs)
+    trimWindow(row.renames, now, this.windowMs)
+    trimWindow(row.writeEvents, now, this.windowMs)
     const th = this.thresholds(row)
     const deletes = row.deletes.length
     const renames = row.renames.length
@@ -498,7 +525,9 @@ export class ExfilLedger {
     return red ? out.filter(a => a.severity === 'red') : out
   }
 
-  /** 0.1.20：spawn + network 关联检测（spawn 后网络连接同一目标）。 */
+  /** 0.1.20：spawn + network 关联检测（spawn 后网络连接同一目标）。
+ * round-16 review（S2）：旧实现双层循环 O(spawn×net)（窗口数组各可达 2048 → 最坏 400 万
+ * 次比较/每次检查）；两数组都按时间升序，改单指针扫描 O(spawn+net) 摊还。 */
   private spawnNetChecks(row: LedgerRow): LedgerAlarm[] {
     const out: LedgerAlarm[] = []
     const now = Date.now()
@@ -506,11 +535,14 @@ export class ExfilLedger {
     trimWindow(row.spawnTargets, now, this.spawnNetWindowMs)
     trimWindow(row.netTargets, now, this.spawnNetWindowMs)
     // 目标已由两侧分别规范化为小写主机名（spawn 侧 new URL().hostname；net 侧 extractNetworkTarget）
+    let netStart = 0
     for (const spawn of row.spawnTargets) {
-      for (const net of row.netTargets) {
-        // 顺序约束：spawn 必须先于网络连接；net 早于 spawn 或超窗不计
-        if (net.at < spawn.at) continue
-        if (net.at - spawn.at > this.spawnNetWindowMs) continue
+      // net 数组按时间升序：跳过所有早于本 spawn 的 net 条目（且随 spawn 后移单调推进）
+      while (netStart < row.netTargets.length && row.netTargets[netStart].at < spawn.at) netStart++
+      for (let j = netStart; j < row.netTargets.length; j++) {
+        const net = row.netTargets[j]
+        // 顺序约束：spawn 必须先于网络连接；net 超窗不计（此后条目更晚，可直接跳出）
+        if (net.at - spawn.at > this.spawnNetWindowMs) break
         if (spawn.target === net.target) {
           out.push({
             severity: 'red',
@@ -530,6 +562,14 @@ export class ExfilLedger {
     const row = this.ledgers.get(plugin)
     if (row === undefined) return undefined
     return { sensitiveReadBytes: row.sensitiveReadBytes, netWriteBytes: row.netWriteBytes }
+  }
+
+  /** 单测辅助（S2 窗口计数上限断言）：某插件各窗口数组总样本数。 */
+  stateSize(plugin: string): number | undefined {
+    const row = this.ledgers.get(plugin)
+    if (row === undefined) return undefined
+    return row.deletes.length + row.renames.length + row.writeEvents.length + row.inPlace.length
+      + row.smallFileReads.length + row.writeThenDeletes.length + row.spawnTargets.length + row.netTargets.length
   }
 
   /** 单测辅助：清空全部状态。 */

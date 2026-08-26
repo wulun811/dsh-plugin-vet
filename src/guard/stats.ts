@@ -41,6 +41,10 @@ const SNAPSHOT_STATS_DIR: string | undefined = (() => {
 
 let statsDirOverride: string | undefined
 
+/** C3（第二轮补漏）：默认目录在模块加载时定值——homedir() 随 $HOME 变，运行时回退
+ * 可被进程内插件改 env 重定向。与 archive.ts 同款纪律。 */
+const SNAPSHOT_DEFAULT_DIR = join(homedir(), '.dsh', 'vet')
+
 /** 持久化计数器的进程内镜像：避免每次报警记录都同步读写 stats.json（sink 在热路径逐 fs/net 事件调用
  *  incrementAlarmsRecorded）。仅由 getStats()（盾牌 5s 轮询）落盘，最多丢失约一个轮询周期；stats 仅为展示，fail-open。
  *  切换统计目录（测试）时失效以重新从文件加载。 */
@@ -53,7 +57,7 @@ function mem(): VetStats {
 
 /** 统计文件路径：~/.dsh/vet/stats.json */
 export function statsPath(): string {
-  const dir = statsDirOverride ?? SNAPSHOT_STATS_DIR ?? join(homedir(), '.dsh', 'vet')
+  const dir = statsDirOverride ?? SNAPSHOT_STATS_DIR ?? SNAPSHOT_DEFAULT_DIR
   return join(dir, 'stats.json')
 }
 

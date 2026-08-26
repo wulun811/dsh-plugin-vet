@@ -72,6 +72,23 @@ export function readProcSample(pid: number): ProcSample | null {
   }
 }
 
+/** round-16 review（S6）：宿主 PID 复用复检——读 /proc/self/stat 的 ppid 字段（field 4）。
+ * 宿主退出后本进程被 init 收养（ppid → 1），即使宿主 pid 被系统复用成另一个进程，
+ * kill(0) 探测（pidAlive 语义）仍会误判「宿主存活」→ 哨兵继续监控一个无关进程直到
+ * 永远（报警错位 + 永不自杀）。ppid 变迁与 PID 复用无关，是宿主死亡的确定性证据。
+ * /proc 不可读（受限环境）→ 返回 false（沿用 kill(0) 探测，不误杀）。 */
+export function hostPpidChanged(expected: number): boolean {
+  try {
+    const stat = readFileSync('/proc/self/stat', 'utf8')
+    const close = stat.lastIndexOf(')')
+    if (close === -1) return false
+    const fields = stat.slice(close + 2).trim().split(' ')
+    return Number(fields[1]) !== expected
+  } catch {
+    return false
+  }
+}
+
 /** 一个 RSS 采样点（膨胀检测用）。 */
 export interface RssSample {
   rssKb: number
@@ -159,10 +176,6 @@ export function analyzeSample(prev: ProcSample | null, curr: ProcSample, cfg: Wa
 }
 
 /**
- * 哨兵子进程入口：监视 PPID（宿主）。宿主退出（/proc/<ppid>/stat 不可读）即自杀。
- * 每轮把报警以 JSON 行写到 stdout，宿主侧按行解析。
- */
-/**
  * 单例锁（D30 修漏）：同宿主（PPID）下只允许一个 vet 哨兵。
  * dsh 配置热重载（改 cordis.patch.yml 触发）会重新 apply vet 插件 → installRuntimeGuard
  * 重复执行 → 重复 spawn sidecar。旧实例的 disposer 不一定被调用（重复 apply 而非替换），
@@ -197,25 +210,41 @@ function siblingSidecarPids(hostPid: number): number[] {
 }
 
 /**
- * 哨兵子进程入口：监视 PPID（宿主）。宿主退出（/proc/<ppid>/stat 不可读）即自杀。
+ * 哨兵子进程入口：监视 PPID（宿主）。宿主退出即自杀。
+ * 宿主存活探测用 kill(0)（pidAlive 语义）而非读 /proc/<ppid>/stat：
+ * round-4 review（M5）——/proc 在容器/沙箱/受限挂载下可能不可读，读 stat 失败 ≠ 宿主
+ * 已退出；旧实现任何 stat 读取失败都 exit(0)，/proc 受限环境首轮即自杀（T1 熄灭 +
+ * respawn×5 噪音）。kill(0) 只依赖进程表（ESRCH=宿主死；EPERM=存在但不是我们子进程，
+ * 视同存活），与 /proc 可用性解耦。
  * 每轮把报警以 JSON 行写到 stdout，宿主侧按行解析。
  */
 export function sidecarMain(cfg: WatchConfig): void {
   const hostPid = process.ppid
+  // round-5 review（A#13）：宿主侧管道关闭（宿主崩溃/被杀前的窗口）时 stdout 写入会
+  // 触发未捕获 EPIPE —— 哨兵无任何 try/catch 包 main，未捕获错误直接崩进程（结果
+  // 相同：退出），但不留明确语义。error 即退出，与宿主失联时哨兵本就没有存活意义。
+  process.stdout.on('error', () => process.exit(0))
   // 单例锁：同宿主已有 vet-sidecar 兄弟 → 自己是重复 spawn 的冗余实例，直接退出
   if (siblingSidecarPids(hostPid).length > 0) {
     process.exit(0)
+  }
+  const hostAlive = (): boolean => {
+    try {
+      process.kill(hostPid, 0)
+      return true
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      return code === 'EPERM'
+    }
   }
   let prev: ProcSample | null = null
   let samples: RssSample[] = []
   let growthMultiples = 0
   const startAt = Date.now()
   const tick = (): void => {
-    try {
-      readFileSync(`/proc/${hostPid}/stat`, 'utf8')
-    } catch {
-      process.exit(0)
-    }
+    // S6：宿主死亡 = 本进程 ppid 变迁（被 init 收养）——PID 复用下 kill(0) 会误判存活
+    if (!hostAlive() || hostPpidChanged(hostPid)) process.exit(0)
+    // /proc 采样失败（受限环境）只降级字段（readProcSample 内部 -1/null），不自杀
     const curr = readProcSample(hostPid)
     if (curr === null) return
     for (const alarm of analyzeSample(prev, curr, cfg)) {
@@ -245,11 +274,15 @@ export function sidecarMain(cfg: WatchConfig): void {
 // 子进程入口分发：仅当以 --vet-sidecar 启动时进入哨兵模式（vitest/宿主正常 import 不受影响）。
 const sidecarIdx = process.argv.indexOf('--vet-sidecar')
 if (sidecarIdx !== -1) {
-  const intervalMs = Number(process.argv[sidecarIdx + 1] ?? DEFAULT_WATCH_CONFIG.intervalMs)
-  const memLimitMb = Number(process.argv[sidecarIdx + 2] ?? DEFAULT_WATCH_CONFIG.memLimitMb)
-  const forkBurstN = Number(process.argv[sidecarIdx + 3] ?? DEFAULT_WATCH_CONFIG.forkBurstN)
-  const fdLimit = Number(process.argv[sidecarIdx + 4] ?? DEFAULT_WATCH_CONFIG.fdLimit)
-  const growthMb = Number(process.argv[sidecarIdx + 5] ?? DEFAULT_WATCH_CONFIG.growthMb)
-  const growthWindowMs = Number(process.argv[sidecarIdx + 6] ?? DEFAULT_WATCH_CONFIG.growthWindowMs)
+  // round-5 review（A#7）：argv 解析后钳制下限——生产路径经 config schema z.natural().min(1)
+  // 校验，但直接 spawn（测试/手动/历史配置）传 0 会让 setInterval(0) 进入 /proc 忙循环
+  // （~1000 tick/s 读 status/children/fd，烧满一核）；memLimit 0 则任意 RSS 恒红。
+  const gt0 = (v: number, fallback: number): number => (Number.isFinite(v) && v > 0 ? v : fallback)
+  const intervalMs = gt0(Number(process.argv[sidecarIdx + 1] ?? DEFAULT_WATCH_CONFIG.intervalMs), DEFAULT_WATCH_CONFIG.intervalMs)
+  const memLimitMb = gt0(Number(process.argv[sidecarIdx + 2] ?? DEFAULT_WATCH_CONFIG.memLimitMb), DEFAULT_WATCH_CONFIG.memLimitMb)
+  const forkBurstN = gt0(Number(process.argv[sidecarIdx + 3] ?? DEFAULT_WATCH_CONFIG.forkBurstN), DEFAULT_WATCH_CONFIG.forkBurstN)
+  const fdLimit = gt0(Number(process.argv[sidecarIdx + 4] ?? DEFAULT_WATCH_CONFIG.fdLimit), DEFAULT_WATCH_CONFIG.fdLimit)
+  const growthMb = gt0(Number(process.argv[sidecarIdx + 5] ?? DEFAULT_WATCH_CONFIG.growthMb), DEFAULT_WATCH_CONFIG.growthMb)
+  const growthWindowMs = gt0(Number(process.argv[sidecarIdx + 6] ?? DEFAULT_WATCH_CONFIG.growthWindowMs), DEFAULT_WATCH_CONFIG.growthWindowMs)
   sidecarMain({ intervalMs, memLimitMb, forkBurstN, fdLimit, growthMb, growthWindowMs })
 }

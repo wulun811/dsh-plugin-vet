@@ -35,14 +35,17 @@ const KIND_LABEL: Record<ObservedKind, string> = {
   fsMutate: "敏感路径写删",
 }
 
-/** 某类观测是否被静态清单覆盖（保守：imports 非空即覆盖一切；否则看本类足迹）。 */
+/** 某类观测是否被静态清单覆盖（保守：imports 非空即覆盖一切；否则看本类足迹）。
+ * round-4 review（M1）：数组字段缺省守卫——旧扫描器产物/schema 演进可能缺某字段，
+ * `undefined.length` 会抛 TypeError 沿 sink → 包装器冒泡到插件自己的调用（唯一违背
+ * fail-open 承诺的路径）。与 version-diff.diffManifests 的 ?? [] 防御对齐。 */
 function covered(manifest: CapabilityManifest, kind: ObservedKind): boolean {
-  if (manifest.imports.length > 0) return true
+  if ((manifest.imports ?? []).length > 0) return true
   switch (kind) {
-    case "net": return manifest.hasNetwork || manifest.hosts.length > 0
-    case "spawn": return manifest.hasExec || manifest.spawnCmds.length > 0
+    case "net": return manifest.hasNetwork === true || (manifest.hosts ?? []).length > 0
+    case "spawn": return manifest.hasExec === true || (manifest.spawnCmds ?? []).length > 0
     case "fsRead":
-    case "fsMutate": return manifest.fsPaths.length > 0
+    case "fsMutate": return (manifest.fsPaths ?? []).length > 0
   }
 }
 
@@ -68,6 +71,10 @@ export class CapabilityDiffStore {
   * 无静态清单（从未扫描/官方豁免）→ 返回 null（不差分）。
   */
   observeAndCheck(action: ObservedAction): HiddenCapability | null {
+    // round-5 review（B-A10）：空/纯空白 value 不入任何路径——此前空值不记观测集
+    // 却仍走 !covered 分支产出内容为空的红警（message 里 ''.slice(0,120)），
+    // 「不记录却报警」不对称且污染状态面。
+    if (typeof action.value !== 'string' || action.value.trim() === '') return null
     const manifest = this.staticByPlugin.get(action.plugin)
     if (manifest === undefined) return null
     const perPlugin = this.observedByPlugin.get(action.plugin) ?? new Map()

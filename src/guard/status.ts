@@ -74,9 +74,18 @@ export class VetStatus {
   private lastScanValue: ScanEcho | undefined
 
   constructor(options: VetStatusOptions = {}) {
-    this.alarmMax = options.alarmMax ?? 20
-    this.dedupeWindowMs = options.dedupeWindowMs ?? 60_000
-    this.alarmTtlMs = options.alarmTtlMs ?? 24 * 60 * 60 * 1000
+    // round-5 review（B-A8）：构造参数 clamp——内部/测试脏输入（alarmMax<0 会使
+    // `this.alarms.length = alarmMax` 抛 RangeError；负 TTL 会让 expire 全删）不再
+    // 可能让 record 崩溃，记录路径在报警风暴时保持健壮。
+    this.alarmMax = options.alarmMax !== undefined && Number.isFinite(options.alarmMax) && options.alarmMax >= 1
+      ? Math.floor(options.alarmMax)
+      : 20
+    this.dedupeWindowMs = options.dedupeWindowMs !== undefined && Number.isFinite(options.dedupeWindowMs) && options.dedupeWindowMs >= 0
+      ? Math.floor(options.dedupeWindowMs)
+      : 60_000
+    this.alarmTtlMs = options.alarmTtlMs !== undefined && Number.isFinite(options.alarmTtlMs) && options.alarmTtlMs >= 1
+      ? Math.floor(options.alarmTtlMs)
+      : 24 * 60 * 60 * 1000
   }
 
   /** 淘汰超龄报警（TTL 过期）；level 与列表都只看存活报警。 */
@@ -130,10 +139,12 @@ export class VetStatus {
   record(alarm: VetAlarm): 'new' | 'deduped' {
     const now = Date.now()
     this.expire(now)
-    // 0.2.1：用户已持久化忽略的警报（或同类 mergeKey 警报）不入列——统一在收口层拦截，
-    // 保证所有记录点（t1/t2/scan）的忽略语义一致，避免调用点漏检查。
-    const dismissKey = alarm.mergeKey ?? alarm.id
-    if (isPersistentlyDismissed(dismissKey)) return 'deduped'
+    // round-15 review（持久化忽略跨 session 不可恢复修复）：此前检查 isPersistentlyDismissed
+    // 短路不入列——重启后该 id 的警报永远进不了 alarms，snapshot().dismissed（只读内存
+    // dismissedIds）恒空 → 「已忽略分区可恢复」（0.2.1 文档承诺）跨 session 失效，且被忽略
+    // 的警报再次真实发生时完全不可见（外泄/破坏继续静默）。现已删除短路：照常记录入列，
+    // 展示层按 isDismissed（内存 ∪ 持久化）折叠进「已忽略」区——忽略 = 折叠 + 不参与
+    // level/alarmCount，但记录保留且可恢复；量级最坏 = 已忽略区一条（mergeKey 聚合）。
     const groupKey = alarm.mergeKey ?? alarm.id
     const matchGroup = (a: VetAlarm): boolean => (a.mergeKey ?? a.id) === groupKey
     const recent = this.alarms.find(a => matchGroup(a) && now - a.at < this.dedupeWindowMs)
@@ -149,7 +160,7 @@ export class VetStatus {
     for (let i = this.alarms.length - 1; i >= 0; i--) {
       if (matchGroup(this.alarms[i])) this.alarms.splice(i, 1)
     }
-    this.alarms.unshift({ ...alarm, count: alarm.count ?? 1 })
+    this.alarms.unshift({ ...alarm, count: Math.max(1, alarm.count ?? 1) })
     if (this.alarms.length > this.alarmMax) this.alarms.length = this.alarmMax
     return 'new'
   }
@@ -162,8 +173,17 @@ export class VetStatus {
   snapshot(): VetStatusSnapshot {
     const now = Date.now()
     this.expire(now)
-    const active = this.alarms.filter(a => !this.dismissedIds.has(a.id))
-    const dismissed = this.alarms.filter(a => this.dismissedIds.has(a.id))
+    // round-15 review：分区改用 isDismissed（内存 ∪ 持久化）——被持久化忽略的警报在
+    // 重启后再触发时仍会入列，此处正确折叠进 dismissed 区（此前只认内存 dismissedIds，
+    // 持久化忽略的条目跨 session 既不显示也无法恢复）。
+    // 注意 mergeKey 语义：dismiss() 持久化时用 mergeKey ?? id 为键（status.ts Vetalarm
+    // 注释），折叠判定必须同键——只查 a.id 会让 mergeKey 报警重启后永远进 active。
+    const isFold = (a: VetAlarm): boolean => {
+      const key = a.mergeKey ?? a.id
+      return this.dismissedIds.has(key) || isPersistentlyDismissed(key)
+    }
+    const active = this.alarms.filter(a => !isFold(a))
+    const dismissed = this.alarms.filter(a => isFold(a))
     // P3-2：lastScan 加 TTL（复用 alarmTtlMs）——一次 suspicious 扫描不再让盾牌永久 yellow，
     // 插件已移除/长时间未再扫描时自动恢复 green。持续扫描会不断刷新 at，天然续期。
     const lastScan = this.lastScanValue !== undefined && now - this.lastScanValue.at < this.alarmTtlMs

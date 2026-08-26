@@ -34,8 +34,10 @@ export interface TelemetryFields {
 
 const CONFIG_CANDIDATES = ['cordis.patch.yml', 'cordis.yml']
 const POLL_INTERVAL_MS = 15_000
-const URL_MODE_RE = /(?:url|mode)\s*:\s*["']?([^"'\s,}]+)/g
-/** 遥测 row id（boot 端 TELEMETRY_ROW_ID = 'session-telemetry-otel'，round-15 适配）。 */
+// round-5 review（B-A20）：键名加词边界——旧正则 `(?:url|mode)\s*:` 在
+// 'endpoint-url: xxx' 这类带词根键上从中间截取 'url:' 命中，`m[0]` 截到的是
+// 'url' 而非完整键名 → flow 形态中非 url/mode 键被误提取成假 telemetry 变化黄警。
+const URL_MODE_RE = /(?<![A-Za-z0-9_.-])(url|mode)\s*:\s*["']?([^"'\s,}]+)/g
 const TELEMETRY_ROW_ID_RE = /(?:^|-)(?:session-)?telemetry(?:-|$)/
 
 function sha16(s: string): string {
@@ -47,9 +49,9 @@ function extractUrlModeFlow(out: TelemetryFields, flow: string): void {
   URL_MODE_RE.lastIndex = 0
   let m: RegExpExecArray | null
   while ((m = URL_MODE_RE.exec(flow)) !== null) {
-    const key = m[0].slice(0, m[0].indexOf(':')).trim().toLowerCase()
-    if (key === 'url') out.urlHash = sha16(m[1])
-    else if (key === 'mode') out.mode = m[1]
+    const key = m[1].toLowerCase()
+    if (key === 'url') out.urlHash = sha16(m[2])
+    else if (key === 'mode') out.mode = m[2]
   }
 }
 
@@ -91,8 +93,12 @@ export function extractTelemetryFields(text: string): TelemetryFields {
         const tail = line.slice(keyMatch[0].length).trim()
         const value = tail.replace(/^["']|["']$/g, '').trim()
         if (value !== '' && !value.startsWith('#')) {
-          if (key.endsWith('mode')) out.mode = value
-          else if (key.endsWith('url')) out.urlHash = sha16(value)
+          // round-15 review（过宽键匹配修复）：旧 endsWith('mode'/'url') 会把
+          // compatMode / callbackUrl 等无关键误当遥测字段 → 配置里加个无关键就刷
+          // 一条假「遥测配置变化」黄灯。只认键名恰为 url/mode，或作为路径末段
+          // （exporter.url / exporter.mode）——与行内形态（URL_MODE_RE 精确词边界）一致。
+          if (key === 'url' || key.endsWith('.url')) out.urlHash = sha16(value)
+          else if (key === 'mode' || key.endsWith('.mode')) out.mode = value
         }
         if (line.includes('{')) extractUrlModeFlow(out, line.slice(line.indexOf('{')))
       }
@@ -113,11 +119,12 @@ export function extractTelemetryFields(text: string): TelemetryFields {
     }
     if (indent <= telemetryIndent) { inTelemetry = false; continue }
     // telemetry 块内：url/mode 键（含 exporter.url / exporter.mode 深层键）
+    // round-15 review：与 row 形态同修——精确键/路径末段匹配，不误收 compatMode 等
     const tail = line.slice(keyMatch[0].length).trim()
     const value = tail.replace(/^["']|["']$/g, '').trim()
     if (value === '' || value.startsWith('#')) continue
-    if (key === 'mode' || key.endsWith('mode')) out.mode = value
-    else if (key === 'url' || key.endsWith('url')) out.urlHash = sha16(value)
+    if (key === 'url' || key.endsWith('.url')) out.urlHash = sha16(value)
+    else if (key === 'mode' || key.endsWith('.mode')) out.mode = value
   }
   return out
 }

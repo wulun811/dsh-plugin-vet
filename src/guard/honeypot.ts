@@ -15,6 +15,9 @@ import { generateKeyPairSync } from 'node:crypto'
 import { generateCanary, canaryStore, integrityCanaryContent } from './canary.js'
 
 export const DEFAULT_HONEYPOT_DIR = join(homedir(), '.dsh', '.local')
+// C3 加固：默认金丝雀根在模块加载时定值（homedir() 在 POSIX 优先 $HOME——进程内插件此后
+// 改 env 会把热重载后的金丝雀登记到新家，真实 ~/.dsh 金丝雀失保护；蜜罐默认目录同上款）。
+const DEFAULT_INTEGRITY_ROOT = join(homedir(), '.dsh')
 
 const ALNUM = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 const UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
@@ -25,9 +28,20 @@ const SECRET = () => Array.from({ length: 40 }, () => randChar(ALNUM)).join('')
 const UP16 = () => Array.from({ length: 16 }, () => randChar(UPPER)).join('')
 const B64 = (c = '') => Buffer.from(RAND() + c + SECRET()).toString('base64')
 // 前缀也提为常量：诱饵值必须「源码零密钥字面量」（含前缀），否则 vet 扫描自己的发布物时
-// R7 会把模板串拼接文本（如 'OPENAI_API_KEY=sk-'、'AKIA'）判成 high——重装 vet 会自锁。
+// R7 会把模板串拼接文本判成 high——重装 vet 会自锁。
 const SK_PREFIX = 'sk-'
 const AKIA_PREFIX = 'AKIA'
+// 键名/私钥头拆分（round-17 review 诉求）：诱饵模板的“键名= / BEGIN PRIVATE KEY”字面量
+// 会被通用敏感扫描（pre-commit 钩子、R7 环境键赋值行首规则）误判为泄露——实为运行时
+// 随机占位。写法约束：不用字符串 `+` 拼接键名与值（N2 解码器会折叠中间 Binary 子表达式
+// 还原出完整“键名=sk-”形态命中 R7 环境键赋值）；改用 Array.join（N2 无 Call 求值分支，
+// 不折叠），任何单行与任何还原语料都不含完整键形态，生成内容与拆分前完全一致。
+const ENV_DSH_KEY = ['DSH_', 'API_', 'KEY='].join('')
+const ENV_AWS_ACCESS_ID = ['AWS_', 'ACCESS_', 'KEY_ID='].join('')
+const ENV_AWS_SECRET = ['AWS_', 'SECRET_ACCESS_KEY='].join('')
+const ENV_OPENAI_KEY = ['OPENAI_', 'API_', 'KEY='].join('')
+const PRI_KEY_HEAD = '-----BEGIN' + ' PRIVATE KEY-----'
+const PRI_KEY_TAIL = '-----END ' + 'PRIVATE KEY-----'
 
 /**
  * 创建/校验蜜罐目录与诱饵文件（幂等：已存在的内容不重写；被删的诱饵自动重建）。
@@ -59,19 +73,33 @@ export function ensureHoneypot(dir: string, logger?: { warn(m: string): void }):
     }
     files.push(full)
   }
-  const put = (name: string, content: string): void => putWithCanary(name, () => content)
+  // round-4 review：id_rsa.pem/.pub 是真实 RSA 密钥（内容不可能嵌金丝雀），此前走
+  // putWithCanary 会注册「永不存在的孤儿金丝雀」——canary 集合里多 2 枚不可能命中的值，
+  // 且与「每个诱饵一枚金丝雀、可确认外泄」的承诺不符。独立写路径：不生成/不注册。
+  const putNoCanary = (name: string, content: string): void => {
+    const full = join(root, name)
+    if (!existsSync(full)) {
+      try {
+        writeFileSync(full, content, { mode: 0o600 })
+      } catch {
+        return
+      }
+    }
+    files.push(full)
+  }
   // 诱饵内容：前缀/格式真实，密钥体全部运行时随机——格式扫不出来，值却完全无效，
   // 且源码零密钥字面量（开源扫描器不会误报真密钥）。canary 混入随机体内（值字段），
   // 每个诱饵一枚，文件内容仍无关键词（纯 hex）。
-  putWithCanary('.env', (c) => `DSH_API_KEY=${SK_PREFIX}${c}${SECRET()}
-AWS_ACCESS_KEY_ID=${AKIA_PREFIX}${UP16()}
-AWS_SECRET_ACCESS_KEY=${SECRET()}
-OPENAI_API_KEY=${SK_PREFIX}${SECRET()}
-`)
+  putWithCanary('.env', (c) => [
+    ENV_DSH_KEY + SK_PREFIX + c + SECRET(),
+    ENV_AWS_ACCESS_ID + AKIA_PREFIX + UP16(),
+    ENV_AWS_SECRET + SECRET(),
+    ENV_OPENAI_KEY + SK_PREFIX + SECRET(),
+  ].join('\n') + '\n')
   putWithCanary('credentials.json', (c) => `{
   "type": "service_account",
   "project_id": "dsh-runtime-${RAND()}",
-  "private_key": "-----BEGIN PRIVATE KEY-----\\n${B64(c)}\\n-----END PRIVATE KEY-----",
+  "private_key": "${PRI_KEY_HEAD}\\n${B64(c)}\\n${PRI_KEY_TAIL}",
   "client_email": "runtime-${RAND()}@dsh-runtime-${RAND()}.iam.gserviceaccount.com",
   "token_uri": "https://oauth2.googleapis.com/token"
 }
@@ -82,11 +110,12 @@ OPENAI_API_KEY=${SK_PREFIX}${SECRET()}
   login dsh-runtime
   password ${c}${RAND()}
 `)
-  putWithCanary('aws-credentials', (c) => `[default]
-aws_access_key_id = ${AKIA_PREFIX}${UP16()}
-aws_secret_access_key = ${c}${SECRET()}
-region = us-east-1
-`)
+  putWithCanary('aws-credentials', (c) => [
+    '[default]',
+    ['aws_', 'access_key_id = '].join('') + AKIA_PREFIX + UP16(),
+    ['aws_', 'secret_access_key = '].join('') + c + SECRET(),
+    'region = us-east-1',
+  ].join('\n') + '\n')
   // 真实的一次性 RSA 密钥对：未在任何地方使用，最逼真且泄漏零危害
   try {
     const pair = generateKeyPairSync('rsa', {
@@ -94,8 +123,8 @@ region = us-east-1
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
       publicKeyEncoding: { type: 'spki', format: 'pem' },
     })
-    put('id_rsa.pem', pair.privateKey)
-    put('id_rsa.pub', pair.publicKey)
+    putNoCanary('id_rsa.pem', pair.privateKey)
+    putNoCanary('id_rsa.pub', pair.publicKey)
   } catch {
     // RSA 生成失败不阻断其余诱饵
   }
@@ -110,7 +139,7 @@ region = us-east-1
  */
 const INTEGRITY_NAMES = ['vet-integrity-1', 'vet-integrity-2']
 export function ensureIntegrityCanaries(baseDir: string, logger?: { warn(m: string): void }): string[] {
-  const root = baseDir.trim() === '' ? join(homedir(), '.dsh') : baseDir
+  const root = baseDir.trim() === '' ? DEFAULT_INTEGRITY_ROOT : baseDir
   try {
     mkdirSync(root, { recursive: true, mode: 0o700 })
   } catch (error) {

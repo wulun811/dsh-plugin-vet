@@ -8,7 +8,6 @@
 
 import type { VetStatus, VetAlarm } from './status.js'
 import { incrementAlarmsRecorded } from './stats.js'
-import { isPersistentlyDismissed } from './dismissed-alerts.js'
 import { capabilityDiff, diffKindOf } from './capability-diff.js'
 import { exfilLedger, detectKeyLeaks, type LedgerAlarm, type LedgerFsEvent, type LedgerNetEvent } from './exfil-ledger.js'
 import { canaryStore } from './canary.js'
@@ -96,6 +95,12 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
     return undefined
   }
   const sink = (alarm: HookAlarm): void => {
+    // round-5 review（A#6，防御深度）：sink 是 T2 观测落点的顶层——其抛错会沿
+    // 包装器反噬插件自己的调用（fs 侧「操作已生效却抛异常」、dgram/fetch 侧
+    // 观测段在调用原函数之前、抛错直接阻止请求发出）。当前链路各环节实测不抛
+    // （loadDismissed/loadStats 内 try/catch、capabilityDiff/confirmBlock 纯内存），
+    // 但观测失败必须静默，绝不允许观测成为对插件的 DoS 面。
+    try {
     // 官方包信任（能力授权，P2-6）：官方归因的报警全部降噪——官方包是平台本体，
     // dsh 自身高频读写 ~/.dsh（会话持久化/配置/存储），.dsh 敏感段加入后若只降噪 spawn
     // 会刷屏成永久黄灯。报警面 = 第三方插件与无主操作；第三方无法伪造归因（按真实栈路径判定）。
@@ -184,6 +189,9 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
         }
       }
     }
+    } catch {
+      // 观测失败静默（不记 warn——warn 本身也可能抛；观测是增强，绝不影响主流程）
+    }
   }
   // N3 台账接线：T2 观测 → 字节台账 + 破坏签名（官方归因不建桶；报警经同一 sink 去重/归因）
   const emitLedger = (plugin: string | undefined, alarms: LedgerAlarm[]): void => {
@@ -193,8 +201,11 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
       sink({ severity: a.severity, kind: a.kind, message: a.message, target: a.target, pluginHint: plugin })
     }
   }
-  // N4 金丝雀确认外泄：出站 URL/body/spawn 参数中发现活跃金丝雀 → 100% 外泄确认（red）。
+  // 金丝雀确认外泄：出站 URL/body/spawn 参数中发现活跃金丝雀 → 100% 外泄确认（red）。
   // 官方归因降噪；命中同时把该插件台账标记为疑似（阈值降最低，N3）。
+  // M2 修订（round-4 review）：金丝雀串是预埋机密——报警 id/target 曾以明文落 status 面与
+  // 持久化路径（同 host 插件可读状态面定向剔除预埋值，摧毁 N4「出现即实锤」前提）。
+  // 与 key-leak 同款纪律：id/target 只留 hashShort 指纹，message 保留可读前 16 位 + 长度。
   const recordCanary = (where: 'url' | 'body' | 'spawn', hit: string, plugin: string | undefined): void => {
     if (plugin !== undefined && isOfficial(plugin)) return
     if (plugin !== undefined) exfilLedger.markSuspected(plugin)
@@ -203,12 +214,12 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
     // N7 族 1 触发：canary 泄漏 = 100% 破坏确认 → 拦截名单
     if (plugin !== undefined) confirmBlock.markFamily1(plugin)
     status.record({
-      id: `n4-canary:${hit}:${plugin ?? ''}`,
+      id: `n4-canary:${hashShort(hit)}:${plugin ?? ''}`,
       severity: 'red',
       source: 't2',
       kind: 'canary-leak',
       message: `蜜罐金丝雀外泄确认：出站${where === 'url' ? 'URL' : where === 'spawn' ? '命令参数' : '数据体'}中发现金丝雀 ${hit.slice(0, 16)}…（${hit.length} 位）——100% 确认外泄（N4；${plugin ?? '无主'}）`,
-      target: hit,
+      target: hashShort(hit),
       pluginHint: plugin,
       mergeKey: `t2:canary-leak:${plugin ?? ''}`,
       at: Date.now(),
@@ -242,15 +253,20 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
       // （安全讨论、文档示例等），不是外泄。真正的外泄是第三方插件发送的流量。
       if (!attributed) return
       const alertId = `n3-key-leak-${tag}:${plugin ?? ''}:${hashShort(hashInput)}`
-      // 0.2.1：用户已忽略的警报不再重新记录（持久化忽略）
-      if (isPersistentlyDismissed(alertId)) return
+      // round-15 review（持久化忽略跨 session 不可恢复修复）：删除「已忽略不入列」短路。
+      // 旧逻辑：被忽略的外泄警报此后完全不再入列 → 已忽略区无条目、无恢复入口 → 跨 session
+      // 彻底消失（0.2.1 文档承诺的「已忽略分区可恢复」失效），且后续真实外泄静默（用户以为
+      // 已处置，实则通道仍开）。改由 VetStatus.record/snapshot 统一按 isDismissed 折叠进
+      // 「已忽略」区：跳过 level/alarmCount 但保留可见、可恢复；mergeKey 聚合最坏量级 = 一条。
       status.record({
         id: alertId,
         severity: 'red',
         source: 't2',
         kind: 'n3-key-leak',
         message: `密钥外泄确认：出站${where === 'url' ? 'URL' : '数据体'}中检测到${hit.kind === 'pem' ? 'PEM 私钥格式' : 'AWS Access Key'}（${hit.match.slice(0, 30)}…）——已归因插件 ${plugin}，按外泄处置（N3）`,
-        target: hit.match,
+        // round-4 review（M2 同款纪律）：报警 target 只留内容指纹——曾把密钥匹配段明文
+        // 落状态面/持久化路径；归因 + 指纹 + message 前缀已足够用户研判，不落原文。
+        target: `${tag}:${hashShort(hashInput)}`,
         pluginHint: plugin,
         mergeKey: `t2:n3-key-leak:${plugin ?? ''}`,
         at: Date.now(),

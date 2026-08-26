@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
@@ -53,19 +53,35 @@ function loadDismissed(): DismissedStore {
   })
 }
 
-/** 保存持久化忽略列表（目录以 DISMISSED_FILE 的 dirname 为准——#3：#2 起测试会
- * 把存储文件指到任意路径，硬编码 ~/.dsh/vet 会让测试建错目录甚至写错位置）。 */
-function saveDismissed(store: DismissedStore): void {
+/**
+ * 保存持久化忽略列表（目录以 DISMISSED_FILE 的 dirname 为准——#3：#2 起测试会
+ * 把存储文件指到任意路径，硬编码 ~/.dsh/vet 会让测试建错目录甚至写错位置）。
+ * round-5 review（A#9/B-A11）：与 stats/baseline/capabilities 同款原子写（tmp + rename）
+ * + 文件 0600——旧实现直写：崩溃窗口可留下截断 JSON，loadDismissed 解析失败返回空，
+ * 用户全部忽略失效、报警复活。返回是否写成功（调用方据此决定是否更新内存缓存）。
+ */
+function saveDismissed(store: DismissedStore): boolean {
   return withVetSelfIo(() => {
+    // round-6 review：tmp 路径提升到 try 外——rename 失败时 catch 需要 best-effort 清理残件
+    // （同 pid 下次写会覆盖同名 tmp，但进程重启换 pid 后旧 tmp 在 ~/.dsh/vet 下永久残留）。
+    const tmp = DISMISSED_FILE + '.tmp.' + process.pid
     try {
       const dir = dirname(DISMISSED_FILE)
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true })
       }
-      writeFileSync(DISMISSED_FILE, JSON.stringify(store, null, 2), 'utf8')
+      writeFileSync(tmp, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 })
+      renameSync(tmp, DISMISSED_FILE)
+      return true
     } catch (error) {
-      // 静默失败：持久化失败不影响运行
+      try {
+        unlinkSync(tmp)
+      } catch {
+        // tmp 未落盘（writeFileSync 就失败）或已被清理——无残件可清
+      }
+      // 静默失败：持久化失败不影响运行（调用方缓存不更新——重启后以磁盘为准是一致的）
       console.error('[vet] 保存忽略列表失败:', error)
+      return false
     }
   })
 }
@@ -79,23 +95,22 @@ export function isPersistentlyDismissed(alertId: string): boolean {
   return cachedIds.has(alertId)
 }
 
-/** 持久化忽略某警报（用户点击"忽略"时调用）；同步更新内存缓存。 */
+/** 持久化忽略某警报（用户点击"忽略"时调用）；写盘成功后才更新内存缓存——
+ * 写失败时缓存保持旧态（盘上没有该记录，重启后自然恢复为未忽略，行为一致）。 */
 export function persistentlyDismiss(alertId: string, reason?: string): void {
   const store = loadDismissed()
   store.dismissed[alertId] = {
     dismissedAt: Date.now(),
     reason,
   }
-  saveDismissed(store)
-  if (cachedIds !== undefined) cachedIds.add(alertId)
+  if (saveDismissed(store) && cachedIds !== undefined) cachedIds.add(alertId)
 }
 
-/** 恢复某警报（用户点击"恢复"时调用）；同步更新内存缓存。 */
+/** 恢复某警报（用户点击"恢复"时调用）；写盘成功后才更新内存缓存。 */
 export function restorePersistentDismissal(alertId: string): void {
   const store = loadDismissed()
   delete store.dismissed[alertId]
-  saveDismissed(store)
-  if (cachedIds !== undefined) cachedIds.delete(alertId)
+  if (saveDismissed(store) && cachedIds !== undefined) cachedIds.delete(alertId)
 }
 
 /** 获取所有持久化忽略的警报 ID 列表。 */

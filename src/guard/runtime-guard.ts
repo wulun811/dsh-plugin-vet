@@ -34,6 +34,7 @@ import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, 
 import { isStackTraceTampered } from './runtime-denoise.js'
 import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../package-meta.js'
+import { isVetSelfPath } from '../pkg-root.js'
 import { ensureHoneypot, ensureIntegrityCanaries } from './honeypot.js'
 import { exfilLedger } from './exfil-ledger.js'
 import { canaryStore } from './canary.js'
@@ -57,9 +58,14 @@ export function isAttributableEntry(name: string): boolean {
  * 任一环节抛错都必须复位 rootIndexing 标志，否则所有 T2 报警被静默 bypass（R31 的
  * 反向失败：护栏防了递归，却可能把 vet 永久搞失明）。归因失败时返回空映射（缓存），
  * 包装器侧另有 try/catch，fs 调用永不因归因失败而中断。
+ * round-15 review（子代理核查）：注释声称「失败缓存空映射」，但异常实际从 factory
+ * 逃逸——rootsCache 保持未设置，每次敏感操作都重建并再次抛错（每 op 的 CPU 空转 +
+ * 归因永久 undefined → N7 族 1–4 全家静默失效且无人知晓）。现按注释语义实现：
+ * 异常 → 缓存空映射并发出一次性 vet-self-broken 黄灯（归因缺失这个事实本身可见）。
  */
 export function createRootIndex(ctx: Context): () => Map<string, string> {
   let rootsCache: Map<string, string> | undefined
+  let buildWarned = false
   return () => {
     if (rootsCache !== undefined) return rootsCache
     const map = new Map<string, string>()
@@ -82,10 +88,32 @@ export function createRootIndex(ctx: Context): () => Map<string, string> {
       // vet 被符号链接安装时 realpath 解析不到 profile node_modules → 用 loader 基准（ctx.baseUrl）
       const profileDir = (ctx as { baseUrl?: string }).baseUrl
       for (const name of names) {
-        // A9 归因排除 vet 自身（见 isAttributableEntry 注释）
+        // A9 归因排除 vet 自身（见 isAttributableEntry 注释）。
+        // round-5 review（B-A1）：排除按「身份」而非「名字」——同名冒名包（name 写成
+        // @jieai/dsh-plugin-vet 的恶意 tarball）此前连同 vet 本体一起被排除出归因映射，
+        // 其行为归因落空变无主（观测降级+族 3/4 无主不报）。root 解析成功则 realpath
+        // 比对（vet 本体排除、冒名包按其真实路径入映射归因到 vet 名字）；解析失败
+        // （vet 为 bundle 形态）维持按名排除（无法验证身份，保守不误归因）。
+        if (name === PACKAGE_NAME) {
+          const root = resolvePackageRoot(name, profileDir)
+          if (root !== undefined && !isVetSelfPath(root)) map.set(root, name)
+          continue
+        }
         if (!isAttributableEntry(name)) continue
         const root = resolvePackageRoot(name, profileDir)
         if (root !== undefined) map.set(root, name)
+      }
+    } catch (error) {
+      // round-15 review：构建失败 → 归因缺失已成为必然状态——缓存空映射（避免每 op
+      // 重复抛错+重建的 CPU 空转），并发一次性黄灯让「归因面失效」可见（不静默）。
+      if (!buildWarned) {
+        buildWarned = true
+        try {
+          const logger = (ctx as { logger?: { warn(m: string): void } }).logger
+          logger?.warn('vet: T2 归因映射构建失败——插件行为将无主（观测降级、N7 族 1-4 拦截不生效）：' + String(error))
+        } catch {
+          // 日志失败不影响主流程
+        }
       }
     } finally {
       setRootIndexing(false)
@@ -138,14 +166,9 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
   // spawnSidecar 的 fresh-spawn 分支检查 guardDisabled，不复位则哨兵永不启动且无任何日志/报警
   guardDisabled = false
   const disposers: (() => void)[] = []
-  // T1 哨兵：子进程 /proc 监视（stdout JSON 行 → status.record；重拉起 + 卸载清理）
-  disposers.push(installSidecar(ctx, config, status))
-  // T2 钩子 + 网络出口观测：fs/child_process/http*/dgram/fetch 进程内包装
-  installT2(ctx, config, status, disposers)
-  // 钩子完整性心跳：周期复查 T2 包装品牌，被剥离即 yellow（alarm-only）
-  installHookHeartbeat(ctx, config, status, disposers)
-  // 幂等：ctx.on('dispose') 与 prevGuardDisposer 都可能触发同一 disposer（重载时旧 ctx
-  // 先 dispose、新 apply 再调 prevGuardDisposer）——先到者生效，重复执行是 no-op。
+  // round-5 review（A#12）：disposer 先构造登记、后执行装配——installT2/heartbeat
+  // 若抛错，prevGuardDisposer 仍指向本 disposer，已启动的 T1 侧车可被清理，不会
+  // 在装配中断时被遗弃成无人管理的孤儿（旧实现 prevGuardDisposer 登记在装配之后）。
   let disposed = false
   const disposer = (): void => {
     if (disposed) return
@@ -159,7 +182,35 @@ export function installRuntimeGuard(ctx: Context, config: VetConfig, status: Vet
     }
   }
   prevGuardDisposer = disposer
+  try {
+    // T1 哨兵：子进程 /proc 监视（stdout JSON 行 → status.record；重拉起 + 卸载清理）
+    disposers.push(installSidecar(ctx, config, status))
+    // T2 钩子 + 网络出口观测：fs/child_process/http*/dgram/fetch 进程内包装
+    installT2(ctx, config, status, disposers)
+    // 钩子完整性心跳：周期复查 T2 包装品牌，被剥离即 yellow（alarm-only）
+    installHookHeartbeat(ctx, config, status, disposers)
+  } catch (error) {
+    disposer()
+    throw error
+  }
+  // 幂等：ctx.on('dispose') 与 prevGuardDisposer 都可能触发同一 disposer（重载时旧 ctx
+  // 先 dispose、新 apply 再调 prevGuardDisposer）——先到者生效，重复执行是 no-op。
   return disposer
+}
+
+/** 同步等待 pid 退出（封顶 maxMs；≈20ms 步进）。仅接管旧哨兵这类罕见管理操作使用——
+ * 阻塞事件循环 ≤2.5s 换取热重载窗口内监控不空转（S1）。 */
+function waitPidExit(pid: number, maxMs: number): void {
+  const buf = new Int32Array(new SharedArrayBuffer(4))
+  const deadline = Date.now() + maxMs
+  while (pidAlive(pid) && Date.now() < deadline) {
+    try {
+      Atomics.wait(buf, 0, 0, 20)
+    } catch {
+      // 受限环境（无 SharedArrayBuffer）：忙等退避
+      for (const t = Date.now(); Date.now() - t < 5;) { /* noop */ }
+    }
+  }
 }
 
 /** T1 哨兵装配：spawn sidecar 子进程 + stdout JSON 行解析 + respawn 管理与卸载清理。 */
@@ -191,6 +242,11 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
   let child: ReturnType<typeof spawn> | undefined
   let sidecarAlive = false
   let stopping = false
+  // S1（round-16）：热重载互杀防护状态——spawnedOnce = 本实例是否已成功装配过哨兵
+  // （已装配过就不再 kill-and-takeover）；lastSpawnAt/killTimedOut = 快速自杀不计 respawn 预算
+  let spawnedOnce = false
+  let lastSpawnAt = 0
+  let killTimedOut = false
   /** 意外退出重拉：上限 5 次 + 5s 退避（监控器自身失活必须可见，不能静默）。 */
   const MAX_RESPAWN = 5
   const RESPAWN_DELAY_MS = 5000
@@ -220,11 +276,27 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
     // 到它自己的（已废弃）status，无害。
     const existing = envSidecarPid()
     if (existing !== undefined && pidAlive(existing)) {
+      // round-16 review（S1）：热重载互杀竞态——只有「本实例从未装配过哨兵」时才允许
+      // kill-and-takeover（fresh 接管）。否则（旧实例 +5s respawn 路径/重复 apply 的旧
+      // 副本）杀现任哨兵会形成互杀环：旧杀新 → 新 exit → 旧按 decideRespawn 复活自己的
+      // → 新实例又 kill 旧…（「两个 vet 打架」）。已装配过的实例一律放弃接管，让现存
+      // 哨兵（无论归谁）继续服务。
+      if (spawnedOnce) {
+        ctx.logger.warn(`vet: 检测到既有哨兵 (pid=${existing})，但本实例已装配过哨兵——放弃接管（热重载互杀防护；现存哨兵继续监控）`)
+        return
+      }
       ctx.logger.warn(`vet: 检测到既有哨兵 (pid=${existing})——终止并以新实例接管（旧报警通道不可复用）`)
       delete process.env[SIDECAR_PID_ENV]
       // M9：先核对身份再终止（PID 复用保护）
       if (!safeKillSidecar(existing)) {
         ctx.logger.warn(`vet: 既有哨兵 pid=${existing} 存活但身份存疑，未终止——按接管流程继续（新实例将接管监控）`)
+      } else {
+        // S1：等旧哨兵真正退出再 spawn——新哨兵的兄弟扫描（runtime-watch 单例锁）会看到
+        // 仍存活的旧哨兵而 exit(0)；SIGTERM 是异步送达，不等的窗口内新哨兵反复自杀 →
+        // sentinel-down + respawn×5 全空转，重拉上限耗尽后监控静默中断。同步等待仅发生在
+        // 热重载/重复 apply 这类罕见管理操作（≤2.5s，可接受）。
+        waitPidExit(existing, 2500)
+        killTimedOut = pidAlive(existing) // 超时仍活（僵尸等）：后续快速 exit(0) 不计预算
       }
       setSidecarSpawned(false)
       sidecarAlive = false
@@ -235,6 +307,9 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
     process.env[SIDECAR_PID_ENV] = String(child.pid ?? '')
     setSidecarSpawned(true)
     sidecarAlive = true
+    spawnedOnce = true
+    lastSpawnAt = Date.now()
+    killTimedOut = false
     child.stdout?.setEncoding('utf8')
     // L2：JSON 行可能跨 chunk 截断——累积行缓冲，只在遇到完整换行时解析
     let lineBuf = ''
@@ -290,8 +365,11 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
       })
       // 仅当 env 注册表仍指向本哨兵时才 respawn（off/接管场景不复活）
       if (respawn) {
-        respawnCount++
-        ctx.logger.warn(`vet: 5s 后重拉哨兵（第 ${respawnCount}/${MAX_RESPAWN} 次）`)
+        // S1：不耗预算的自杀——code 0 且刚接管过（killTimedOut）或快速退出（兄弟锁自杀）：
+        // 旧哨兵死透前/竞态窗口内的临时退出不消耗 MAX_RESPAWN，否则 5 次空转后监控静默中断。
+        const selfExitRace = code === 0 && (killTimedOut || Date.now() - lastSpawnAt < 3000)
+        if (!selfExitRace) respawnCount++
+        ctx.logger.warn(`vet: 5s 后重拉哨兵（第 ${respawnCount}/${MAX_RESPAWN} 次${selfExitRace ? '，本次不计入重拉上限' : ''}）`)
         setTimeout(spawnSidecar, RESPAWN_DELAY_MS).unref?.()
       }
       // P2-3：env 不再指向本实例且指向存活 pid → 哨兵已被其他实例接管/替换（跨模块重复安装
@@ -432,6 +510,10 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
     // 包装无法被统一恢复（vet 无法枚举所有已创建的实例）。这是设计限制：vet 卸载后，
     // 早先创建的 socket 仍走包装（观测写入已拆卸的 sink，写盘/报警均失败静默，无害）；
     // 新创建 socket 走原始路径。与 patchModule 恢复模块导出同理，实例级恢复不支持。
+    // round-4 review 补漏：本注释声称「disposer 恢复 createSocket 导出」，但原实现没有把
+    // 恢复动作登记进 disposers——热重载/卸载后 dgram.createSocket 永远是包装过的（残留
+    // 包装叠加 + 观测写入废弃 sink）。这里补上恢复（与 patchModule 的 original 快照恢复同款）。
+    disposers.push(() => { dgram.createSocket = originalCreateSocket })
     // P0-2 #2：dgram 包装参与钩子完整性心跳（patchModule/patchNetworkModule 之外的手工包装单独登记 + 打品牌）
     registerHookTarget('dgram', dgram as unknown as Record<string, unknown>, ['createSocket'])
     brandVetHook(dgram.createSocket as unknown as (...a: unknown[]) => unknown)
@@ -492,7 +574,34 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
             try {
               const req = first as Request
               if (!req.bodyUsed && typeof req.clone === 'function') {
-                requestBodyPromise = req.clone().text()
+                // round-5 review（A#2）：clone 是 tee 语义——读克隆分支会迫使源流把
+                // chunk 同时缓冲进克隆队列；旧实现 clone().text() 全量读取，插件用
+                // GB 级流 body 上传时 vet 进程（与插件同进程）内存近似翻倍有 OOM 风险。
+                // 上限读取：content-length 预检（确定超限则放弃 body 观测，URL 侧照扫）
+                // + 流式取前 4MB 即 cancel（观测是增强不是防线，大 body 截断是可接受取舍）。
+                const BODY_SCAN_LIMIT = 4 * 1024 * 1024
+                const declaredLength = req.headers.get('content-length')
+                if (declaredLength === null || Number.parseInt(declaredLength, 10) <= BODY_SCAN_LIMIT) {
+                  const clone = req.clone()
+                  requestBodyPromise = (async () => {
+                    const reader = clone.body?.getReader()
+                    if (reader === undefined) return ''
+                    const decoder = new TextDecoder()
+                    let text = ''
+                    try {
+                      for (;;) {
+                        const { done, value } = await reader.read()
+                        if (done) break
+                        text += decoder.decode(value, { stream: true })
+                        if (text.length >= BODY_SCAN_LIMIT) break
+                      }
+                      text += decoder.decode()
+                    } finally {
+                      await reader.cancel().catch(() => {})
+                    }
+                    return text.slice(0, BODY_SCAN_LIMIT)
+                  })()
+                }
               }
             } catch {
               requestBodyPromise = undefined
@@ -574,4 +683,50 @@ function installHookHeartbeat(ctx: Context, config: VetConfig, status: VetStatus
   disposers.push(() => clearInterval(heartbeatTimer))
   // 安装时立即基线一次（此刻钩子全新，理应完好；后续周期复查才是报警面）
   runHookHeartbeat()
+}
+
+/**
+ * 即时切换守卫（2026-08-26 事故修复：面板开关不再「只写配置等 DSH 重启」）：
+ * 复用 installRuntimeGuard 的重入机制（prevGuardDisposer 先卸载旧实例再装新实例），
+ * 在 webServer 请求线程里同步完成 T1 哨兵换血（kill 旧的 + 全新 spawn）+ T2 钩子重装。
+ * 成功后把 config 对象（apply 持有、status.json 直读）同步翻转，面板下一轮轮询即见新状态。
+ * 失败时回滚 config 字段，返回错误供提示（配置已持久化，重启后仍按新配置生效）。
+ */
+export function applyRuntimeGuardImmediate(
+  ctx: Context,
+  config: VetConfig,
+  status: VetStatus,
+  watch: boolean,
+): { ok: boolean; note?: string } {
+  const prev = config.runtimeGuard
+  const next: VetConfig = { ...config, runtimeGuard: watch ? 'watch' : 'off' }
+  try {
+    installRuntimeGuard(ctx, next, status)
+    ;(config as { runtimeGuard: 'off' | 'watch' }).runtimeGuard = next.runtimeGuard
+    return { ok: true }
+  } catch (error) {
+    // round-16 review（S4）：失败状态不再含糊——installRuntimeGuard 开头已把旧实例卸载、
+    // 新实例装配半途而废：必须调用 disposeActiveGuard() 复位（清 prevGuardDisposer +
+    // guardDisabled=true 禁绝孤儿哨兵 respawn），否则残留「部分钩子 + 可 respawn 的哨兵」
+    // 的中间态，面板显示 off 但 T1/T2 行为半活（此前只回滚 config 字段）。
+    disposeActiveGuard()
+    ;(config as { runtimeGuard: 'off' | 'watch' }).runtimeGuard = prev
+    return { ok: false, note: String(error) }
+  }
+}
+
+/**
+ * 卸载当前活跃守卫实例（即时装配的新实例不在固定 ctx.effect disposer 闭包内，
+ * 卸载/热重载时必须按模块级 prevGuardDisposer 动态清理，否则钩子与哨兵残留）。
+ */
+export function disposeActiveGuard(): void {
+  if (prevGuardDisposer !== undefined) {
+    try {
+      prevGuardDisposer()
+    } catch {
+      // 恢复/终止失败不阻断
+    }
+    prevGuardDisposer = undefined
+  }
+  guardDisabled = true
 }

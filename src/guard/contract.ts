@@ -117,10 +117,9 @@ function isLaxPathPattern(p: string): boolean {
 }
 
 const BS = String.fromCharCode(92)
-
-function normPath(s: string): string {
-  return s.split(BS).join('/').replace(/\/{2,}/g, '/').replace(/\/$/, '')
-}
+// round-5 review（B-A12）：路径归一从 confirm-block 的本地副本提升为共享单源
+// （折叠重复分隔符 + 去尾部斜杠），消除两处语义漂移（含 N7 族 1/2 双斜杠绕过形态）。
+import { normPath } from './path-utils.js'
 
 /**
  * 解析模式是否「合法可匹配」：
@@ -132,7 +131,11 @@ function normPath(s: string): string {
 export function isValidPathPattern(p: string): boolean {
   const norm = p.trim().replace(/\\/g, '/')
   if (isLaxPathPattern(norm)) return false
-  if (norm.startsWith('~/')) return false
+  // round-5 review（B-A13）：家目录形态全部拒载——旧实现只拦 '~/…'，裸 '~' 与
+  // '~user'（POSIX 用户家目录展开，等于相对任意用户的 home）穿透校验（注释承诺
+  // 「家目录 ~ 拒载」但实现只挡了带斜杠形态）。
+  // round-6 review：三条件合并为一——`startsWith('~')` 已覆盖 '~' 与 '~/…' 两形态。
+  if (norm.startsWith('~')) return false
   if (norm.startsWith('./') || norm === '/' || norm === '.') return false
   return true
 }
@@ -188,14 +191,20 @@ export function patternMatchHost(pattern: string, hostname: string): boolean {
 /**
  * 命令模式匹配：声明 basename（git）或完整路径（/usr/bin/git）。
  * 对命令行任一 token 做 basename/字面比对。
+ * round-15 review（假 within 修复）：完整路径模式此前退化成 basename 比对——
+ * 契约声明 /usr/bin/git、插件执行 /tmp/evil/git 会被判「契约内」→ 违约被静默解释为
+ * 契约覆盖（false within）。完整路径模式只做精确 token 匹配；basename 模式
+ * （不含 / 的声明）才允许 basename 比对（/usr/bin/git、/usr/local/bin/git 皆可）。
  */
 export function patternMatchCommand(pattern: string, command: string): boolean {
   const P = pattern.trim()
   if (P === '' || P === '*' || !COMMAND_TOKEN_RE.test(P)) return false
-  const pBase = P.slice(P.lastIndexOf('/') + 1)
   const cTokens = command.trim().split(/\s+/).filter(Boolean)
+  // round-15 review：完整路径模式（含 /）→ 精确 token 匹配，杜绝 /tmp/evil/git 冒充 /usr/bin/git
+  if (P.includes('/')) return cTokens.includes(P)
+  const pBase = P.slice(P.lastIndexOf('/') + 1)
   const cBases = cTokens.map((t: string) => t.slice(t.lastIndexOf('/') + 1))
-  return cTokens.includes(P) || cBases.includes(P) || cTokens.includes(pBase) || cBases.includes(pBase)
+  return cTokens.includes(P) || cBases.includes(P) || cBases.includes(pBase)
 }
 
 
@@ -387,6 +396,9 @@ export function contractPriority(codeFact: boolean, observed: boolean, inContrac
 
 const SNAPSHOT_CONTRACTS_DIR = process.env.DSH_PLUGIN_VET_CONTRACTS_DIR
 let contractsDir: string | undefined = SNAPSHOT_CONTRACTS_DIR
+// C3 加固：默认契约目录在模块加载时定值——homedir() 在 POSIX 优先 $HOME，进程内插件此后
+// 改 env 会把契约目录整体重定向（契约校验层静默降级为 no-contract）。与其余存储模块一致。
+const DEFAULT_CONTRACTS_DIR = join(homedir(), '.dsh', 'vet', 'contracts')
 
 /** 单测覆写契约存储目录（生产不调用；undefined 恢复默认）。 */
 export function setContractsDirForTest(dir: string | undefined): void {
@@ -395,12 +407,16 @@ export function setContractsDirForTest(dir: string | undefined): void {
 
 /** 当前契约存储目录（缺省 ~/.dsh/vet/contracts，env DSH_PLUGIN_VET_CONTRACTS_DIR 可覆盖）。 */
 export function contractsRoot(): string | undefined {
-  return contractsDir ?? SNAPSHOT_CONTRACTS_DIR ?? join(homedir(), '.dsh', 'vet', 'contracts')
+  return contractsDir ?? SNAPSHOT_CONTRACTS_DIR ?? DEFAULT_CONTRACTS_DIR
 }
 
 /**
  * 载入某插件的契约：<root>/<name>.json（dirHint > 模块目录 > env > homedir 默认）。
  * 缺失 → no-contract；存在但不通过校验 → rejected（record 档记 warning）。
+ * round-5 review（B-A6）：文件名候选 = 归一化名（'/'→'_'，本模块现行约定）+ 原始包名
+ * 双轨——审计档案文档（docs/ARCHITECTURE.md）写明 <name>.json（@scope/name 原样，POSIX
+ * 下落在 <root>/@scope/name.json 子路径），agent 按文档落盘的契约此前永远载入失败
+ * （M1 功能静默失效）；两轨都试，与旧存储兼容。
  */
 export function loadContract(
   name: string,
@@ -409,13 +425,32 @@ export function loadContract(
 ): { kind: 'no-contract' } | { kind: 'rejected'; validation: ContractValidation } | { kind: 'loaded'; contract: Contract; validation: ContractValidation } {
   const root = dirHint !== undefined && dirHint !== '' ? dirHint : contractsRoot()
   if (root === undefined || name.trim() === '') return { kind: 'no-contract' }
-  const path = root + '/' + name.replace(/[^A-Za-z0-9@._-]/g, '_') + '.json'
-  const raw = readFile(path)
-  if (raw === undefined) return { kind: 'no-contract' }
-  const validation = validateContract(raw)
-  if (!validation.ok) return { kind: 'rejected', validation }
-  const contract = JSON.parse(raw) as Contract
-  return { kind: 'loaded', contract, validation }
+  const candidates = [
+    name.replace(/[^A-Za-z0-9@._-]/g, '_'),
+    name,
+  ]
+  for (const candidate of [...new Set(candidates)]) {
+    // round-15 review（越界吞并）：原始包名候选保留 @scope/name 子路径兼容的同时必须
+    // 拒绝穿越形态——包名来自被扫 tarball 的 package.json（不可信），``../``/绝对路径/
+    // 反斜杠/控制符会把读取带出契约目录（越界 JSON 读取 + 目录外内容被当契约载入）。
+    // 归一化候选已经过 [^A-Za-z0-9@._-] → _ 清洗天然安全；这里主要护住原始候选。
+    if (
+      candidate.includes('..') ||
+      candidate.startsWith('/') ||
+      candidate.includes('\\') ||
+      /[\u0000-\u001f]/.test(candidate)
+    ) {
+      continue
+    }
+    const path = root + '/' + candidate + '.json'
+    const raw = readFile(path)
+    if (raw === undefined) continue
+    const validation = validateContract(raw)
+    if (!validation.ok) return { kind: 'rejected', validation }
+    const contract = JSON.parse(raw) as Contract
+    return { kind: 'loaded', contract, validation }
+  }
+  return { kind: 'no-contract' }
 }
 
 // ── 报警对账（纯函数：T2 报警 ↔ 契约范围） ──────────────

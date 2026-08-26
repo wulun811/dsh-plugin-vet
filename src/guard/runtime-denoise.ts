@@ -4,6 +4,7 @@
  */
 
 import type { HookConfig } from './runtime-ops.js'
+import { fileURLToPath } from 'node:url'
 
 /** 关键词边界匹配：须出现在段首或 . _ - 之后（避免 'js-tokens' 这类库名误伤）。 */
 const KEYWORD_REGEX_CACHE = new Map<string, RegExp>()
@@ -200,6 +201,42 @@ export function firstString(args: unknown[]): string | undefined {
       const p = (a as { path?: unknown }).path
       if (typeof p === 'string') return p
     }
+    // round-15 review（Buffer/URL 逃逸盲区）：Node fs API 接受 Buffer（fs.rmSync(credPath)）
+    // 与 URL（unlink(new URL('file:///…/id_rsa'))）形态的路径——此前只认 string，
+    // 蜜罐/完整性/凭据族 1/2 判定的目标全部落空（读写经此类包装照样命中警报面）。
+    const asPath = pathArgValue(a)
+    if (asPath !== undefined) return asPath
+  }
+  return undefined
+}
+
+/**
+ * 把 fs 参数形态归一化为路径字符串（非路径形态返回 undefined）：
+ * - Buffer/Uint8Array：utf8 解码（Node fs 直接接受）
+ * - URL：file:// 取文件系统路径（fileURLToPath）；非 file:// 的 URL 是网络目标（http 模块用），不归路径
+ * - fd 数字等：非路径，undefined
+ */
+export function pathArgValue(a: unknown): string | undefined {
+  if (typeof a === 'string') return a
+  if (a instanceof Uint8Array) {
+    const b = Buffer.isBuffer(a) ? a : Buffer.from(a)
+    const s = b.toString('utf8')
+    return s.length > 0 ? s : undefined
+  }
+  if (a instanceof URL) {
+    if (a.protocol === 'file:') {
+      try {
+        return fileURLToPath(a)
+      } catch {
+        return undefined
+      }
+    }
+    return undefined
+  }
+  if (typeof a === 'object' && a !== null) {
+    // { path: Buffer } 形态（open/FileHandle 等 option 包裹）
+    const p = (a as { path?: unknown }).path
+    return pathArgValue(p)
   }
   return undefined
 }
@@ -212,6 +249,10 @@ export function allStrings(args: unknown[]): string[] {
     else if (Array.isArray(a)) out.push(...allStrings(a)) // spawn/execFile 的 argv 数组
     else if (typeof a === 'object' && a !== null && 'path' in a && typeof (a as { path?: unknown }).path === 'string') {
       out.push((a as { path: string }).path)
+    } else {
+      // round-15 review（Buffer/URL 逃逸盲区，同 firstString）：路径对象形态归一
+      const asPath = pathArgValue(a)
+      if (asPath !== undefined) out.push(asPath)
     }
   }
   return out

@@ -33,6 +33,33 @@ export interface HostMetrics {
 
 let prevCpu: { total: number; at: number } | undefined
 
+/* ------------------------- 指标历史（P2，面板火花线数据源） ------------------------- */
+
+/** 单个历史采样点：跨进程总占用 + CPU% + fd 数。 */
+export interface MetricsHistoryPoint {
+  at: number
+  /** rss + mcp + vet 跨进程总占用（MB），与触发器 RAM 同口径。 */
+  rssTotalMb: number
+  cpuPct: number
+  fdCount: number
+}
+
+const HISTORY_CAP = 64
+
+const metricsHistory: MetricsHistoryPoint[] = []
+
+/** 追加采样（环形上限 HISTORY_CAP；readHostMetrics 与测试共用）。 */
+export function recordMetricsSample(point: MetricsHistoryPoint): void {
+  if (!Number.isFinite(point.rssTotalMb) || !Number.isFinite(point.cpuPct)) return
+  metricsHistory.push(point)
+  if (metricsHistory.length > HISTORY_CAP) metricsHistory.shift()
+}
+
+/** 指标历史快照（旧→新；只读副本，进程内存态、重启清零可接受——计划 §三-D4）。 */
+export function readMetricsHistory(): MetricsHistoryPoint[] {
+  return [...metricsHistory]
+}
+
 interface ChildInfo {
   pid: number
   rssKb: number
@@ -116,6 +143,14 @@ export function readHostMetrics(): HostMetrics {
   } catch {
     // stat 不可读
   }
+  const at = Date.now()
+  // 采样入历史（环形）：跨进程总占用与触发器 RAM 同口径（rss+mcp+vet）
+  recordMetricsSample({
+    at,
+    rssTotalMb: Math.round((rssMb + mcpRssMb + vetRssMb) * 10) / 10,
+    cpuPct,
+    fdCount,
+  })
   return {
     rssMb: Math.round(rssMb * 10) / 10,
     heapUsedMb: Math.round(heapUsedMb * 10) / 10,
@@ -130,6 +165,6 @@ export function readHostMetrics(): HostMetrics {
     ioWriteMb: Math.round(ioWrite / 1048576),
     childCount,
     fdCount,
-    at: Date.now(),
+    at,
   }
 }

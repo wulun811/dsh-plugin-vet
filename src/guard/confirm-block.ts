@@ -14,6 +14,8 @@
 import { homedir } from 'node:os'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+// 直连 runtime-denoise（不经 runtime-hooks 桶——避免 confirm-block → hooks → patch → confirm-block 环）
+import { withVetSelfIo, pathArgValue } from './runtime-denoise.js'
 
 export type ConfirmBlockMode = 'block' | 'alarm' | 'off'
 
@@ -24,14 +26,29 @@ export const BLOCK_FS_OPS = new Set([
   'truncate', 'truncateSync', 'writeFile', 'writeFileSync', 'createWriteStream',
 ])
 
+/**
+ * C3 加固：模块加载时快照 home 目录——vet 先于第三方插件加载，此刻的 $HOME 是用户真实值；
+ * 进程内插件此后改 process.env.HOME（Node 的 homedir() 在 POSIX 优先 $HOME）无法重定向
+ * 凭据清单（否则族 2「凭据本体删除/覆盖写 → 单次即时拦截」整体失效——删真实 ~/.ssh/id_rsa
+ * 不再命中清单）。与 stats/archive/forensics/contract 的 env 快照纪律一致。
+ */
+const SNAPSHOT_CRED_HOME: string = process.env.HOME || homedir()
+
+/** 测试专用：覆盖凭据清单的 home 基准（生产不调用；undefined 恢复快照值并失效缓存）。 */
+export function setCredentialHomeForTest(home: string | undefined): void {
+  credHomeOverride = home
+  cachedCredFiles = undefined
+}
+
+let credHomeOverride: string | undefined
+
 /** 族 2：凭据本体路径（精确文件级；~/.npmrc 为整文件——token 所在）。
- * HOME 环境变量优先（测试可注入；运行时与 os.homedir() 一致）。
- * 按 HOME 记忆化：decideBlock 是每次破坏性 fs 操作都走的判定路径，重建数组 + homedir()
- * 是无效开销；HOME 变化（测试注入/环境变更）时自动重算，不缓存过期路径。 */
+ * 基准 = 模块加载快照的 $HOME（C3：进程内插件改 env 无法重定向拦截面）。
+ * 结果记忆化：decideBlock 是每次破坏性 fs 操作都走的判定路径，重建数组是无效开销。 */
 let cachedCredHome: string | undefined
 let cachedCredFiles: string[] | undefined
 function credentialFiles(): string[] {
-  const home = process.env.HOME || homedir()
+  const home = credHomeOverride ?? SNAPSHOT_CRED_HOME
   if (cachedCredHome === home && cachedCredFiles !== undefined) return cachedCredFiles
   cachedCredHome = home
   cachedCredFiles = [
@@ -50,9 +67,10 @@ function credentialFiles(): string[] {
   return cachedCredFiles
 }
 
-function normPath(p: string): string {
-  return p.replace(/\\/g, '/')
-}
+// round-5 review（B-A12）：路径归一从本地副本改为共享 normPath（path-utils.ts，与 contract 同源）
+// ——旧副本只替换反斜杠，「/home/u/.ssh//id_rsa」等双斜杠等价写法不命中凭据精确清单
+// （N7 族 1/2 拦截的理论绕过形态）；单源（折叠 //、去尾 /）后两侧语义一致。
+import { normPath } from './path-utils.js'
 
 function isCredentialFile(p: string): boolean {
   const n = normPath(p)
@@ -131,13 +149,22 @@ export class ConfirmBlockStore {
     if (plugin !== '') this.f1Blocked.add(plugin)
   }
 
+  /** 该插件是否在族 1 拦截名单（面板「已拦截」状态用；进程内存态）。 */
+  isFamily1Blocked(plugin: string): boolean {
+    return this.f1Blocked.has(plugin)
+  }
+
   decideBlock(plugin: string, opName: string, args: unknown[]): BlockDecision | null {
     if (this.modeLocal !== 'block') return null
     try {
-      const target = typeof args[0] === 'string' ? args[0] : ''
+      // round-15 review（Buffer/URL 逃逸）：此前只认 string 实参——fs.rmSync(Buffer.from(cred))
+      // / unlink(new URL('file://…/id_rsa')) 形态族 1/2 判定目标全空（与 classify/firstString
+      // 的同款盲区一并修）；经 pathArgValue 归一后参与凭据精确匹配。
+      const pathArgs = (Array.isArray(args) ? args : []).map(pathArgValue).filter((p): p is string => p !== undefined)
+      const target = pathArgs[0] ?? ''
       // 族 2：凭据本体（优先；单次即时拦截）
       if (DESTROY_OPS.has(opName)) {
-        const cred = (Array.isArray(args) ? args : []).filter((a): a is string => typeof a === 'string').find(isCredentialFile)
+        const cred = pathArgs.find(isCredentialFile)
         if (cred !== undefined) {
           return { family: 2, reason: `凭据本体 ${cred} 被破坏性操作（${opName}）——密钥唯一副本不可恢复` }
         }
@@ -167,9 +194,15 @@ export class ConfirmBlockStore {
   }
 }
 
+/**
+ * 存在性探测（族 2 覆盖写判定）。round-15 review：此前未包 withVetSelfIo——vet 自身
+ * 在钩子包装器内调用 existsSync 会再次进入 T2 包装器（classify → fs-probe 报警归因到
+ * 被查插件 + 二次归因栈遍历），凭据目标写路径上每条都多一条无主/插件 alarm 噪音；
+ * vet 自身 IO 直通是 stats/dismissed/forensics/status-route 共用的既有纪律。
+ */
 function safeExists(p: string): boolean {
   try {
-    return existsSync(p)
+    return withVetSelfIo(() => existsSync(p))
   } catch {
     return false
   }

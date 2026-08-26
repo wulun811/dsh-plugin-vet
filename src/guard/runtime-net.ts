@@ -31,10 +31,11 @@ const EGRESS_ALLOWLIST = [
   'unpkg.com',
 ]
 
-/** 回环主机判定（observeLoopback 观测用）。 */
+/** 回环主机判定（observeLoopback 观测用）。IPv6 括号形态（WHATWG URL.hostname 返回 '[::1]'）
+ * 与 127.0.0.0/8 整段（RFC 5735）都算回环；尾点 FQDN（'localhost.'）同上。 */
 export function isLoopbackHost(hostname: string): boolean {
-  const h = hostname.toLowerCase()
-  return h === 'localhost' || h === '127.0.0.1' || h === '::1'
+  const h = hostname.toLowerCase().replace(/\.$/, '').replace(/^\[|\]$/g, '')
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || /^127\./.test(h)
 }
 
 /** DSH 控制面路径判定（observeLoopback 观测用，round-13）：本地 API 的敏感路径形状——
@@ -55,6 +56,17 @@ export function isTrackedNetHost(hostname: string, opts?: { observeLoopback?: bo
 }
 
 /**
+ * 归一化网络目标主机名（P2-7 修复的延伸）：
+ * - 统一小写（防大小写逃逸）；
+ * - 去尾点（'webhook.site.' 是 DNS 等价的尾点 FQDN —— WHATWG URL.hostname 保留尾点，
+ *   敏感主机/白名单字面比较会漏网；归一后 'webhook.site.' 与 'webhook.site' 同判）；
+ * - 剥 IPv6 方括号（URL.hostname 对 '[::1]' 返回带括号形态，回环判定需先剥）。
+ */
+export function normNetworkHost(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.$/, '').replace(/^\[|\]$/g, '')
+}
+
+/**
  * 从网络模块参数中提取目标（hostname, port, path）。
  * 处理多种参数形态：
  * - http.request(urlString, ...)
@@ -67,16 +79,17 @@ export function extractNetworkTarget(args: unknown[]): { hostname: string; port?
   if (args.length === 0) return null
   
   const first = args[0]
+  const withNorm = (hostname: string, port: number | undefined, path: string): { hostname: string; port?: number; path: string } => ({
+    hostname: normNetworkHost(hostname),
+    port,
+    path,
+  })
   
   // 字符串 URL
   if (typeof first === 'string') {
     try {
       const url = new URL(first)
-      return {
-        hostname: url.hostname,
-        port: url.port ? parseInt(url.port, 10) : undefined,
-        path: url.pathname + url.search,
-      }
+      return withNorm(url.hostname, url.port ? parseInt(url.port, 10) : undefined, url.pathname + url.search)
     } catch {
       return null
     }
@@ -84,11 +97,7 @@ export function extractNetworkTarget(args: unknown[]): { hostname: string; port?
   
   // URL 对象
   if (first instanceof URL) {
-    return {
-      hostname: first.hostname,
-      port: first.port ? parseInt(first.port, 10) : undefined,
-      path: first.pathname + first.search,
-    }
+    return withNorm(first.hostname, first.port ? parseInt(first.port, 10) : undefined, first.pathname + first.search)
   }
 
   // Request 实例（fetch(new Request(url, init))）——目标取自 .url。此前漏分支：实例落到下方
@@ -97,11 +106,7 @@ export function extractNetworkTarget(args: unknown[]): { hostname: string; port?
   if (typeof first === 'object' && first !== null && typeof (first as { url?: unknown }).url === 'string') {
     try {
       const url = new URL((first as { url: string }).url)
-      return {
-        hostname: url.hostname,
-        port: url.port ? parseInt(url.port, 10) : undefined,
-        path: url.pathname + url.search,
-      }
+      return withNorm(url.hostname, url.port ? parseInt(url.port, 10) : undefined, url.pathname + url.search)
     } catch {
       return null
     }
@@ -113,24 +118,17 @@ export function extractNetworkTarget(args: unknown[]): { hostname: string; port?
     
     // net.connect({ port, host }) 形态
     if (typeof opts.port === 'number') {
-      const rawHost = typeof opts.host === 'string' ? opts.host : (typeof opts.hostname === 'string' ? opts.hostname : 'localhost')
-      return {
-        // P2-7 修复：hostname 统一小写（防止 {host:'Webhook.Site'} 逃逸敏感主机匹配）
-        hostname: rawHost.toLowerCase(),
-        port: opts.port,
-        path: typeof opts.path === 'string' ? opts.path : '/',
-      }
+      const rawHost = typeof opts.host === 'string' && opts.host !== '' ? opts.host
+        : (typeof opts.hostname === 'string' && opts.hostname !== '' ? opts.hostname : 'localhost')
+      return withNorm(rawHost, opts.port, typeof opts.path === 'string' ? opts.path : '/')
     }
     
     // http.request({ hostname, port, path }) 形态
-    if (typeof opts.hostname === 'string' || typeof opts.host === 'string') {
-      const rawHost = (typeof opts.hostname === 'string' ? opts.hostname : opts.host) as string
-      return {
-        // P2-7 修复：hostname 统一小写
-        hostname: rawHost.toLowerCase(),
-        port: typeof opts.port === 'number' ? opts.port : (typeof opts.port === 'string' ? parseInt(opts.port, 10) : undefined),
-        path: typeof opts.path === 'string' ? opts.path : '/',
-      }
+    if (typeof opts.hostname === 'string' && opts.hostname !== '' || typeof opts.host === 'string' && opts.host !== '') {
+      // 空串 hostname 回退 host（Node 语义：hostname 显式空串时 http.request 会回退 host；
+      // 仅取 hostname 会令敏感主机判定拿到空串逃逸）
+      const rawHost = (typeof opts.hostname === 'string' && opts.hostname !== '') ? opts.hostname : opts.host
+      return withNorm(rawHost as string, typeof opts.port === 'number' ? opts.port : (typeof opts.port === 'string' ? parseInt(opts.port, 10) : undefined), typeof opts.path === 'string' ? opts.path : '/')
     }
     
     // net.connect({ path }) Unix socket 形态
@@ -144,13 +142,8 @@ export function extractNetworkTarget(args: unknown[]): { hostname: string; port?
   
   // net.connect(port, host?) 形态
   if (typeof first === 'number') {
-    const rawHost = typeof args[1] === 'string' ? args[1] as string : 'localhost'
-    return {
-      // P2-7 修复：hostname 统一小写
-      hostname: rawHost.toLowerCase(),
-      port: first,
-      path: '/',
-    }
+    const rawHost = typeof args[1] === 'string' && args[1] !== '' ? args[1] as string : 'localhost'
+    return withNorm(rawHost, first, '/')
   }
   
   return null
@@ -168,8 +161,8 @@ export function classifyNetworkOp(
   const target = extractNetworkTarget(args)
   if (target === null) return null
   
-  // 回环地址不报警
-  if (target.hostname === 'localhost' || target.hostname === '127.0.0.1' || target.hostname === '::1') return null
+  // 回环地址不报警（含 127.0.0.0/8、[::1] 括号形态、尾点 localhost. —— normNetworkHost 已归一）
+  if (isLoopbackHost(target.hostname)) return null
   
   // 白名单主机不报警
   if (EGRESS_ALLOWLIST.includes(target.hostname)) return null
