@@ -340,7 +340,9 @@ outbound byte counts and operation shapes:
   but can never override a code fact or swallow an out-of-scope observation.
 - **Record stage only — wired (0.1.21, 方案 A)**: with config contract.enabled (default on) and a per-plugin
   contract file at ~/.dsh/vet/contracts/<name>.json, the T2 sink (createT2Sink(status, contractResolver))
-  reconciles each runtime alarm against the plugin's contract:
+  reconciles each runtime alarm against the plugin's contract (round-5: the loader accepts both the
+  normalized form — '/'→'_', the historical convention — and the literal <name> form, e.g.
+  @scope/name.json, so files written per this doc are found):
   - out-of-scope alarm → info m1:contract-violation (collapses by source/kind/plugin/field, count accumulates);
   - rejected contract → yellow m1:contract-rejected (once per plugin);
   - a *code fact* (N1 hidden capability) contradicting the contract → yellow m1:contract-distrusted
@@ -502,10 +504,14 @@ plugins:
    陌生人，豁免失效）。
 2. **② 每版本产物钉扎**（`src/report/self-pin.ts` + `vet-self-pins.json` + `scripts/gen-self-pin.mjs`）：
    版本 → 扫描集 sha256，按版本发布、不写死单 hash（升级同版自扫不误报；字节不符任一发布钉扎——含被替换
-   的 vet——→ 一律非 pinned-match，按陌生人全扫）。`pinned-match` = 当前字节 == 被审计发布物 → 可出
-   Trusted；`dev-tree`/`unpinned` → 不予信任背书（amber）。钉扎范围 = 本体权威源码集
-   （`src/report/self-scope.ts`：排除 gitignore 非本体目录 lib/、dsh-src/、plugin-scan-tmp/、
-   dist/coverage/build，跨机可复现、与面板扫 vet 源码仓同源）。
+   的 vet——→ 一律非 pinned-match，按陌生人全扫）。`pinned-match` = 当前字节 == 某版被审计发布物 → 可出
+   Trusted；`dev-tree`（本版有 pin 但字节不符任何 pin）/`unpinned` → 不予信任背书（amber）。
+   round-16（决策 2，升级体验优先）两点修订：(a) **钉扎范围 = 随包发布的产物**（`self-scope.listShippedFiles`
+   白名单：`lib/**` + 包根清单 + `docs/**`，`vet-self-pins.json` 自引用除外）——发布 tarball 只有 lib/，
+   生产安装自扫与钉扎同一字节集，Trusted 可达；旧范围（src 源码树）生产永远 dev-tree（升级后自己不认自己）；
+   (b) **any-pin 匹配**——`pinned-match` 不要求版本键 == 当前版本，字节匹配任一已发布 pin 即被审计发布物；
+   升级窗口（宿主进程版本滞后 / package.json 与 pin 表交错更新）不再「两个 vet 互不认」；降级到旧审计版
+   不是能力升级，无放强面。
 3. **③ 展示数据**（`scan_plugin` 输出 `selfScan` 块 + 评分卡 Trusted 卡）：`static` 保留原始
    verdict/findings 完整透明，`selfScan` 给出零化已声明项后的 verdict/score + 归属统计（declared /
    datasetSelfRef / devFixtures / retained）+ 必须复查清单。**dsh.so 接入点：面板对 vet 本体改走
@@ -517,8 +523,11 @@ plugins:
    prepublish（含本门禁）。
 
 信任边界（不得放宽）：出站 host（非回环非 osv.dev）、未声明 env、凭据/密钥路径、IPC 原语四个方向出现的
-任一 token 一律保留，无待定豁免；**钉扎（pinned-match）是豁免生效的前提**。测试：`test/self-scan.test.ts`
-（27）、`test/self-pin.test.ts`（6）；端到端实测本体自扫 pinned-match + clean，325 findings 全分类。
+任一 token 一律保留，无待定豁免；**钉扎（pinned-match）是豁免生效的前提**。round-16（决策 1）：官方包
+（first-seen/match）安装时也跑静态扫描——只豁免 deny 升级（官方信任锚不因静态 verdict 拦截；扫描是
+识别伪造官方名 tarball 的唯一确定性检查，自生哈希基线首见即记录挡不住伪装）；allowlist/cordis builtin/
+内容基线关闭（用户显式选择）才完全跳过。测试：`test/self-scan.test.ts`（27）、`test/self-pin.test.ts`（11）；
+端到端实测本体自扫 pinned-match + clean，224 findings 全分类。
 
 ## 6. Audit protocol (vet-audit-protocol skill)
 
@@ -530,7 +539,40 @@ scan_plugin static criteria → read manifest/source → verify each finding →
 `~/.dsh/vet/audits/<plugin>-<version>-<ts>.md` using the system write capability.
 
 With `requireAudit: true`, loading a third-party plugin without a record → report mode alarms / deny mode
-blocks. Record naming is strict (`<name>-<version>-<ts>.md`), preventing prefix forgery.
+blocks. Record naming is strict (`<name>-<version>-<ts>.md`), preventing prefix forgery. The gate is
+**third-party only** (round-17): official `@deepseek-ai/*` packages are governed by content-hash baseline +
+static scan (decision 1: first-seen/match still fully scanned, only deny escalation exempt) — DSH-bundled
+official plugins never fire `audit-required`; the audit-center pending list applies the same exclusion.
+
+## 6.5 Shield panel & panel data plane (0.4 revamp)
+
+GUI（`src/client/`，esbuild CJS 单文件 bundle）按 OBSIDIAN MOSS GOLD 设计稿换肤（深色配方 +
+浅色同构变体，令牌在 `client/theme.ts`）并目录化拆分：`components/`（GlassLayers/StatusBand/
+RingSparkCard/FoldSection/RadarChart/SubPanel…）+ `panels/`（主面板编排在 Shield.tsx，
+次级/三级面板各自成文件）。
+
+- **布局**：触发器右锚定下挂；次级面板**紧贴主面板右缘**并排级联（无间隙，等高；不学 mock
+  的浏览器右缘抽屉），永不叠放——放不下时整组左移保证可见；Esc 逐层退回（L3→L2→主面板）；
+  插件详情是唯一三级面板（D7：L1 最近扫描 → L2 最近插件列表（20 条）→ L3 详情；
+  时间线/审计中心点插件名直推 L3）。
+- **面板数据面**（全部只读 GET，`/vet` prefix 既有同源纪律）：
+  - `status.json` 增量：`metricsHistory`（`guard/metrics.ts` 进程内 64 点环形缓冲，
+    rss 总占用与触发器 RAM 同口径）、`audit`（`guard/audit-summary.ts` 聚合：
+    待审=vet 见过∩无档案、新装=72h 首见、蜜罐触碰自报警流 kind='honeypot' 聚合、
+    插件索引 200 条（round-21：50→200，与 scan-summaries LRU 200 对齐——三张走廊均
+    **只含第三方**；round-19 起官方/受信包（`@deepseek-ai/*` 与 vet 自身）整体移出走廊，
+    其防护走内容基线 + 静态扫描 + 报警，不占用给用户看的格子）、`lastUpgradeDiff`
+    （N6 报警 + `version-diff.history()` 组装）。客户端分页逐页渲染（round-21：
+    最近插件每页 20、审计状态每页 14，点「加载更多」追加，不全量画满）。
+  - `GET /vet/plugin?name=`：`label()` + `getScanSummary()` + `diffHistory()` +
+    `hasAuditRecordBatch()` 的只读聚合；name 校验（≤214、无路径符/控制字符）；未见过 404。
+- **扫描摘要库** `~/.dsh/vet/scan-summaries.json`（`guard/scan-summaries.ts`）：
+  按包一条最新扫描结论（verdict/score/规则码/OSV 摘要）；原子写 tmp+rename 0600、
+  LRU 200、**变化才落盘**（verdict/版本/规则码集合变化才覆写——防写放大）、损坏 fail-open；
+  自动扫描（internal-plugin finish）与 vet-gate（gate.ts）双路径写入。
+- **诚实口径**：雷达/营养标签展示**声明侧**静态能力（同 vet_label 边界，D5）；
+  时间线处置标签按 severity 分档，不虚构「已拦截」；「已拦截」标记来自 N7 族 1 名单
+  （confirmBlock.isFamily1Blocked）。
 
 ## 7. Plugin body and distribution
 
@@ -539,7 +581,8 @@ blocks. Record naming is strict (`<name>-<version>-<ts>.md`), preventing prefix 
 - Tools: `scan_plugin` (deterministic static scan; verdict comes only from the static layer).
 - Guards: `internal/plugin` auto-scan + requireAudit gate; `tools/execute` interception.
 - Shield: browser half (`conversation.session.header.actions`), polls /vet/status.json, one-click runtimeGuard
-  config write (takes effect on restart).
+  config write (guard flips immediately via toggle hook and persists to the profile patch — since the
+  2026-08-26 incident fix it no longer waits for a DSH restart; tier-preset expansion keys apply on reload).
 - Distribution: `cordis.patch.yml` mount patch (insert semantics); `files` ships lib/ + docs + patch.
 - Resource resolution: package-internal paths (AUDIT_PROTOCOL.md, scanner-bin entry, T1 sidecar, SELF_ROOT)
   are located by `src/pkg-root.ts` — `resolvePkgRoot` (upward package.json search) + `resolveVetFile`

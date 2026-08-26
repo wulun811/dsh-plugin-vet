@@ -3,6 +3,385 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Plugin-list pagination (round-21)**: users with many third-party plugins couldn't see past the
+  first 20 rows — "Recent plugins" panel now renders the index page by page (20 rows per page) and
+  "Audit status" rows page by page (14 rows per page), each page appended via a "Load more" button
+  (shown X/Y), so the corridor no longer truncates at 20. Server index cap raised 50 → 200 (aligned
+  with the scan-summaries LRU of 200 — status.json is polled whole every 5s, ~200 rows is a few dozen
+  KB on a local handshake, no lag; the client only draws one page at a time, never all 200). Honest
+  bound: with more than 200 third-party packages the index truncates at 200 (scan-summaries LRU is the
+  same ceiling); that scale is outside the realistic corridor and would need a real server-side page
+  endpoint.
+
+### Fixed
+
+- **release-gate hardening: flaky timing test made load-robust (pre-0.3.1)**: the
+  `n3-mass-delete` alarm-window test used a 5 ms observation window and a 30 ms wait; six synchronous
+  `unlink` events can straddle the window when a GC/microtask pause lands mid-loop under parallel test
+  load (seen when vitest and the mutant gate ran concurrently), failing `expect(hit).toBe(true)` with a
+  false negative. The window is now 60 ms and the post-window wait 150 ms (2.5× margin) — semantics
+  unchanged (threshold reached inside the window → alarm; after expiry, stale counts must never re-alarm).
+  Verified 3× in isolation and in the full suite.
+- **round-20 test write-through fix: guard scan-chain tests no longer pollute the real `~/.dsh/vet/`**:
+  `baseline-reconcile` (`@deepseek-ai/vet-fixture`), `hardening-ops` C2 wiring (`@esm-test/pkg`) and
+  `n6-version-diff` internal/plugin wiring (`@vet-test/n6pkg`) ran the real scan chain while isolating
+  only baseline/caps dirs, missing summaries — `recordScanSummary`/`recordVersionScan` write to disk
+  unconditionally once a scan completes, so fixture packages leaked into the user's real
+  `~/.dsh/vet/capabilities.json` (4 residue records measured; after a restart they surfaced as
+  "third-party pending audits"). Fix: all three now redirect `setCapabilitiesDirForTest` +
+  `setSummariesDirForTest` to tmp (same discipline as plugin.test.ts round-17), reset in afterEach;
+  verified after the run: real file mtime unchanged, zero test residue in content.
+- **round-19 official packages removed from the audit corridors entirely (replacing round-18's
+  label-in-place stopgap)**: round-18 gave official packages an "official plugin" label but kept them in
+  the plugin index — but from the user's point of view, "who cares how official plugins look": the
+  corridor's purpose is "among the third-party plugins the user installed, which need attention/audit".
+  DSH-shipped official packages are guarded by content-hash baseline + static scan + alarms, unrelated to
+  these lists; however nice the label, 20 index slots / 14 audit rows were still flooded by dozens of
+  official packages while the third-party plugins that actually need review sank out of view.
+  Fix: `buildAuditSummary` now `continue`s for official/trusted packages (`isOfficial`: `@deepseek-ai/*`
+  plus vet itself) — none appear in pending-audit, new-install or plugin-index corridors; every slot goes
+  to third-party. Kept: ① official scan/hash/alarm paths unchanged (D1 intact, mismatch still red);
+  ② `/vet/plugin` detail endpoint still carries the `official` flag and the detail page keeps the
+  "official plugin" chip (when an official package is opened by name from an alarm/honeypot, it explains
+  why there is no audit archive) — the entry is no longer a corridor citizen. round-18's index `official`
+  field and client badge branches removed (index no longer contains official entries; dead code).
+- **round-18 official packages no longer shown as "stranger/un-audited" plugins** (superseded by
+  round-19 — the earlier fix for the same problem: label-in-place instead of corridor removal):
+  round-17 fixed only the pending-audit count — the audit center rows, 🆕 new-install badge and plugin
+  detail chip still rendered from the index/`newPlugins`, so official packages (no human audit archive by
+  design — gate = content-hash baseline + static scan) all showed "⏳ installed without an audit record"
+  and counted as "new". Fix: ① index/detail carry an `official` flag (`isOfficial`: `@deepseek-ai/*`
+  plus vet itself) — audit rows and the plugin bus show "official plugin" + 🛡 badge (hover explains the
+  gate, no human archive required), ranked alongside "audited" instead of pending (third-party pending
+  stays on top); ② `newPlugins` excludes official packages (shipped with DSH, not "newly-appeared
+  stranger packages") — the 🆕 badge counts third-party only; ③ plugin detail gains the "official plugin"
+  chip (hover, same explanation). Statically suspicious/blocked official packages still show ⚠/⛔ first
+  (D1 semantics unchanged: first-seen is still fully scanned).
+- **round-17 official-package audit-required alarm storm resolution**: after round-16 (decision 1)
+  unblocked the official-package skip path, the requireAudit gate fired at every official package — with
+  `requireAudit: true`, all DSH-bundled official plugins (`@deepseek-ai/*`, dozens) raised
+  "audit not completed" yellow alarms on load and flooded the audit-center pending backlog. Fix:
+  ① gate strictly limited to third-party (`official.kind === 'not-official'`) — official packages
+  (first-seen/match) keep the content-hash baseline + static scan gate (decision 1 semantics unchanged:
+  first-seen still fully scanned, only deny escalation exempt; no human audit archive required);
+  ② pending-audit list excludes `@deepseek-ai/*` (plugin index/new-install list still keep official
+  entries). Behavior returns to the pre-round-16 official exempt short-circuit and the documented
+  "third-party plugins" scope.
+- **round-16 official packages first-seen also run the static scan (decision 1)**: `@deepseek-ai/*`
+  first-seen/content-identical packages no longer skip scanning entirely — the self-hashed baseline
+  cannot stop a forged official-name first-seen from being trusted (a malicious tarball records its own
+  bytes as the baseline on first install); first-seen/match now scan statically as usual (results
+  archived / capability diff / observation alarms all run), only deny escalation is exempt (the official
+  trust anchor is not blocked by a static verdict); allowlist / cordis builtin / content-baseline
+  disabled (explicit user choice) still skip entirely.
+- **round-16 self-pin = shipped-artifact scope + any-pin match (decision 2, upgrade experience first)**:
+  pin/self-scan scope changed from the src source tree to the shipped artifacts (`lib/**` + root
+  manifests + `docs/**`, `vet-self-pins.json` self-reference excluded) — a production install (tarball
+  contains only lib/) reaches pinned-match on first self-scan (Trusted available), no longer forever
+  dev-tree; pinned-match now means byte-matching any published pin — during an upgrade window (host
+  process version lag / pin table and package.json interleaved updates) the two vets no longer refuse
+  each other; replaced/tampered bytes still match no pin and are fully scanned as strangers.
+- **round-16 scan_plugin file-target bounding (decision 3)**: file scans accept only absolute paths +
+  regular files — rejecting relative/`~` expansion, directories, devices/FIFOs/symlinks (`/dev/zero` etc.
+  infinite-stream readFileSync has no EOF and blows up the scanner subprocess memory, fifo hangs until
+  timeout); the engine cacheKey stage and scan loop skip non-regular files with R8.
+- **round-16 second batch of low-severity fixes** (details in each module comment): ① sidecar hot-reload
+  mutual-kill race — an instance that already armed a sentinel no longer kill-and-takeover (prevents
+  new/old instances killing each other in a loop); takeover waits for the old sentinel to exit before
+  spawning (prevents sibling-lock self-kill spinning respawn×5); fast exit(0) does not count toward the
+  respawn cap; ② exfil-ledger window array count cap (2048, preventing unbounded growth and O(n²) from a
+  million events in 10s) + spawn↔net association switched to single pointers O(n+m); ③ patchModule/
+  patchNetworkModule roll back already-wrapped ops when a mid-loop throw occurs (prevents half-wrapped
+  residue); ④ applyRuntimeGuardImmediate failure path calls disposeActiveGuard to reset (prevents
+  "config shows off but hooks/sentinel half-alive"); ⑤ when stack attribution is tampered, N7 family-1
+  interception degradation is explicitly named in the C4 red alarm text (family-2 credential destruction
+  still blocks); ⑥ the sentinel re-checks the host ppid every round — after host exit is adopted by init,
+  it self-kills immediately even if the PID was reused by the system (hedge against kill(0) misjudging
+  liveness); ⑦ guard toggle/tier writes fsync tmp before rename (prevents empty config on power loss/
+  crash); ⑧ cordis_run dead entries become a tripwire — when a future schema carries
+  code/source/script payloads they immediately enter the scan surface (zero false positives today);
+  ⑨ unreadable audit archive dir → one-time warn (previously silently treated as no-archive, so deny
+  could block a legit plugin for a false-negative reason); ⑩ baseline save failure → yellow
+  baseline-save-fail (disk full/perms no longer silent; wired into official/third-party/reconcile paths).
+- **0.3.1 tier ↔ guard linkage**: Light defense ⇔ guard off, Medium/High defense ⇔ guard on — toggling
+  "enable/disable runtime guard" automatically links the defense tier (enabling raises the tier to
+  medium, an already-set high tier is not downgraded), selecting a tier switches the guard immediately;
+  the server response carries `profile` and the panel tier badge updates instantly — the contradictory
+  "guard enabled but shows light defense" state no longer occurs.
+- **0.3.1 plugin-detail scoped-package-name fix**: `/vet/plugin`'s name validation wrongly treated `/`
+  as an illegal character, so scoped packages (`@scope/name`) always got 400 on detail open (frontend
+  showed "no information") — now allows `/`, rejects only control chars/backslash/`..` traversal, with a
+  regression test.
+- **0.3.1 honeypot copy**: no longer uses tier jargon users can't read (hardened/paranoid) — "auto-enabled
+  by Medium/High defense profile, or set honeypot.enabled manually".
+- **0.3.1 layered-stack positioning root-cause fix**: secondary/tertiary panels restored to the old
+  isomorphic positioning — `left: '100%'` (root container shrinks to the main panel's real rendered
+  width) + `top:0/bottom:0` equal height, the browser computes the outer edge. The redesign had used a
+  fixed pixel offset (`+340`) without locking box-sizing, so with the host's content-box the main panel
+  rendered ~368px (340+padding) and the layer's left edge pressed 28px into the main panel's right edge —
+  the root cause of "all secondary UIs stack on top of the main panel" (user feedback: the old
+  `left: calc(100%+8px)` was fine; it started overlapping after the planned redesign).
+- **0.3.1 guard-toggle transient notice**: button "enabling…/disabling…" → success "enabled/disabled!"
+  auto-dismisses after 2s (failure keeps a red note), no lingering persistent copy.
+- **0.3.1 guard toggle takes effect immediately**: the toggle assembles/disassembles the runtime guard
+  right away, no DSH restart required (the write itself is line-level surgery, `!!js` tag safe).
+
+### Added
+
+- **Panel redesign 0.3.0 (OBSIDIAN MOSS GOLD)**: the shield GUI was reskinned per docs/local design
+  mockups and split into directories (`client/theme.ts` dual-board theme tokens + `components/` +
+  `panels/`; Shield.tsx narrowed to an orchestration layer). Main panel: 3 ring-trend composite cards
+  (decision ②b: value + direction in one card; client/server 64-point trend windows), memory and
+  run-time I·O collapsible sections (green collapsed / yellow·red auto-expanded, red danger zone red-lit
+  with inner glow, fd-leak warning), big defense-stat numbers, audit-bar entry. Layered-stack interaction
+  (D2/D7): secondary panels always cascade out from the main panel's right edge (**not the mockup's
+  browser-right-edge drawer**), side-by-side never overlapping, hugging the main panel's outer edge
+  (final revision: no whole-group left-shift; extreme narrow windows overflow to the right), Esc steps
+  back layer by layer; plugin detail is the only tertiary panel — L1 "recent scans" click opens the
+  **recent-plugin list (20-entry corridor)** before detail, timeline/audit center open detail directly on
+  plugin-name click. New data plane (all read-only GET / optional status.json fields, backward compatible
+  with old clients): `metricsHistory` ring buffer (64 points); **scan-summary store**
+  `~/.dsh/vet/scan-summaries.json` (per-package verdict/score/rule-codes/OSV summary, atomic write +
+  LRU200 + write-on-change, dual-path written by auto-scan and vet-gate); audit & honeypot aggregator
+  (pending = vet-seen ∩ no-archive union semantics, new = first-seen within 72h, honeypot touches
+  aggregated from the alarm stream, batched archive probe = one readdir to avoid N-package amplification);
+  `GET /vet/plugin?name=` detail endpoint (capability label + scan summary + version diff + audit state).
+  Floating cards: upgrade-diff and honeypot alarm cards appear with state and are clickable to drill in.
+  a11y/i18n: Esc layer-back, prefers-reduced-motion full-tree degradation, ~50 new i18n keys zh/en synced.
+
+### Fixed
+
+- **Guard-toggle incident fix (2026-08-26)**: the shield "enable/disable runtime guard" and "safety tier"
+  write paths used js-yaml full re-serialization of `cordis.patch.yml` — js-yaml does not understand
+  cordis's `!!js` expressions (e.g. `port: !!js ctx.webStartup.port ?? 3456`), load throws "unknown tag"
+  and the whole patch was rewritten to only the vet entry, wiping webserver/insert/settings configs;
+  DSH's `watchUserPatches` watches that file and hot-reloads, so applying the broken patch caused LAN
+  service anomalies/connection drops. Fix: (1) write path changed to **line-level text surgery** — only
+  add/remove/replace the `runtimeGuard`/`profile` single lines inside the vet entry; comment headers,
+  `!!js` expressions, other plugin entries and the insert list are preserved verbatim; shapes that cannot
+  be safely line-edited (multi-document `---` / inline vet config expression) fall back to object
+  reconstruction with a check prompt, and other entries with syntax damage fail closed (refuse to write,
+  no stacking writes); (2) pre-write YAML validation extended with `!!js`/`!!js/function` tags (canonical
+  long name `tag:yaml.org,2002:js`, kept as string, never executed) — valid DSH files are no longer
+  misjudged as damaged; (3) **toggle takes effect immediately**: after writing the config, the runtime
+  guard is reassembled/disassembled in the current process right away (reuses installRuntimeGuard's
+  prevGuardDisposer re-entry: old sentinel swapped out, T2 hooks reinstalled, config object flipped live,
+  new state visible on the next status.json poll), no dsh-web restart required; the teardown path cleans
+  by the module-level active disposer, so freshly assembled instances are not left uncleaned.
+
+### Added
+
+- **Mutant corpus kill-rate QA (mutant-score)**: muteval methodology landed —
+  `test/mutants.manifest.json` authoritatively registers 21 malicious mutants (constructor chain/
+  run_code host domain/eval·new Function·vm·indirect require/charCode combo obfuscation/hardcoded
+  credentials/fork bomb/ReDoS/destructive paths ×2/Discord webhook·cloud-metadata egress/
+  patch yml !!js injection/AGENTS.md instruction injection/fullwidth typosquat, covering 12 rule
+  surfaces R1-R19) + 5 benign controls; `scripts/mutant-score.mjs` reuses the same engine entry as
+  plugins-matrix for evaluation, kill criterion = rule hit (not verdict — R5/R9-2/R17/R18/R19 are all
+  clean + observation layer); files-mode corpus unified with `.fixture.js` suffix (DEV_FIXTURE_RE fixture
+  exemption discipline); `npm run check:mutants` gate: all malicious killed + 0 benign false-kills +
+  evaluation-failure fail-closed, wired into prepublishOnly (4th release gate), full vitest health check
+  in sync; runtime-surface shapes (double-encoded URLs etc. blocked at T2) are listed separately as
+  known-coverage-gaps, not part of the static gate. Mechanics in docs/MUTANT-QA.md.
+
+- **Safety tiers (0.3)**: `profile: standard | hardened | paranoid` preset-expands into the existing
+  granular switches (hardened: runtimeGuard watch + thirdPartyBaseline + honeypot, R17/R18/R19 info
+  observations raised to yellow (alarm-only, verdict unchanged); paranoid: + requireAudit + denyOn
+  suspicious + N7 families 3/4 block). Three disciplines: verdict semantics unchanged, explicit wins
+  (keys written into patch are explicit, presets don't override), false-positive cost rises with tier.
+  `observeLoopback` defaults to on (signal specificity: loopback + control-plane paths + third-party
+  attribution, official attribution exempt); the shield gains a one-click "safety tier" switch
+  (POST /vet/profile writes the patch, preserving runtimeGuard/requireAudit and other existing keys;
+  same-origin check + tier whitelist) and current-tier explanation; the `?` help panel gains a tier
+  explanation section; shows a notice while runtimeGuard is disabled.
+
+### Fixed
+
+- **round-6 review, three items**: ① dismissed-alerts atomic write cleans tmp residue on rename failure
+  (the old implementation left old `.tmp.*` files permanently under ~/.dsh/vet after a process restart
+  changed pid); ② mutant-score fail-closed on malformed manifest (structurally invalid → exit 2; a
+  missing single corpus entry goes to the evaluation-failure list rather than masquerading as a
+  "survivor" — the engine silently returns an empty clean report for a nonexistent file, so a path typo
+  would mislead as a detection gap); manifest path supports VET_MUTANT_MANIFEST override (test friendly,
+  absolute/relative both fine); ③ contract home-dir `~` validation merged into one condition
+  (`startsWith('~')` already covers everything, eliminating form misreads).
+- **C3 snapshot-discipline gap (review fix)**: content-baseline/version-diff/stats/forensics modules'
+  default storage dirs previously executed `homedir()` live on **every call** (POSIX prefers `$HOME`) —
+  an in-process plugin changing `process.env.HOME` could redirect baseline/capabilities/stats/forensics
+  storage (pre-planting a forged baseline, neutralizing N6 upgrade diffs, disabling tamper detection);
+  unified to a module-load-time constant (same discipline as confirm-block/contract/honeypot/archive).
+- **Destruction-signature window pruning not closed (5th review fix)**: exfil-ledger's
+  deletes/renames/writeEvents only pruned on "same-kind new event" push — a plugin going silent after
+  hitting the threshold within the window left stale counts forever, and any later other fs event
+  re-entered via replace after the 60s dedup window ended, so n3-mass-delete/rename/write-amplify alarms
+  permanently re-lit and the shield stuck yellow; now every destroyChecks prunes all three windows
+  uniformly (counts reflect the real window).
+- **fetch(Request) request-body observation tee buffer unbounded (5th review fix)**: clone is a tee
+  semantic — the old implementation fully read `clone().text()`, so a GB-scale streaming upload body
+  nearly doubled the vet process memory (same process as the plugin) with OOM risk; now pre-checks by
+  content-length (deterministic over-limit → skip body observation, URL side still scanned) + streams
+  and cancels after reading the first 4MB.
+- **Registry reconciliation resources unbounded (5th review fix)**: tarball/packument had no size limit
+  (abnormal/oversized responses fully absorbed into memory), tar member-listing/unpacking had no timeout
+  (decompression bomb occupies CPU/disk indefinitely; also the sole root cause of the inflight single
+  flight cache permanently occupied); now content-length pre-check (packument 20MB / tarball 256MB) +
+  tar 30s timeout — with fetch and unpacking both bounded, every reconciliation promise settles and
+  cleans up.
+- **Name-based self-exemption and attribution exclusion switched to identity (5th review fix, install-gate
+  bypass)**: internal/plugin self-exemption previously compared only the package name
+  (`entryName === PACKAGE_NAME` early return) — a malicious tarball writing its name as
+  @jieai/dsh-plugin-vet skipped autoScan/requireAudit/third-party baseline entirely (scan-plugin already
+  had realpath validation; the two sides were asymmetric); T2 attribution mapping likewise excluded
+  name-impersonating packages from attribution (behavior became ownerless, observation downgraded). Now
+  unified via pkg-root realpath identity (vet itself exempt; root resolution failure conservatively
+  exempts in bundle form), impostor packages scan and attribute normally.
+- **tools/execute and internal/plugin duplicate apply stacking (5th review fix)**: DSH config hot-reload
+  may apply the same ctx repeatedly without cleaning old listeners — the same execution/install was
+  scanned multiple times (double scan + double VET prefix + double deny interception); module-level
+  remembers the previous listener and disarms it before reassembling (same mindset as runtime-guard).
+- **T2 observation chain top-level exception isolation (5th review fix, defense in depth)**: the sink is
+  the top level of observation — a throw there propagates back through the wrappers into the plugin's
+  own call (fs side: "operation already done but throws", dgram/fetch side: observation segment runs
+  before the original call, a throw directly blocks the request); now the sink is fully try/catch,
+  observation failures are silent (each link in the chain is verified not to throw today; this is
+  depth-in-depth).
+- **Numeric configs accepting 0 busy-loop/immediate-timeout surface (5th review fix)**:
+  `z.natural()` allows 0 — scannerTimeoutMs:0 = all scans 0ms timeout, runtimeIntervalMs:0 =
+  setInterval-0 busy loop over /proc (sentinel burns a full core); numeric keys unified to `min(1)`,
+  sidecar argv entry clamped again (defends direct spawn / legacy config shapes).
+- **Unknown-verdict deny silent failure (5th review fix)**: a scanner-protocol drift producing an
+  unknown verdict made the RANK lookup undefined and `undefined > RANK[worst]` always false — deny
+  silently passed with no log; unknown verdict now follows the same fail-closed path as scanFailed.
+- **timeout NaN/0 penetration (5th review fix)**: `--timeout abc`/trailing garbage becomes NaN via
+  parseInt, and `NaN ?? default` stays NaN all the way to the scanner (setTimeout(NaN)=0ms immediate
+  timeout); CLI validates a positive finite number + client side falls back to default for
+  non-finite/≤0.
+- **Contract filename vs docs mismatch (5th review fix)**: loadContract only recognized the normalized
+  name ('/'→'_') while docs said `<name>.json` — a contract an agent wrote per docs always failed to
+  load (M1 silently dead); now dual-track (normalized name first + original name), compatible with old
+  storage.
+- **Contract validation ~ shape penetration (5th review fix)**: isValidPathPattern only blocked
+  '~/…'; bare '~' and '~user' (POSIX home-expansion shapes) passed (comment promised "home-dir ~
+  rejected"); now all '~'-prefix shapes are rejected.
+- **confirm-block/contract path-normalization drift (5th review fix)**: the two modules each had a
+  normPath with different semantics (confirm-block only replaces backslashes; contract folds // and
+  strips trailing /) — the equivalent double-slash form "/home/u/.ssh//id_rsa" missed the N7 family-1/2
+  credential exact list (theoretical bypass shape); extracted a shared path-utils.normPath single source.
+- **config-diff flow key mis-extraction (5th review fix)**: URL_MODE_RE had no word boundary —
+  the substring 'url:' inside 'endpoint-url: xxx' was captured and hit, so non-url/mode flow keys were
+  alarmed as telemetry changes (yellow); key names now get a negative word boundary.
+- **self-pin hash comment promise vs implementation mismatch (5th review fix)**: hashScanFiles comment
+  claimed "newline normalization" but never implemented it — Windows checkouts (CRLF) computed a
+  different hash for the same shipped bytes, so legit installs were misjudged as dev-tree (pinned-match
+  never true); now folds CRLF and strips BOM.
+- **dismissed-alerts non-atomic write (5th review fix)**: the ignore list wrote directly without
+  tmp+rename — a crash window truncated the JSON, all ignores died and alarms resurfaced; and a failed
+  write still updated the in-memory cache (user thought it was ignored; alarms returned after restart).
+  Now same atomic write + 0600 as other stores; write failure doesn't change the cache.
+- **Zero/negative defense (5th review fix)**: VetStatus constructor args clamped (alarmMax<0 would throw
+  RangeError via `alarms.length = alarmMax`), count floor 1; capability-diff empty/blank values no
+  longer produce content-empty red alarms (previously recorded no observation set yet still alarmed,
+  asymmetric); exfil readTimes Map window lazy pruning (the only unpruned growth surface);
+  status-route clears the 60s alarm timer after successful registration + rejects blank alarm ids;
+  setBaselineDirForTest also invalidates the module-level cache (same isolation semantics as
+  stats/version-diff).
+- **gate-cli unknown format silent empty output (5th review fix)**: passing a non-json value to
+  --format neither errored nor output JSON (exit code fine) — now explicitly errors with exit 2.
+- **Sentinel subprocess boundaries (5th review fix)**: stdout gains an error listener (EPIPE when the
+  host-side pipe closes no longer crashes the process as an uncaught error); disposer registers before
+  assembling (if installT2/heartbeat throws, the already-started T1 sidecar can be cleaned up, no
+  orphans); score-mirror and scanner-bin unknown-confidence fallback unified (?? 1, NaN can no longer
+  propagate into the total score).
+- **Trailing-dot FQDN escaping sensitive-host detection (review fix)**: `webhook.site.` etc. with a
+  trailing dot is a DNS-equivalent form — WHATWG URL keeps the trailing dot, previously all
+  `=== h || endsWith('.'+h)` checks missed (sensitive-host/allowlist double bypass); `extractNetworkTarget`
+  now normalizes uniformly (lowercase + strip trailing dot + strip IPv6 brackets). Also fixed: options-form
+  empty hostname no longer grabs an empty string and goes blind (fallback to host); IPv6 bracket form
+  `[::1]` and the entire 127.0.0.0/8 block are now treated as loopback (not in the ledger/alarms).
+- **Canary/key alarm targets not in plaintext (review fix)**: canary-leak alarm id/target used to carry
+  the full 40-char canary string, key-leak target carried the matched key text — a same-host plugin
+  reading the state surface could surgically remove pre-planted values (destroying N4's "appearance =
+  confirmed" premise) or steal credential identifiers; now uses hashShort fingerprints like key-leak,
+  readable info stays in the message (first 16 chars + length).
+- **Honeypot lure registering orphan canaries (review fix)**: id_rsa.pem/.pub are real RSA keys (content
+  cannot embed a canary), previously still registered 2 never-matching orphan canaries via putWithCanary
+  (set bloat + contradicts the "one canary per lure = confirmable exfil" promise); the separate write
+  path no longer registers them.
+- **dgram.createSocket teardown restore missing (review fix)**: comments claimed the disposer restores
+  the createSocket export, but no restore was registered — after hot-reload/unload dgram stayed wrapped
+  forever (residual stacking); added the same snapshot-restore as patchModule.
+- **Paired-path ops honeypot/integrity target-side blind spot (review fix)**: the target side of
+  `cp(/tmp/x, lure)` / `rename(x, canary)` previously didn't participate in honeypot/integrity
+  determination (N7 families 3/4 already double-checked); paired-path candidates now include the target
+  side (integrity src side = read still not reported, preserving the read-not-reported semantics).
+- **Canary outbound scan first window (review fix)**: >64KB request bodies pushed the canary out of the
+  tail window so it never re-sent → N4 miss (large-file upload / padding exfil shapes); changed to
+  "constant 64KB first window + rolling 64KB tail window" — front hits no longer missed (mid-section
+  anti-split/reassembly stays at the same level, recording boundary).
+- **Sentinel host-liveness probe no longer depends on /proc (review fix)**: the sidecar previously
+  self-killed when reading `/proc/<ppid>/stat` failed — in containers/restricted mounts an unreadable
+  /proc ≠ host exited, so T1 went dark on first round (respawn×5 noise); switched to kill(0) probing
+  (ESRCH=host dead; EPERM=alive), /proc sampling failure only degrades the field.
+- **capability-diff covered() default guard (review fix)**: a static manifest missing an array field
+  threw TypeError via `undefined.length`, bubbling into the wrapped plugin call (the only path violating
+  the fail-open promise); aligned with diffManifests' `?? []` defense.
+- **N6 corrupt records no longer paralyze whole-package diff (review fix)**: a single record missing
+  `capabilities` (old-layout residue/manual edit) previously made diffManifests throw TypeError, caught
+  and swallowed — that plugin's every later upgrade diff was permanently silent with no notice;
+  diffManifests now returns empty diffs for non-object prev/next, recordScan diffs before writing
+  (old implementation: when diff threw, the new record was already written and claimed a no-op).
+- **tools/execute deny scan-failure fail-closed (review fix)**: a failed scan previously kept worst at
+  clean and silently passed (contradicting internal-plugin's M9 "deny scan failure must fail-closed" —
+  the code-execution surface is more dangerous than installing a plugin); now deny + scan failure →
+  blocked. Also notes are no longer silently dropped when next returns non-text content (fronted as
+  standalone text).
+- **vet self-scan declared surface gaps (review fix)**: DECLARED_MODULES gains `http2` (vet does import
+  and patch it; previously misattributed as declared via the substring 'http'); DETECTION_DATA_FILES
+  completed with all rule files in scanner-bin/rules/ (network-exfil/secrets/host-capture/
+  destructive-ops etc. previously omitted, so exfil-endpoint samples were counted as a declared
+  capability surface).
+- **Render/validation small fixes (review)**: vet_diff multi-record note key omitted → render no longer
+  outputs literal "undefined"; registry tarball bare `..` members no longer missed (unpack writes
+  outside tmpdir); archive old-format comment 15→18 chars.
+- **Honeypot lure template sources zero sensitive literals (review fix)**: lure content (`.env`
+  key=value lines, credentials.json private-key headers, aws-credentials key names) split into
+  Array.join assembly — pre-commit sensitive scan and vet self-scan R7 no longer false-positive (R7/N2
+  fold string `+` concatenation back into "key=sk-" shapes hitting env-key-assignment rules, so a
+  non-foldable join is used; generated content is byte-identical to the pre-split version). Previously
+  the honeypot files were blocked by the pre-commit hook on first commit, and (dogfood case) R7
+  self-scan hits — now eliminated at the root.
+- **Credential list / contract / canary base snapshot (review fix, C3 discipline gap)**:
+  `os.homedir()` prefers `$HOME` on POSIX, so an in-process plugin changing `process.env.HOME` could
+  redirect all three dependencies — ① confirm-block family-2 credential body list (interception broken:
+  deleting the real ~/.ssh/id_rsa no longer hit); ② contract default contract dir (M1 validation layer
+  silently degraded to no-contract); ③ ensureIntegrityCanaries default root (after hot-reload canaries
+  register to the new home, real ~/.dsh canaries lose protection). All three unified to a module-load
+  snapshot (vet loads before third-party plugins; the value at that moment is the user's real value);
+  confirm-block gains a setCredentialHomeForTest test hook.
+- **Turning the guard off no longer loses config (review fix)**: `POST /vet/runtime-guard
+  {enable:false}` previously deleted the whole vet entry — hardened/paranoid users turning the guard off
+  silently lost the tier and explicit keys like requireAudit; now only the runtimeGuard key is removed and
+  the entry kept; the entry is only removed when config is empty (keeping the `[]` boot contract).
+- **Runtime-guard state read not overreaching (review fix)**: `readPatchRuntimeGuard` scanning stops at
+  the vet entry boundary, no longer misreads a same-named `runtimeGuard` key in a later plugin entry
+  (unified with readPatchVetKeys' P2-8 boundary rule).
+- **Tier observation copy localized (review fix)**: the R19 observation-escalated alarm body
+  "typosquat observation" → "package-name impersonation observation"; no empty "e.g.(…)" suffix when no
+  evidence sample exists.
+- **README/i18n aligned with actual capability**: corrected outdated/contradictory items in the
+  "explicitly not detected" table — supply chain is now covered by R10 install hooks (incl.
+  prepare/preuninstall) + dependency list + OSV exact-version query (opt-in osvCheck); indirect
+  references (`process["getBuiltinModule"]`/`globalThis.process`/`(0, eval)` etc.) detected since
+  round-9/F4; R14 row adds .psm1/.zsh and python/ruby/perl download-and-exec; rule toggles and table
+  header R1-R18 → R1-R19; official package count 195 → 187 (0.1.1-rc.2 installed set); live alarm kinds
+  24 → 41 (i18n suggest dictionary); EN/ZH divergent rows (EN non-source-code file lines, ZH runtime
+  behavior lines) completed both ways; i18n home stats synced (19 rule classes / 187 official packages /
+  41 alarm kinds).
+
 ## [0.2.6] - 2026-08-23
 
 ### Added
@@ -21,7 +400,7 @@ versioning follows [SemVer](https://semver.org/).
     auto-trust per version; new family versions pass), `dsh plugin --profile add` CLI.
   - Docs: README gains the npm-public bundle-mount note; new tests for both patch formats and the
     home-layer override (privacy assertions intact).
-  - Follow-up review hardenings (round-15 复查, launcher-source-verified): `homePatchPath()` now
+  - Follow-up review hardenings (round-15 re-review, launcher-source-verified): `homePatchPath()` now
     mirrors `resolveDshHome` exactly (whitespace-only `$DSH_HOME` = unset, `~` expansion); R19 +5
     doc-visible official names (`dsh-session-telemetry-otel`, `dsh-session-telemetry`, `dsh-goal`,
     `dsh-headless`, `dsh-mcp-client`) diffed against the installed 187-package npm-public set.

@@ -1,6 +1,6 @@
 {
   "name": "@jieai/dsh-plugin-vet",
-  "version": "0.2.6",
+  "version": "0.3.1",
   "description": "Audit deepseek-harness (DSH) plugins before install, guard them at runtime. Static verdict + pre-install audit protocol; supply-chain checks (typosquat, OSV); exfiltration & ransomware detection, honeypot canaries, integrity baseline. Alarm-only; blocks confirmed destructive ops.",
   "license": "MIT",
   "author": {
@@ -112,7 +112,9 @@
     "test:watch": "vitest",
     "gen:self-pin": "node scripts/gen-self-pin.mjs",
     "check:self": "node scripts/check-self-contract.mjs",
-    "prepublishOnly": "npm run build && node scripts/check-pack-integrity.mjs && node scripts/check-self-contract.mjs"
+    "mutant-score": "node scripts/mutant-score.mjs",
+    "check:mutants": "node scripts/mutant-score.mjs --gate",
+    "prepublishOnly": "npm run build && node scripts/check-pack-integrity.mjs && node scripts/check-self-contract.mjs && node scripts/mutant-score.mjs --gate"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
