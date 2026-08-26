@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -40,4 +40,33 @@ export function resolveVetFile(rel: string, base?: string): string {
     if (existsSync(candidate)) return candidate
   }
   return join(root, 'lib', rel)
+}
+
+/**
+ * vet 本体真实根（realpath，模块加载后惰性缓存一次；解析失败 = ''）。
+ * round-5 review（B-A1）：与「按包名自豁免」配套的身份校验基元——恶意 tarball 可把
+ * package.json 的 name 写成 @jieai/dsh-plugin-vet 冒名，名字比对无法区分；realpath
+ * 比对根目录才是本体。scan-plugin / internal-plugin / runtime-guard 归因映射共用。
+ */
+let selfRootCache: string | undefined
+export function vetSelfRoot(): string {
+  if (selfRootCache === undefined) {
+    try {
+      selfRootCache = realpathSync(resolvePkgRoot())
+    } catch {
+      selfRootCache = ''
+    }
+  }
+  return selfRootCache
+}
+
+/** 路径是否为 vet 本体根（realpath 比对；解析失败或本体根不可得 → false）。 */
+export function isVetSelfPath(p: string): boolean {
+  const self = vetSelfRoot()
+  if (self === '' || p === '') return false
+  try {
+    return realpathSync(p) === self
+  } catch {
+    return false
+  }
 }

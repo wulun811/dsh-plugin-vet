@@ -35,13 +35,32 @@ async function main(): Promise<void> {
     console.error('Usage: vet-gate --package <path> [--mode deny] [--denyOn critical] [--timeout 30000] [--osv]')
     process.exit(2)
   }
-  
+
+  if (args.format !== undefined && args.format !== 'json') {
+    // round-5 review（B-A19）：未知 format 明确报错——旧实现静默空输出（不打印 JSON、
+    // 退出码照常），首屏无输出最伤排查，与 vet-diff 已知边界同族但这里是 CLI 易错面。
+    console.error('vet-gate: 不支持的 --format（当前仅支持 json）')
+    process.exit(2)
+  }
+
+  // round-5 review（B-A2）：--timeout 必须为正有限数——parseInt 对 'abc'/尾随垃圾返回
+  // NaN（NaN ?? 默认恒为 NaN 穿透到 scan，setTimeout(NaN)=0ms 立即超时）；'0'/负值同样拒绝。
+  let timeoutMs: number | undefined
+  if (typeof args.timeout === 'string') {
+    const parsed = Number(args.timeout)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      console.error('vet-gate: --timeout 必须是正数（毫秒）')
+      process.exit(2)
+    }
+    timeoutMs = parsed
+  }
+
   try {
     const result = await runGate({
       packagePath: args.package,
       mode: args.mode === 'deny' ? 'deny' : 'report',
       denyOn: args.denyOn === 'suspicious' ? 'suspicious' : 'critical',
-      timeoutMs: typeof args.timeout === 'string' ? parseInt(args.timeout, 10) : undefined,
+      timeoutMs,
       osvCheck: args.osv === true,
     })
     

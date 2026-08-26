@@ -1,5 +1,7 @@
 node_modules/
 lib/
+# mutant 击杀率评测产物（门禁只读 manifest，产物不入库）
+reports/
 .npm-cache-local/
 *.tsbuildinfo
 # deepseek-harness 源码参考副本（不入库）
@@ -27,3 +29,8 @@ site/玻璃效果示例.html
 
 # 内部方案文档（不入库，放 docs/local/ 即可自动忽略）
 docs/local/
+.ai-transactions/
+
+# vitest/spawn 临时产物（TMPDIR 重定向时落在仓库下）
+tmp/
+.audit-tmp/

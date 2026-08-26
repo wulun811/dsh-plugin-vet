@@ -1,7 +1,18 @@
 import z from '@deepseek-ai/schemastery'
 
+/**
+ * vet 安全档位（0.3，round-16）：standard / hardened / paranoid。
+ * 档位是「预设展开成既有细粒度开关」的部署策略层，三条纪律：
+ * 1. 档位永不改变 verdict 语义——verdict 只由确定性静态层产出；档位只改观测深度/报警面/拦截范围；
+ * 2. 显式优先于预设：面板开关写入 patch 的键、以及用户显式偏离默认值的键，预设一律不覆盖；
+ * 3. 误报代价随档位递增（hardened 黄色观测增多；paranoid 会拦路），文档档位表写明。
+ */
+export type VetProfile = 'standard' | 'hardened' | 'paranoid'
+
 /** vet 插件配置。fail-open 起步：默认 report，deny 由部署者显式开启。 */
 export interface VetConfig {
+  /** 安全档位（默认 standard = 现状行为；hardened/paranoid 展开预设，详见 PROFILE_PRESETS）。 */
+  profile: VetProfile
   mode: 'report' | 'deny'
   autoScan: boolean
   scannerTimeoutMs: number
@@ -41,22 +52,23 @@ export interface VetConfig {
    * !!js 检测（P2/G-3 面）；instructionFiles → AGENTS.md/skills 指令注入观测（G-1/P20/P30 面）。
    * 关闭只影响新面（旧面照扫）；产出以 info 为主，误报容忍度低的部署可整面关闭或逐规则关。 */
   scanSurface: { configFiles: boolean; instructionFiles: boolean }
-  /** round-13（Phase 3）：本地 API 回环观测（默认关）。开启后插件对 127.0.0.1 的请求计入 N3 台账，
-   * 且命中 DSH 控制面路径（/api/、session.*、/plugins/）时出 yellow loopback-control 观测报警
+  /** round-13（Phase 3）：本地 API 回环观测（0.3 起默认开——信号特异性强：回环 + 控制面路径 +
+   * 第三方归因，官方归因豁免，yellow 可忽略；0.2.6 曾默认关）。开启后插件对 127.0.0.1 的请求计入
+   * N3 台账，且命中 DSH 控制面路径（/api/、session.*、/plugins/）时出 yellow loopback-control 观测报警
    * （alarm-only，可 dismiss）。观测不是修复——RPC 认证需 dsh 侧。 */
   observeLoopback: boolean
   /** round-13（Phase 3）：遥测配置敏感化（默认开）。周期读取 profile 配置中 telemetry exporter
    * url/mode 字段哈希，冷启动只记录；主机变化 → yellow（要求重启校验）。只存哈希，内容不进档案。 */
   telemetryDiff: boolean
-  /** round-13（Phase 4）：第三方安装后完整性基线（默认关）。对非官方包记录首装内容哈希，
-   * 后续加载内容变化（同版本字节不一致）→ red（可经 acknowledgedPackageHashes 豁免）。
+  /** round-13（Phase 4）：第三方安装后完整性基线（默认关；hardened/paranoid 档展开为开）。对非官方包
+   * 记录首装内容哈希，后续加载内容变化（同版本字节不一致）→ red（可经 acknowledgedPackageHashes 豁免）。
    * 定位是"变更检测"而非信任锚：first-seen 自动信任仍有窗口，叠加 deny/requireAudit 才完整。 */
   thirdPartyBaseline: boolean
   /** N7：确认拦截块（0.1.14）：'block'（默认）族 1/2 确认即拦；'alarm' 只报警不拦；'off' 关闭。 */
   confirmBlock: 'block' | 'alarm' | 'off'
-  /** N7 族 3 覆写（默认 alarm，仅报警）：显式 'block' 才拦截系统持久化/提权面写入（误拦风险自负）。 */
+  /** N7 族 3 覆写（默认 alarm，仅报警；paranoid 档展开为 block）：显式 'block' 才拦截系统持久化/提权面写入（误拦风险自负）。 */
   confirmBlockFamily3: 'alarm' | 'block'
-  /** N7 族 4 覆写（默认 alarm，仅报警）：显式 'block' 才拦截供应链/安装态写入。 */
+  /** N7 族 4 覆写（默认 alarm，仅报警；paranoid 档展开为 block）：显式 'block' 才拦截供应链/安装态写入。 */
   confirmBlockFamily4: 'alarm' | 'block'
   /** M1 语义契约（默认开，0.1.21 记录档）：插件存在通过校验的契约时，运行时对账——
    * 越界记 info m1:contract-violation、拒载 yellow m1:contract-rejected、代码事实证伪
@@ -68,21 +80,108 @@ export interface VetConfig {
   }
 }
 
+/** 各键的 schema 默认值（与 VetConfigSchema 单一同源；applyProfile 用它判断「键仍处默认 → 可被档位覆盖」）。 */
+export const VET_CONFIG_DEFAULTS = {
+  profile: 'standard',
+  mode: 'report',
+  autoScan: true,
+  scannerTimeoutMs: 15_000,
+  rules: {},
+  denyOn: 'critical',
+  allowlist: [],
+  requireAudit: false,
+  runtimeGuard: 'off',
+  runtimeIntervalMs: 2000,
+  runtimeMemLimitMb: 2048,
+  runtimeForkBurstN: 5,
+  runtimeFdLimit: 512,
+  runtimeGrowthMb: 256,
+  runtimeGrowthWindowMs: 600_000,
+  osvCheck: true,
+  honeypot: { enabled: false, dir: '' },
+  contentBaseline: true,
+  acknowledgedPackageHashes: {},
+  networkEgress: true,
+  transitiveDeps: false,
+  scanSurface: { configFiles: true, instructionFiles: true },
+  observeLoopback: true,
+  telemetryDiff: true,
+  thirdPartyBaseline: false,
+  confirmBlock: 'block',
+  confirmBlockFamily3: 'alarm',
+  confirmBlockFamily4: 'alarm',
+  contract: { enabled: true, dir: '' },
+} as const satisfies Record<string, unknown>
+
+/** 档位预设（hardened/paranoid；standard = 空 = 现状行为）。合并规则见 applyProfile。 */
+export const PROFILE_PRESETS: Record<Exclude<VetProfile, 'standard'>, Partial<VetConfig>> = {
+  hardened: {
+    runtimeGuard: 'watch',
+    thirdPartyBaseline: true,
+    honeypot: { enabled: true, dir: '' },
+  },
+  paranoid: {
+    runtimeGuard: 'watch',
+    thirdPartyBaseline: true,
+    honeypot: { enabled: true, dir: '' },
+    requireAudit: true,
+    denyOn: 'suspicious',
+    confirmBlockFamily3: 'block',
+    confirmBlockFamily4: 'block',
+  },
+}
+
+function isAtDefault(key: string, value: unknown): boolean {
+  const d = VET_CONFIG_DEFAULTS[key as keyof typeof VET_CONFIG_DEFAULTS]
+  if (typeof d === 'object' && d !== null && typeof value === 'object' && value !== null) {
+    const a = d as Record<string, unknown>
+    const b = value as Record<string, unknown>
+    return Object.keys(a).every(k => a[k] === b[k]) && Object.keys(b).every(k => k in a)
+  }
+  return value === d
+}
+
+/**
+ * 档位预设展开（0.3）：仅当某键当前仍等于 schema 默认值时才套用预设值——用户（含面板开关写入
+ * patch 的键，经 explicit 集合传入）一旦显式偏离，预设即失效（显式 > 预设）。standard 恒为恒等。
+ * 纯函数：不修改入参。已知边界：插件配置区里"显式设为默认值"的键与未设置无法区分，会被预设覆盖
+ * （patch 写入的键不受影响）——README 档位节已记录。
+ */
+export function applyProfile(cfg: VetConfig, explicit?: ReadonlySet<string>): VetConfig {
+  const profile = cfg.profile ?? 'standard'
+  if (profile === 'standard') return cfg
+  const presets = PROFILE_PRESETS[profile]
+  // 防御：非法档位字符串（schema 会挡住，但本函数是导出纯函数，脏数据路径不崩）
+  if (presets === undefined) return cfg
+  const out: VetConfig = { ...cfg }
+  for (const [key, presetValue] of Object.entries(presets)) {
+    if (explicit?.has(key)) continue
+    if (isAtDefault(key, (cfg as unknown as Record<string, unknown>)[key])) {
+      ;(out as unknown as Record<string, unknown>)[key] = presetValue
+    }
+  }
+  return out
+}
+
 export const VetConfigSchema: z<VetConfig> = z.object({
+  profile: z.union([z.const('standard'), z.const('hardened'), z.const('paranoid')]).default('standard'),
   mode: z.union([z.const('report'), z.const('deny')]).default('report'),
   autoScan: z.boolean().default(true),
-  scannerTimeoutMs: z.natural().default(15_000),
+  // round-5 review（B-A22/A#7）：数值键一律 ≥1——z.natural() 允许 0 且多数字
+  // 义下 0 是「立即超时/忙循环」而非合法禁用语（scannerTimeoutMs:0 = 所有扫描
+  // 0ms 超时；runtimeIntervalMs:0 = setInterval 0 的 /proc 忙循环）。
+  scannerTimeoutMs: z.natural().min(1).default(15_000),
   rules: z.dict(z.boolean()).default({}),
   denyOn: z.union([z.const('critical'), z.const('suspicious')]).default('critical'),
   allowlist: z.array(z.string()).default([]),
   requireAudit: z.boolean().default(false),
   runtimeGuard: z.union([z.const('off'), z.const('watch')]).default('off'),
-  runtimeIntervalMs: z.natural().default(2000),
-  runtimeMemLimitMb: z.natural().default(2048),
-  runtimeForkBurstN: z.natural().default(5),
-  runtimeFdLimit: z.natural().default(512),
-  runtimeGrowthMb: z.natural().default(256),
-  runtimeGrowthWindowMs: z.natural().default(600_000),
+  runtimeIntervalMs: z.natural().min(1).default(2000),
+  runtimeMemLimitMb: z.natural().min(1).default(2048),
+  runtimeForkBurstN: z.natural().min(1).default(5),
+  runtimeFdLimit: z.natural().min(1).default(512),
+  runtimeGrowthMb: z.natural().min(1).default(256),
+  runtimeGrowthWindowMs: z.natural().min(1).default(600_000),
   osvCheck: z.boolean().default(true),
   honeypot: z.object({
     enabled: z.boolean().default(false),
@@ -96,7 +195,7 @@ export const VetConfigSchema: z<VetConfig> = z.object({
     configFiles: z.boolean().default(true),
     instructionFiles: z.boolean().default(true),
   }).default({ configFiles: true, instructionFiles: true }),
-  observeLoopback: z.boolean().default(false),
+  observeLoopback: z.boolean().default(true),
   telemetryDiff: z.boolean().default(true),
   thirdPartyBaseline: z.boolean().default(false),
   confirmBlock: z.union([z.const('block'), z.const('alarm'), z.const('off')]).default('block'),
