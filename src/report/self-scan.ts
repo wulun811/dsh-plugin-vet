@@ -214,7 +214,10 @@ export function computeSelfScore(findings: readonly Finding[]): number {
   let total = 0
   for (const f of findings) {
     const coef = f.confidence === 'heuristic' ? 0.5 : CONFIDENCE_COEF[f.confidence] ?? 1
-    total += WEIGHTS[f.severity] * coef
+    // round-21 KEEP IN SYNC 补齐：与 score.ts:23 一致，未知 severity（协议漂移/伪造报告
+    // JSON）?? 0——旧裸查表 undefined*coef=NaN → 整分 NaN（JSON 落 null、且 min/max 的
+    // NaN 传播使畸形报告反被判最高分）。未知按不计分，但不再摧毁 scorecard 数值形状。
+    total += (WEIGHTS[f.severity] ?? 0) * coef
   }
   return Math.max(0, Math.min(100, Math.round(100 - total)))
 }

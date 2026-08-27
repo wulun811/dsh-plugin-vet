@@ -20,7 +20,8 @@
  * 换上非审计字节（含仿冒篡改）仍不符任何 pin。降级到旧审计版（字节=某历史 pin）不是
  * 能力升级，无放强面。
  * 哈希覆盖扫描器实际看到的扫描集 = 随包发布的产物（self-scope.listShippedFiles：
- * lib/** + 根级清单 + docs/**，vet-self-pins.json 自引用除外）。
+ * lib/** + 根级清单 + docs/ARCHITECTURE.md，vet-self-pins.json 自引用除外；
+ * round-16 QA-6：范围与 package.json files 白名单逐项对齐）。
  */
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'

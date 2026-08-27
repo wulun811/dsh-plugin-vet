@@ -48,11 +48,14 @@ function renderLabel(value: CapabilityLabel): string {
   }
   if (spawnCmds.length > 0) lines.push('  子进程:', ...spawnCmds.map(s => '    · ' + s))
   if (imports.length > 0) lines.push('  依赖（能力未知，保守视作任意能力）:', ...imports.map(i => '    · ' + i))
-  if (m.ghostDeps !== undefined && m.ghostDeps.length > 0) {
+  // round-22：ghostDeps/zombieDeps 同族健壮化——残缺记录（null/非数组）此前穿过
+  // `!== undefined` 判定后在 .length 上抛 TypeError，vet_label 整调用崩溃（与 hosts/
+  // fsPaths 等四轮加固同族，DSH.SO bug 同源形态）。
+  if (Array.isArray(m.ghostDeps) && m.ghostDeps.length > 0) {
     lines.push('  ⚠️ 幽灵依赖（代码引用但 package.json 未声明，靠传递依赖提升侥幸可解析）:')
     for (const d of m.ghostDeps) lines.push('    · ' + d)
   }
-  if (m.zombieDeps !== undefined && m.zombieDeps.length > 0) {
+  if (Array.isArray(m.zombieDeps) && m.zombieDeps.length > 0) {
     lines.push('  ⚠️ 僵尸依赖（package.json 声明但 node_modules 缺失，运行到即失败）:')
     for (const d of m.zombieDeps) lines.push('    · ' + d)
   }

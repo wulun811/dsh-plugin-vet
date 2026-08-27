@@ -69,8 +69,8 @@ export interface CapabilityManifest {
 }
 
 export interface ScanReport {
-  /** 与 scanner-bin/protocol.ts 同步；0.2.6（round-14，异常流对抗回归）起为 static-v16。 */
-  engine: 'static-v16'
+  /** 与 scanner-bin/protocol.ts 同步；round-16 起为 static-v18，round-17（R16 幽灵子路径修复）起为 static-v19。 */
+  engine: 'static-v19'
   sourceCount: number
   findings: Finding[]
   staticScore: number

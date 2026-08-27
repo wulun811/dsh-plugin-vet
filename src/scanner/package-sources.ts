@@ -99,6 +99,11 @@ export function listSourceFiles(root: string): string[] {
  */
 export function listInstructionFiles(root: string): string[] {
   const out: string[] = []
+  // round-22：root 带尾斜杠（shell/LLM 常传 /path/pkg/）时，`full.slice(root.length + 1)`
+  // 会多裁掉相对路径首字符（'skills/SKILL.md' → 'kills/SKILL.md'）——skills/*.skill 段
+  // 判定全落空，嵌套指令文件静默掉出 R18/G-1 扫描面（根级 AGENTS.md 因无分隔符反而
+  // 碰巧通过，掩盖了问题）。入口统一归一；Windows 尾反斜杠（C:\pkg\）同病同修。
+  const base = root.length > 0 && (root.endsWith('/') || root.endsWith('\\')) ? root.slice(0, -1) : root
   const walk = (dir: string, depth: number): void => {
     if (depth > 6 || out.length >= INSTRUCTION_MAX_FILES) return
     let entries: string[]
@@ -120,13 +125,13 @@ export function listInstructionFiles(root: string): string[] {
       if (stat.isSymbolicLink()) continue
       if (stat.isDirectory()) {
         walk(full, depth + 1)
-      } else if (stat.isFile() && isInstructionFile(name, full.slice(root.length + 1))) {
+      } else if (stat.isFile() && isInstructionFile(name, full.slice(base.length + 1))) {
         out.push(full)
         if (out.length >= INSTRUCTION_MAX_FILES) return
       }
     }
   }
-  walk(root, 0)
+  walk(base, 0)
   return out
 }
 

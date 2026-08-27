@@ -89,10 +89,16 @@ function matchesArchiveFile(fileName: string, escName: string, version?: string)
   if (tsLen === 0) return false
   const prefix = fileName.slice(0, fileName.length - tsLen)
   if (version !== undefined) return prefix === escName + '-' + version
-  // 宽松：版本段必须以数字开头（保持 M1 反前缀伪造——lodash-foo-… 不命中 lodash）
+  // 宽松：版本段必须以数字开头（保持 M1 反前缀伪造——lodash-foo-… 不命中 lodash）。
+  // round-22：纯「数字开头」不够——包名以「-<数字>」结尾的其它包（aws-sdk-2 的档案
+  // aws-sdk-2-3.1.0-…）会把「2-3.1.0」当作 aws-sdk 的版本段命中，伪审计通过（deny
+  // fail-closed 分支恰好以无版本路径探测「疑似冒名」包）。数字版本段后紧跟 '-' 即
+  // 判为其它包名；预发布版本（1.0.0-beta.1）不受影响（段后是 '.'）。
   if (!prefix.startsWith(escName + '-')) return false
   const rest = prefix.slice(escName.length + 1)
-  return rest.length > 0 && rest[0] >= '0' && rest[0] <= '9'
+  const m = /^(\d+)(.*)$/.exec(rest)
+  if (m === null) return false
+  return !m[2].startsWith('-')
 }
 
 export interface AuditRecordProbe {
