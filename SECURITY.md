@@ -29,10 +29,15 @@ README):
 3. T2 does not cover ESM named-import snapshots.
 4. /vet/status.json has no auth (the shield's polling needs anonymous GET) — readable on the LAN when dsh web
    binds to a non-loopback address.
-5. vet is alarm-only: reports by default, never blocks; deny interception is an explicit deployer opt-in.
+5. vet is observation-first in the default configuration: reports by default, blocks nothing; interception
+   exists only in documented scopes — the N7 confirmation block of irreversible destruction (wakes with
+   `runtimeGuard: watch`, `confirmBlock` defaults to `block`), and the explicit deployer opt-ins (`deny` mode
+   / `paranoid` tier).
 
 ## Dependency vulnerabilities
 
 - Runtime dependencies are minimal (schemastery + typescript); watch `npm audit`.
-- The OSV check (`osvCheck`) only queries known vulnerabilities in the plugin's package.json — it does not
-  guarantee coverage of the whole supply chain.
+- The OSV check (`osvCheck`) queries known vulnerabilities for the plugin package itself **and its direct
+  dependencies** (exact installed versions only; ranges and version-less packages are skipped, cap 8 deps) —
+  it does not guarantee coverage of the whole supply chain (transitive trees only via the opt-in
+  `transitiveDeps` upstream-radar scan, default off).

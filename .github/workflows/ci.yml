@@ -1,13 +1,24 @@
 name: CI
 
+# round-19：双 OS 矩阵（ubuntu + macOS）——T1 哨兵的 macOS 采样面（ps/lsof）与 darwin
+# 身份校验必须在真实 darwin 上跑一遍才算数；老版本 macOS 不承诺（Node 22 支持线以下）。
+# 覆盖率阈值棘轮（85/80）在 ubuntu 上强制（阈值按 Linux 实测校准；mac 上 darwin 分支
+# 反而更满，无需二次校准）。自钉扎仅 tag 强制（dev-tree pin 刻意未重钉，发布时处理）。
+
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -21,10 +32,29 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Build + tests (coverage thresholds enforced)
-        run: |
-          npm run build
-          npx vitest run --coverage
+      - name: Build
+        run: npm run build
+
+      - name: Tests (coverage thresholds enforced on linux)
+        run: npx vitest run --coverage
+        if: matrix.os == 'ubuntu-latest'
+
+      - name: Tests (darwin real ps/lsof integration, no coverage)
+        run: npx vitest run
+        if: matrix.os == 'macos-latest'
+
+      # round-16（QA-3/CI 补漏）：变异击杀门禁与打包完整性每次提交都跑（双 OS）。
+      - name: Mutant gate
+        run: npm run check:mutants
+
+      - name: Pack integrity
+        run: node scripts/check-pack-integrity.mjs
+
+      # 发布自扫门禁（钉扎一致性 + decisive 声明完整）：要求当前版本已钉扎且字节匹配——
+      # 只在 tag（发布候选）上强制；main 分支开发态（未重钉的 dev-tree）不挡日常提交。
+      - name: Release self-contract gate
+        if: github.ref_type == 'tag' && matrix.os == 'ubuntu-latest'
+        run: npm run check:self
 
       - name: Verify tarball contents
         run: npm pack --dry-run

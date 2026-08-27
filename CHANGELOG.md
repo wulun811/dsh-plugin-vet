@@ -7,6 +7,358 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Added
 
+- **Intro panel copy census (round-23)**: hardcoded product claims replaced with observed
+  numbers — 20 rule classes (R1–R20) / 144 regex-level detection forms (AST census of
+  `scanner-bin/rules`) / 42 live alarm types (all `src/guard` kinds minus 9 internal
+  classifiers); the stale "187 official packages" stat is removed; T2 wording corrected to
+  observation/alarm-only (interception stays exclusive to N7 + deny/paranoid tiers, now stated
+  in a positioning footnote); new bullets for the per-plugin detail page (rule-hit wall / OSV /
+  nutrition label) and the audit center overview.
+- **Deployment & docs (round-23)**: README gains the live
+  [dsh.so risk badge](https://www.dsh.so/artifact/dsh-plugin-vet/), a verified deployment note
+  (dsh.so publicly credits vet-led scanning on its plugin submission & security-report pages), and
+  light/dark shield panel screenshots (`assets/white.jpg`, `assets/dark.jpg`; `assets` added to
+  the pack whitelist). The shield intro panel now shows the vet logo plus the dsh.so logo with a
+  one-line provider credit (logos inlined into the client bundle as data URIs).
+- **Suite metrics round-22**: +`test/cli-args` cases, N7 `open/openSync` wiring regressions
+  (wrapper-level family-1/2), `watchInvariantMessage` platform-gate cases, T2 arg-cap bounds
+  (`firstString`/`allStrings`/`pathArgValue`/`joinCapped` + giant-arg classify), archive
+  digit-suffix anti-forgery, `decideDenyBlock` fail-closed, trailing-slash instruction-file
+  collection, vet_label null-array render, and a full engine regression block (require()-crash,
+  `node:` capability flags, R3 element/destructure forms, R1/R2 escape forms + shadowing,
+  R7 `sk-proj-`/`github_pat_`, R2 true-module-top-level) → **74 files / 1095 tests**;
+  census 2864 standalone `expect(` (+18 helpers).
+
+### Fixed
+
+- **N7 family-2 `open`/`openSync` block was dead wiring (round-22, high)**: `decideBlock`'s
+  SA2-5 branch (write-flag `open` on an existing credential → block) was fully implemented and
+  unit-tested at the predicate level, but the runtime wrapper only invoked `decideBlock` for
+  `BLOCK_FS_OPS` members — which excludes `open`/`openSync` — so `fs.openSync(cred,'w')`
+  truncation was alarm-only even in default `block` mode. The wiring gate now includes
+  `open`/`openSync`; family-1 (a previously confirmed destructive plugin) also blocks
+  write-flag `open` on any target (read-only `open` stays unblocked).
+- **scanner-wide crash on valid input (round-22, high)**: `const x = require();` (syntactically
+  valid JS — runtime-error only) crashed `literalText(args[0])` inside `moduleBindings`
+  (used by R9/R11/R20 + capability extraction) → in files mode one such file aborted the
+  **entire multi-file scan** with `ok:false` (all findings lost). Argument-length guard added.
+- **`runtimeGuard: watch` invariant failed on Windows/unsupported platforms (round-22)**:
+  the T1-skip is deliberate design (platform gate, info log), but the load-time invariant only
+  checked "not spawned" → with `hardened`/`paranoid` profiles the whole plugin failed to load
+  on Windows (deny gate + T2 hooks gone with it). The invariant now keys on
+  `sidecarSupportedOn(platform)` (pure predicate `watchInvariantMessage`).
+- **T2 observer DoS by subject input size (round-22)**: `classifyOp` scanned full
+  attacker-controlled args (`allStrings`/`firstString` had no cap) on every wrapped fs/child_process
+  op — one pre-built giant string reused in a loop costs the host O(input) per event for calls
+  that must fail anyway (PATH_MAX/argv limits). New `MAX_ARG_CHARS` (64 KB) per-argument cap +
+  `joinCapped` total cap on the command scan; sensitive-token prefixes stay inside the window.
+- **Archive loose-match anti-forgery hole (round-22)**: digit-leading sibling package names
+  (`aws-sdk-2`'s record matched `hasAuditRecord('aws-sdk')` via the "version starts with digit"
+  rule) — the exact false-"audited" class the M1 rule exists to stop, live on the deny
+  fail-closed path. Loose match now requires the version segment not to continue with `-`
+  (prerelease `1.0.0-beta.1` unaffected). `@a/b` vs `a-b` escape collision remains a documented
+  boundary (archive compat).
+- **`vet-gate --mode=deny` silently ran report mode (round-22)**: CLI only parsed `--key value`;
+  the `=`-form (`--mode=deny`) produced the key `"mode=deny"` → `mode` undefined → deny gate
+  never blocked, no error. `parseCliArgs` (moved to `src/cli-args.ts`, testable) handles both
+  forms; `decideDenyBlock` also clamps an invalid `denyOn` to `critical` (fail-closed) instead
+  of `x >= undefined` never blocking.
+- **Nested `skills/**` instruction files silently dropped from the R18/G-1 surface (round-22)**:
+  a package root with a trailing slash (`/pkg/` — typical shell/LLM input) made
+  `full.slice(root.length + 1)` cut one extra character (`skills/…` → `kills/…`); root-level
+  `AGENTS.md` passed by accident, masking it. Root is normalized before collection.
+- **vet_label crashed on `ghostDeps: null` records (round-22)**: corrupt/legacy store entries
+  with null dep arrays passed the `!== undefined` check and threw on `.length` (same class as
+  the earlier DSH.SO render bug; the sibling fields had `Array.isArray` guards, these two did
+  not). Both now guarded.
+- **ENGINE static-v19 → static-v20 (round-22)**: R1/R2 escape regex widened (`return (process)`
+  paren form, `globalThis['process']` prefix element access — both previously zero-hit) and
+  single-sourced between the two rules; R1 alias resolution now honors shadowing (a parameter
+  named like the alias no longer yields a false critical); R3 covers `globalThis['process']`
+  element access and destructured members (`const { exit } = process; exit(1)` was info, now
+  critical per member semantics); R7 covers `sk-proj-…` and `github_pat_…` (current OpenAI/
+  GitHub key formats, the `-` previously broke the char class); R2's "top-level const require"
+  denoise now truly requires module scope (function-scoped `const require` reports the code-mode
+  escape-attempt medium again); capability extraction normalizes `node:`-prefixed requires
+  (`require('node:http')` now sets `hasNetwork`, `node:child_process` `hasExec` — previously the
+  N1 manifest under-reported and the runtime differential raised false hidden-capability reds).
+- **Shield poll race (round-22)**: two in-flight polls (slow response + 5s interval or manual
+  refresh) could let the older response overwrite the newer snapshot; a request-seq guard drops
+  stale responses (same keep-previous-state discipline as the round-21 shape guard).
+- **Bundle banner claimed an old version (round-22)**: `lib/index.bundle.js` banner hardcoded
+  "0.1.16 C1" while the package moved on; it now embeds `package.json` version.
+- **Client hardening nits (round-22)**: `ShieldIcon` mask ids are instance-unique (`useId`) —
+  duplicate `<mask id>` across mounted shields was invalid HTML with cross-instance coupling;
+  `PluginsListPanel` guards `staticScore`/`at` with `Number.isFinite` (null/NaN wire drift no
+  longer unmounts the panel tree); `FoldSection` expanded bodies taller than 420 px scroll
+  instead of silently clipping; `tools/execute` guard passes through non-`ToolExecutionResult`
+  shapes from `next()` instead of crashing on `result.content`.
+
+- **Shield snapshot-shape guard (round-21)**: the panel's 5s poll used to `JSON.parse` + blind-cast
+  whatever `/vet/status.json` returned. The route has legitimate paths that answer **parseable
+  non-snapshot JSON** (SEC-6 cross-origin 403 envelope `{ok:false,note}`, host error envelopes):
+  such a payload overwrote the live snapshot and every render `??`-default turned
+  "data unreachable" into a **fake all-green 0-alarms shield** — the worst silence for a security
+  product. Poll now validates the wire shape (`level` string + `alarms` array) via a single-source
+  predicate (`guard/shield-shape.ts`, bundled into the client by esbuild, tested from `lib/`) and
+  keeps the previous snapshot on any mismatch (same behavior as fetch failure).
+- **Suite metrics round-21**: +`test/shield-shape.test.ts` (3 cases incl. the 403 envelope regression),
+  +2 `readTimes` time-gate cases in the N3 ledger suite (pure predicate + fake-timer integration),
+  +3 TIME-parser empty-segment expects, +3 field-level corruption regressions (scalar array field in
+  `diffManifests`, trailing-`#` comments in config parsing, unknown severity in self-scan scoring)
+  → **74 files / 1070 tests**; census 2783 standalone `expect(`.
+
+- **Metrics panel on macOS (round-20)**: the shield panel's live host metrics (`metrics.js`) are no
+  longer Linux-only. Darwin reads come from the same stock CLT as the T1 sentinel — one
+  `ps -A -w -w -o pid,ppid,rss,time,command` yields child count + mcp/vet per-category RSS + host CPU
+  time (TIME-column diff, same multi-core semantics as the Linux utime+stime calc), `lsof -w -Fn`
+  yields fd. Because `readHostMetrics` is polled **inside the host process** every 5s, all sampling is
+  an **async snapshot cache** (TTL 4s; lsof 15s) — reads never block the host event loop, the first
+  poll degrades to `—` and self-heals. The sampling probe (ps is itself a host child while running)
+  is excluded from child counts via its pid. Disk-I/O remains Linux-only (no stock per-process byte
+  counter on macOS) and now reports **−1 → `—`** in the panel instead of a fake `0`; Windows is
+  unchanged except that honesty (V8-side numbers only). `countDarwinLsofFd` moved to a shared
+  `darwin-sysinfo.ts` (single definition; `runtime-watch` re-exports for compatibility).
+- **Suite metrics round-20**: +`test/metrics-darwin.test.ts` (17 cases: TIME/rss parsers, probe-excluded
+  summarize, full dispatch via injected fake runner incl. inFlight coalescing / TTL cadence / stale-cache
+  on timeout, real-`execFile` defaultRunAsync incl. timeout+missing-binary, cross-check against the real
+  `ps` with production-shaped `--vet-sidecar`/mcp fixtures) → **73 files / 1062 tests**;
+  `lib/guard/metrics.js` moved back into coverage accounting (deps-injection killed the "hard to mock"
+  excuse; measured 89.24/93.96/89.24/84.43, gate unchanged 85/80).
+- **T1 sentinel on macOS (round-19)**: the sentinel is no longer Linux-only. Darwin sampling goes
+  through the stock CLT: one `ps -Axo pid=,ppid=,rss=` per tick yields host RSS + child count +
+  self-ppid (the S6 host-death adoption check keeps its exact semantics), and `lsof -w -Fn` counts
+  fds every 3rd tick (~6s refresh; timeout → -1 degrade — macOS lsof can block on stale mounts, so
+  cadence trades freshness for safety). Singleton sibling-discovery and M9 kill-identity verification
+  gain darwin paths (`ps -ww -o args=`); all platform logic lives in exported pure parsers +
+  an injectable `CmdRunner` (unit-testable on Linux CI; the same real `ps` path also cross-verifies
+  there since procps supports `-o args=`). Support floor: modern macOS only (11+, the Node 22 floor) —
+  older versions auto-degrade (unparsable output → tick skipped, never crash/false-alarm). Windows
+  and other platforms remain explicitly skipped by the platform gate. The Linux /proc path has
+  zero behavior change; the host metrics panel (`metrics.js`) stays Linux-only (-1/0 fallback).
+- **CI macOS matrix (round-19)**: `.github/workflows/ci.yml` verify job now runs on
+  ubuntu-latest **and** macos-latest (build + typecheck + full suite + mutant gate + pack integrity +
+  tarball dry-run); coverage-threshold enforcement stays on ubuntu (floor calibrated against Linux
+  measurements). This turns "mac compatibility" from a claim into a per-commit gate.
+- **Suite metrics round-19**: +`test/t1-darwin-watch.test.ts` (12 cases: pure ps/lsof/command-table
+  parsers, the darwin `pidCmdlineIsVetSidecar` real-`ps` path cross-verified on Linux procps, and
+  `sidecarMain` darwin dispatch with an injected fake runner) and the macOS platform-gate flip →
+  **72 files / 1045 tests** (measured coverage 89.2/93.8/89.2/84.4; test-bucket runtime 288 → 300).
+  The old `hostPpidChanged` positive test was Linux-gated (its `!==linux` behavior is the restricted-proc
+  contract, not a bug) so the suite is honest on the macOS runner.
+- **Assertion census reproducible (round-18)**: `scripts/count-assertions.mjs` lexically scans the
+  test suite (comments/string literals excluded) and reports the assertion count — **2783 standalone
+  `expect(` calls** as of round-21 (2751 at round-20, 2685 at round-19, 2660 at round-18) plus 16 chain-matcher helpers (`expect.any` /
+  `expect.objectContaining` / `expect.stringContaining` / `expect.arrayContaining` used as embedded
+  parameters) across all `.test.ts` files; README (en/zh) Development now documents the number and
+  the reproduction command.
+- **Mutant corpus round-17 (+3 mutants)**: +M32 (R16 subpath ghost — undeclared-parent subpath
+  import must stay ghost), +M33 (R14 uppercase download-and-exec in non-JS scripts — the
+  case-insensitivity regression guard), +M34 (R15 dynamic network targets — sink-observation
+  regression guard). Corpus now **34 mutants / 8 benign controls across 17 rule faces** (R1×4, R2×5,
+  R3×1, R5×1, R6×1, R7×1, R9×2, R10×1, R11×3, R13×2, R14×1, R15×1, R16×1, R17×1, R18×1, R19×1,
+  R20×8; M12 spans R2+R6).
+- **R16 subpath unit coverage (round-17)**: `v2-ghost-zombie` locks the three subpath cases —
+  declared-parent subpath clean (`react/jsx-runtime`), scoped declared-parent clean,
+  undeclared-parent subpath still ghost.
+- **Suite metrics reproducible (round-17)**: 71 files / 1033 tests (v2-ghost +3 subpath cases,
+  runtime-guard +2 semantic-hold asserts); the landing page's per-suite chart now derives from
+  `scripts/test-buckets.mjs` (explicit file→area mapping over a vitest JSON output — reproducible
+  totals; current buckets: 279 scanner / 288 runtime / 228 plugins / 151 self / 87 qa).
+
+- **R20 secondary exec bindings / decode-path extensions (round-16, ENGINE `static-v17` → `static-v18`)**:
+  the "dangerous command inside exec/spawn-family arguments" rule now fires through **secondary
+  bindings** — destructuring aliases (`const {exec} = require('child_process')`), `util.promisify`
+  -wrapped exec, alias-forwarded references, child_process values inlined inside object literals, and
+  property-chain root determination (`obj.exec()` on an unknown object still never matches — the
+  two-signal "exec call + dangerous command" gate holds), plus an `execAliasRefs` execution-position
+  alias set. The N2 decode corpus gains `Array.join` assembly decoding and `Buffer.from(...)`
+  concatenation / identifier recursion (atob alignment). `curl|sh` / `wget|sh` / PowerShell `-enc`
+  shapes are now matched case-insensitively (R14's non-JS-script rules synced); dynamic mid-argument
+  command strings with static fragments match via a placeholder pattern (`partial` annotation);
+  argument-level and file-level corpora dedupe on identical text. Engine bump
+  `static-v17 → static-v18` (rule change ⇒ cache invalidation).
+- **R11/R9 detection-surface corrections (round-16)**: R11 `require('fs')` / `require('node:fs')`
+  direct calls and destructure/alias-bound bare-identifier calls now count as fs bindings; the N2
+  decoded corpus is gated by an fs footprint (no fs usage ⇒ a decoded string alone no longer triggers
+  red). R9 fork-bomb/Worker counting is gated on child_process/worker_threads bindings — a local
+  same-name function or object method no longer false-positives. `stringyValue`/`numberyValue` gain
+  `isShadowedForStringy` lexical-shadowing protection (a shadowed parameter is no longer mis-parsed as
+  a module-level constant; top-level constant parsing unchanged). Over-long literal backtracking in
+  R7/capability is truncated (64KB / 16KB); `collectPathJoin` results pass `looksLikePath` so `'a/b'`
+  shorthand is not silently collected as a sensitive path.
+- **Scan-surface coverage (round-16)**: `extOf` normalizes case so `.SH`/`.CMD`/`.MD`/`.TS` uppercase
+  variants enter the surface; extension-less files are parsed as JS when they carry a node shebang or
+  are referenced from `package.json` `bin`/`scripts` (the npm-standard entry shape was previously
+  invisible); `packageShape` collects `scripts` path tokens. `RULE_IDS` now enumerates `OSV` / `OSV-T`
+  (engine data-source rules join the rule enum); protocol `ENGINE_VERSION` mirrored on both sides and
+  lock tests synced.
+- **Mutant corpus round-16 (+6 mutants, +2 controls)**: +M26–M31 cover R20 four obfuscated shapes,
+  R11 direct require, N2 `Buffer.from` recursion; +C07/C08 guard the fs-footprint gating and
+  shadowing-protection no-regression. Corpus now **31 mutants / 8 benign controls across 14 rule
+  faces** (R1×4, R2×5, R3×1, R5×1, R6×1, R7×1, R9×2, R10×1, R11×3, R13×2, R17×1, R18×1, R19×1,
+  R20×8; M12 spans R2+R6).
+
+### Changed
+
+- **Platform-support docs made unambiguous (round-19b)**: README (en/zh) gains a top-level
+  **Platform Support** matrix (static scan / T2 hooks+honeypot+shield / T1 sentinel / metrics panel
+  × Linux / macOS 11+ / Windows-other) as the single source of truth; the old limitation #16 prose
+  (which read confusingly) collapses to a one-line pointer to it. Also records the CI reality:
+  GitHub Actions has retired older hosted macOS images (`macos-latest` = macOS 15 Sequoia; 12 gone,
+  13/14 deprecating), so only modern macOS is ever gate-tested — consistent with the Node 22 floor.
+- **Coverage floor ratcheted (round-18)**: vitest thresholds lines/functions/statements **70 → 85**,
+  branches **50 → 80**. The old floor sat ~19pp below the measured level (89.13/93.84/89.13/84.41 at
+  this head) and could not catch regressions; the new floor keeps ~4pp headroom for normal
+  refactoring while turning any material coverage drop red. README (en/zh) and the landing page
+  threshold captions updated, plus the coverage chart/hero stat re-measured to the fresh values.
+
+### Fixed
+
+- **Field-level corruption permanently silenced a package's N6 upgrade-diff (round-21)**:
+  `diffManifests` guards whole-object corruption (round-4 H2) and `?? []` guards missing fields, but a
+  tampered/hand-edited store with an array field set to a scalar (`hosts: "abc"`) still threw inside
+  `arrayDelta` (`'abc'.filter`) — swallowed by `recordScan`'s catch, which also meant the *new* record
+  never landed: that package's upgrade-diff/upgrade-cold alarms died silently forever, exactly the
+  invisible failure mode H2 promised to eliminate. `arrayDelta` now normalizes non-arrays to empty
+  sets at entry (diff proceeds, never throws).
+- **Trailing `# comments` merged into telemetry config values (round-21)**: the block/row extractors
+  only stripped surrounding quotes, so `mode: FULL # prod` yielded `FULL # prod` — a pure-comment YAML
+  edit (URL/mode unchanged) produced a false "telemetry config changed" yellow, and the comment text
+  leaked into the alarm message via `mode=` (violating this module's raw-config-never-in-alarms
+  privacy discipline). A shared `readYamlScalar` now truncates at the YAML-correct comment boundary
+  (` #`) and extracts quoted content intact; flow form was already immune (regex stops at whitespace).
+- **self-scan scoring could produce NaN `staticScore` (round-21)**: `computeSelfScore` kept a bare
+  `WEIGHTS[f.severity]` lookup while the mirrored `scanner-bin/score.ts` gained `?? 0` in round-15 —
+  KEEP IN SYNC drift. An unknown severity (protocol drift/tampered report JSON) poisoned the sum to
+  NaN (serializes to `null`; and `Math.max/min` NaN propagation made a malformed report *look* maximal
+  while `computeSelfVerdict` still returned clean). Now mirrored: unknown weights contribute 0.
+- **Windows panel reported a firm "0 children" (round-21)**: on win32/other platforms
+  `readHostMetrics` had no data source yet returned `childCount: 0` — indistinguishable from
+  "actually zero", the same fake-0 dishonesty round-20 removed for disk-I/O. Now `—` (−1); the
+  panel already had the `>= 0` dash guard, and `childCount` participates in no arithmetic anywhere
+  (verified). Summed fields (`mcpRssMb`/`vetRssMb`/`cpuPct`) stay 0 by design — they feed the RAM
+  total and history.
+- **N3 ledger `readTimes` pruning could be DoS-amplified by its own subject (round-21)**: the
+  round-5 lazy prune fired a **full Map scan on every read event** once size > 256 — and the
+  hostile main scenario for this ledger is exactly "scan thousands of distinct paths in 10s"
+  (credential hunting), where windowed keys never drop and each read pays O(size) → O(n²)
+  observation cost inside the host. Pruning now has a time gate (at most one scan per window,
+  pure predicate `shouldPruneReadTimes` + regression test with fake timers); memory stays bounded
+  per window either way.
+- **`parseDarwinCpuMs` silently accepted empty segments (round-21)**: `Number('') === 0`, so a
+  malformed TIME like `12:` parsed as 12 minutes instead of being rejected — a wrong CPU delta,
+  not a degrade. Empty segments are now explicit −1 (parser contract: fall out honestly).
+- **L3 detail panel re-fetch loop when host passes an unstable `t` (round-21)**:
+  `useEffect(..., [name, t])` — a fresh `t` function identity from the host's slot renderer on any
+  parent re-render would retrigger the whole fetch (loading flash + refetch of `/vet/plugin`) even
+  though only `name` matters. `t` now lives in a ref (latest translation still used for async
+  error copy); effect depends on `[name]` only.
+- **M9 sidecar test fixture was never alive (round-18)**: the PID-identity test spawned
+  `node -e <script> --vet-sidecar` — after `-e`, node parses the flag as **its own option** and dies
+  with `bad option` exit(9), so the "sidecar" child never survived a few milliseconds. The case
+  passed only by racing the zombie's transient `/proc/<pid>/cmdline` residue (a synchronous test
+  blocks libuv's reaper) — flaky under parallel load (1/1033 observed). Fixture now mirrors
+  production shape (`[scriptFile, '--vet-sidecar']` — the flag is the script's argv, the option
+  parser never sees it), with try/finally reaping (no child leak on assertion failure) and a 10s
+  readiness window (QA-8 budget). Test-only: no engine/rule change, no ENGINE_VERSION bump. Also
+  documented `scripts/count-assertions.mjs`'s known boundary (quoted regex literals can desync the
+  string-state scan; cross-checked against pure grep — 2660/2660).
+- **R16 ghost-dependency subpath false positive (round-17, ENGINE `static-v18` → `static-v19`)**: the
+  ghost-dependency reconciliation matched imports by exact string only, so standard subpath imports
+  such as `react/jsx-runtime` (parent declared in devDependencies) were reported as ghost — a generic
+  false positive for every React client plugin, incl. vet's own `lib/client.js`. Ghost detection now
+  resolves subpaths (`declared.some(d => i === d || i.startsWith(d + '/'))`): declared-parent subpaths
+  never warn; undeclared-parent subpaths (`ghost-pkg/sub`) still do. Engine bump (rule change ⇒ cache
+  invalidation); `react-dom` also declared in devDependencies (host-provided browser-external; the
+  hand-written `react-dom.d.ts` stays).
+- **R9 nested-quantifier self-findings (round-17)**: the two hot-path path heuristics in
+  `runtime-denoise` used nested-quantifier regexes (`(?:[^/]+\/)*` for the `~/.dsh/**/node_modules`
+  exemption, `(?:\.[a-z0-9]+)*` for session-log shard suffixes) — flagged medium by vet's own R9 and
+  quadratic in the worst case on the per-fs-op hot path. Rewritten as linear index/walk checks with
+  identical semantics (order/trailing-slash and non-alphanumeric-shard edges asserted in
+  `runtime-guard.test.ts`). vet's self-scan no longer reports either.
+- **Landing-page wording (round-17)**: `site/index.html` claimed vet "never blocks" (meta description,
+  `f2.tag`, `feat.sub`, `t5`); the opt-in watch mode (hardened/paranoid) indeed blocks confirmed
+  destructive operations for N7 families 1/2 by default. Wording now matches the package description
+  ("Alarm-only; blocks confirmed destructive ops.") — alarm-only by default, interception only in the
+  opt-in watch mode and only for confirmed destructive operations. Same pass for the site's en/zh
+  dictionaries.
+
+- **Static-scan correctness round-up (round-16)**: the above extensions also fix blind spots — the
+  binding/decode/casing/ext-surface gaps meant real shapes previously produced zero findings (R20 via
+  `promisify`/destructured aliases, decodes via `Array.join`/`Buffer.from`, uppercase-ext and
+  shebang/bin entry files, R11 direct `require('fs')` calls); the fs-footprint gate removes decoded-
+  string-only false positives, the binding gate removes R9 local-function false positives, and
+  `isShadowedForStringy` removes parameter-shadowing misreads. Regression suite
+  `test/round16-regressions.test.ts` + 8 fixtures; 8 new fixed-case assertions across
+  `r20-shell-exec` / `n2-decode` / `n5-dynamic-provenance` / `hardening-rules`.
+- **Runtime + security hardening (round-16)** — trust anchor, corridors, write paths, egress:
+  - **`isOfficialTrusted` trust anchor (SEC-1)**: runtime-defense suppression (alarm/block/leak/canary
+    rows — dgram alarm+canary, fetch alarm, N7 block gate in runtime-patch/runtime-guard/runtime-sink)
+    is now registered **only by content verification** — baseline match (twice-verified installs) or a
+    registry-equal-hash reconciliation; a **first-seen/TOFU official-name package is deliberately NOT
+    registered** (runtime defenses stay active in the riskiest window); `reconcileMismatch` registers
+    only in the `officialHash === verdict.hash` branch (resolved-but-different = tampered, never
+    trusted); vet itself is always trusted; display corridors (ledgers, loopback) keep the name-based
+    `isOfficial` label.
+  - **Spawn relative sensitive tokens (SA2-2)**: bare `rm`/`shred`/`truncate`/`dd`/`mkfs*` tokens in
+    spawn args classify as destruction-leading (sensitive if any relative path); `cp`/`mv` excluded
+    (backup-pattern noise).
+  - **Status ring red-preserving trim (SA2-3)**: `trimToMax` never evicts red alarms to make room for
+    a yellow storm; all-red only drops the oldest red.
+  - **N7 family-2 extensions (SA2-4/-5)**: paired-path overwrite ops (`cp`/`copyFile`/`rename`) cover
+    the destination side (with `safeExists` for the soft target), and `open`/`openSync` write-capable
+    flags (`r+`/`w+`/`a`/`wx`) enter family 2 — credential faces stay interceptable under
+    write-open/overwrite shapes.
+  - **Capability-diff observation caps (SA2-7)**: per-kind 128 / per-plugin 200 records, oldest
+    evicted.
+  - **`internal/plugin` root-undefined fail-closed (SA2-6)**: with an unresolvable package root, deny
+    now fails closed (blocked) unless either a human audit archive exists under `requireAudit` (D30
+    documented contract) or the entry is vet itself (realpath-verified, self-boot safety); the vet
+    self-exemption was narrowed from name to realpath identity.
+  - **Registry reconciliation resource bounds (SEC-2/3)**: `tar -tvzf` member-type pre-check rejects
+    device members (`l`/`h`/`c`/`b`/`p` — hardlinks/char/block/FIFO, GNU+BSD dual-layout size parse);
+    total unpacked 1GB / 100k-member caps; 32MB stdio cap.
+  - **`scan-summaries` key sanitization (SEC-4)**: record keys `__proto__`/`prototype`/`constructor`
+    are normalized (`_` + name) on read/write/query — prototype-pollution containment.
+  - **Exclusive-mode atomic writes (SEC-5)**: `writeTmpExclusive` (O_EXCL `wx`) for all six store
+    paths (content-baseline, version-diff, stats, dismissed-alerts, scan-summaries, status-route
+    patch) — a pre-planted symlink is never followed; EEXIST → unlink + retry; honeypot decoy/canary
+    writes use inline `wx`.
+  - **Status-route same-origin check (SEC-6)**: `GET /vet/status.json` + `/vet/plugin` return 403 when
+    an `Origin` header is present and does not match the host (missing Origin passes — same-origin
+    browser GETs carry none).
+  - Tests: `test/round16-runtime-security.test.ts` (14 cases); `n7-confirm-block` /
+    `n3-attribution` updated to trust-anchor semantics (+`resetOfficialTrustForTest`).
+- **Engineering / gates (round-16)**: `mutant-score --gate` now enforces the **rule kill matrix** —
+  any rule row with killed < required fails the gate (prevents one mutant's other-rule hit from
+  watering down per-rule coverage); CI runs `check:mutants` + `check-pack-integrity` on every push,
+  `check:self` only on tag pushes (main-branch dev-tree pins don't block daily commits — re-pin
+  follows the release arrangement); self-pin scope narrowed to the shipped-artifact whitelist
+  (`lib/**` + `docs/ARCHITECTURE.md`; `docs/local`, `MUTANT-QA.md` excluded — they never enter the
+  tarball); `plugin.test` report-scan assertion wrapped in `vi.waitFor` (parallel-CI subprocess
+  settling jitter); 9 test files unified from `../src` to `../lib` imports (same channel as the other
+  62); v020 fixture literals switched to runtime-joined constants (repo secret-scan discipline).
+
+- **R20 — shell download-and-exec in JS exec/spawn-family arguments (round-15)**: hardcoded `curl|sh` /
+  `wget|sh` / PowerShell `-enc`/IEX/DownloadString / system download primitives (certutil/bitsadmin/mshta/
+  regsvr32/rundll32) / interpreter `-c`-style download-exec **inside literal arguments of exec/spawn/
+  execFile/fork** is now a static finding — high for pipe/encoded/primitive shapes (verdict → suspicious),
+  medium for `curl -o` download-to-disk (download ≠ exec). Fires only when the file has a child_process
+  binding ("exec call + dangerous command" two-signal gate — an unknown-object `obj.exec()` never matches);
+  array-form args (`spawn('sh', ['-c', …])`) are expanded element-wise; N2-decoded args (base64/hex/
+  charCode) are matched with a `decodedFrom` annotation and the file-level decoded corpus joins the match;
+  generic packages and test/CI files downgrade to info. Engine `static-v16 → static-v17` (rule change ⇒
+  cache invalidation). Before this, the shape had **zero static findings** (R6 has no curl pattern, R14
+  scans only non-JS script files) — surfaced in an external adversarial drill (curl|bash planted signal
+  was graded info-level only). Tests: 3 new mutants (M23-M25) + 1 benign control (C06) + dedicated suite.
+- **capability manifest: `path.join` / `path.resolve` argument collection (round-15)**: literal path
+  segments in join/resolve calls now enter `fsPaths` ("宁可多列" — e.g. `path.join(os.homedir(), '.ssh',
+  'id_rsa')` records `.ssh` and `id_rsa` even with a dynamic prefix; all-literal calls also record the
+  posix-joined full path). Dynamic arguments are never guessed. Closes the assembled-path static blind
+  spot (drill-verified: such code previously produced `fsPaths=[]`) for the nutrition label / N6 diff /
+  N1 hidden-capability baseline — declared is no longer misjudged as hidden.
 - **Plugin-list pagination (round-21)**: users with many third-party plugins couldn't see past the
   first 20 rows — "Recent plugins" panel now renders the index page by page (20 rows per page) and
   "Audit status" rows page by page (14 rows per page), each page appended via a "Load more" button
@@ -19,6 +371,27 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Fixed
 
+- **README / README.zh / SECURITY.md drift sync (round-15)**: the docs claimed vet "never acts / never
+  blocks / alarm-only" while the code ships N7 confirmation-blocking (default `confirmBlock: block`
+  families 1/2, active whenever `runtimeGuard: watch` is on — incl. via `hardened` tier / shield toggle).
+  Positioning, config rows, the runtime-monitoring headings, trust boundary 7 and SECURITY.md now state
+  the real interception scopes precisely. Also fixed: stale test counts ("250 cases" / "633 cases" →
+  71 files / 1029 tests, coverage thresholds incl. statements ≥ 70%), the stale `0.1.4.tgz` install
+  example, a broken R18 table row + a duplicated R16 row, the missing EN `selfScan` Trusted-card and
+  0.3.1 guard↔tier-binding notes, the missing `statements` coverage threshold, and the supply-chain row
+  that listed **dependency-version vulnerabilities as "not parsed"** while the scanner queries OSV for the
+  plugin + its direct dependencies (exact versions; transitive trees via opt-in `upstream-radar`); the
+  stale "known-vulnerability matching is deferred (D15)" comment in `supply-chain.ts` now points at
+  `engine.ts` `checkOsv` / `transitiveDeps`. R20 rows added to both rule tables; engine version bumped in
+  the docs (`static-v17`).
+- **win32 compatibility fixes (backported from Windows testing)**: ① cache-entry filenames rename
+  `sha256:` → `sha256_` (a `:` is illegal in Windows filenames, legal on Linux — read/write sides stay
+  symmetric; Linux behavior unchanged, only a one-time cold cache). ② `scan-plugin` file-target
+  absolute-path check `startsWith('/')` → `isAbsolute()` (cross-platform equivalent on POSIX).
+  ③ `status-route` patch writes fsync via an `r+` writable handle with failure-degradation (Windows
+  rejects fsync on read-only handles with EPERM; rename still guarantees atomic replacement, fsync is
+  only crash-durability insurance). ④ tests: `/proc`-based runtime-guard cases and the `/dev/null`
+  assertion get win32 branches/skips.
 - **release-gate hardening: flaky timing test made load-robust (pre-0.3.1)**: the
   `n3-mass-delete` alarm-window test used a 5 ms observation window and a 30 ms wait; six synchronous
   `unlink` events can straddle the window when a GC/microtask pause lands mid-loop under parallel test
@@ -176,11 +549,11 @@ versioning follows [SemVer](https://semver.org/).
 ### Added
 
 - **Mutant corpus kill-rate QA (mutant-score)**: muteval methodology landed —
-  `test/mutants.manifest.json` authoritatively registers 21 malicious mutants (constructor chain/
+  `test/mutants.manifest.json` authoritatively registers 31 malicious mutants (constructor chain/
   run_code host domain/eval·new Function·vm·indirect require/charCode combo obfuscation/hardcoded
   credentials/fork bomb/ReDoS/destructive paths ×2/Discord webhook·cloud-metadata egress/
-  patch yml !!js injection/AGENTS.md instruction injection/fullwidth typosquat, covering 12 rule
-  surfaces R1-R19) + 5 benign controls; `scripts/mutant-score.mjs` reuses the same engine entry as
+  patch yml !!js injection/AGENTS.md instruction injection/fullwidth typosquat, covering 14 rule
+  faces R1-R20) + 8 benign controls; `scripts/mutant-score.mjs` reuses the same engine entry as
   plugins-matrix for evaluation, kill criterion = rule hit (not verdict — R5/R9-2/R17/R18/R19 are all
   clean + observation layer); files-mode corpus unified with `.fixture.js` suffix (DEV_FIXTURE_RE fixture
   exemption discipline); `npm run check:mutants` gate: all malicious killed + 0 benign false-kills +

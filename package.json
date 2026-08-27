@@ -1,6 +1,6 @@
 {
   "name": "@jieai/dsh-plugin-vet",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Audit deepseek-harness (DSH) plugins before install, guard them at runtime. Static verdict + pre-install audit protocol; supply-chain checks (typosquat, OSV); exfiltration & ransomware detection, honeypot canaries, integrity baseline. Alarm-only; blocks confirmed destructive ops.",
   "license": "MIT",
   "author": {
@@ -82,7 +82,8 @@
     "README.zh.md",
     "AUDIT_PROTOCOL.md",
     "CHANGELOG.md",
-    "docs/ARCHITECTURE.md"
+    "docs/ARCHITECTURE.md",
+    "assets"
   ],
   "dsh": {
     "bundle": {
@@ -140,6 +141,7 @@
     "@vitest/coverage-v8": "^2.1.9",
     "esbuild": "^0.21.5",
     "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "vitest": "^2.1.9"
   }
 }

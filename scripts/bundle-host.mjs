@@ -21,7 +21,9 @@ await build({
   charset: 'utf8',
   sourcemap: false,
   legalComments: 'none',
-  banner: { js: '/* @jieai/dsh-plugin-vet host bundle (0.1.16 C1) — internal guard state is closure-private by design */' },
+  // 版本号动态注入（round-22：banner 曾硬编码首个加固版本 0.1.16，版本迭代后发布物
+  // banner 声明与 package.json 漂移——取证审查读 banner 会拿到过时版本号）
+  banner: { js: `/* @jieai/dsh-plugin-vet host bundle (${PKG.version} C1) — internal guard state is closure-private by design */` },
   // 运行时由宿主解析的平台/peer 依赖（不内联，保持与逐文件形态相同的解析语义）
   external: [
     '@deepseek-ai/cordis',

@@ -166,9 +166,14 @@ console.log(lines.join('\n'))
 
 // —— 门禁判定（fail-closed：评测失败也算失败）——
 if (GATE) {
-  const fail = survivors.length > 0 || retained.length > 0 || results.errors.length > 0
+  // round-16（QA-3）：规则击杀矩阵也进门禁——任一规则行 killed < required（存在应杀
+  // mutant 未被该规则实际击杀，可能靠同 mutant 的其他规则命中注水）→ fail。矩阵按
+  // manifest 应杀集合聚合（非全局均值），保证每条规则的面都有独立击杀证据。
+  const weakRows = [...ruleMatrix.values()].filter(row => row.killed < row.required)
+  const fail = survivors.length > 0 || retained.length > 0 || results.errors.length > 0 || weakRows.length > 0
   if (fail) {
     console.error('\n✗ mutant gate FAILED')
+    for (const row of weakRows) console.error(`  ✗ 规则行未满: ${row.rule} ${row.killed}/${row.required}`)
     process.exit(1)
   }
   console.log('\n✓ mutant gate OK')

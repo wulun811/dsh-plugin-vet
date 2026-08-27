@@ -5,6 +5,9 @@ English | [中文](README.zh.md)
 [![npm version](https://img.shields.io/npm/v/@jieai/dsh-plugin-vet)](https://www.npmjs.com/package/@jieai/dsh-plugin-vet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19-339933)](package.json)
+[![dsh.so risk](https://www.dsh.so/badge/dsh-plugin-vet.svg)](https://www.dsh.so/artifact/dsh-plugin-vet/)
+
+[🔗 dsh.so plugin submission & security-report pages run vet-led scanning — view](https://www.dsh.so/zh/security-report/)
 
 > **Audit before install, guard at runtime.** Run every DSH plugin through dsh-plugin-vet before mounting it:
 > static rules produce a verdict (deterministic, unforgeable), the agent investigates sensitive points and
@@ -13,14 +16,25 @@ English | [中文](README.zh.md)
 >
 > **Positioning: a monitoring alarm, not an enforcer.** vet only does "check → alarm → advise": checks at
 > write time (static scan), watches at run time (runtime guard), and surfaces alarms (scorecard + GUI shield
-> status light). **vet never acts on your behalf** — it never auto-uninstalls, never kills processes, never
-> rewrites configs; deny mode is an explicit opt-in by the deployer and is not part of the product identity.
-> The final disposition is always decided by the user on their own DSH.
+> status light). **In the default configuration vet never acts on your behalf** — it never auto-uninstalls,
+> never kills processes, never rewrites configs, and blocks nothing. Interception exists only in explicit,
+> documented scopes: the **N7 confirmation block** wakes together with the runtime guard (`confirmBlock` —
+> credential-file deletion/overwrite and post-confirmation destructive ops throw once `runtimeGuard: watch`
+> is on, incl. when the `hardened` tier or the shield toggle enables it), and **`deny` mode / the `paranoid`
+> tier** roll back plugin loads and block per threshold. Every interception scope is deployer-visible and
+> documented below; none is part of the default product identity. The final disposition is always decided by
+> the user on their own DSH.
 
 @jieai/dsh-plugin-vet is the **trust-layer plugin** in the deepseek-harness ecosystem: it occupies the whole
 **download → scan → audit → score → decide → runtime watch** trust pipeline. The runtime watch ships built-in
 **honeypot lures**: anyone quietly rifling through key files gets caught red-handed (opt-in, `honeypot.enabled`).
 It does **not** provide a plugin marketplace itself (catalog/distribution).
+
+## Screenshots
+
+![vet shield panel (light theme)](assets/white.jpg)
+
+![vet shield panel (dark theme)](assets/dark.jpg)
 
 - 📚 Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - 🧾 Audit protocol: [AUDIT_PROTOCOL.md](AUDIT_PROTOCOL.md)
@@ -51,14 +65,15 @@ dsh plugin --profile <profile> add @jieai/dsh-plugin-vet
 
 Install-and-activate chain: pnpm install → `reconcilePlugins` reads `dsh.bundle` → on next start `loadProfile`
 resolves the bundle and mounts the plugin. Default configuration is in the Config section below
-(fail-open: reports only, never blocks).
+(fail-open in the default configuration: reports only, blocks nothing — interception wakes only with
+explicit config, see `confirmBlock` / `mode` / the `hardened`-and-above tiers below).
 
 **Local tarball install** (offline or verify-before-release scenario):
 
 ```sh
-dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
+dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 # or unpack directly into the profile's node_modules:
-# tar -xzf jieai-dsh-plugin-vet-0.1.4.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
+# tar -xzf jieai-dsh-plugin-vet-<version>.tgz -C ~/.dsh/profiles/<profile>/node_modules/@jieai/
 // and add an insert mount entry in the profile's cordis.patch.yml:
 //   - insert:
 //       - id: plugin-vet
@@ -73,7 +88,7 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 >
 > **First-install time note**: the first `dsh plugin add` into a large profile can take several minutes — during
 > that time pnpm does a full dependency resolution, updates the lockfile for 500+ packages and runs supply-chain
-> policy validation over the whole dependency tree (vet itself carries only 2 runtime dependencies; the bulk of
+> policy validation over the whole dependency tree (vet itself carries only 3 runtime dependencies; the bulk of
 > the time is parsing/validating the profile's existing tree, not vet). Subsequent installs/updates take seconds
 > (validation results are reused).
 
@@ -104,14 +119,14 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | `autoScan` | `true` | Automatically static-scan new plugins (`internal/plugin`) |
 | `scannerTimeoutMs` | `15000` | Static-scan subprocess timeout |
 | `requireAudit` | `false` | Audit gate (opt-in, **third-party only** — official `@deepseek-ai/*` packages are governed by content-hash baseline + static scan instead, round-17): when enabled, loading a third-party plugin checks `~/.dsh/vet/audits/` for a health record — `report` mode logs a yellow `audit-required` alarm, `deny` mode blocks. Records are written to disk by hand by the agent following the `vet-audit-protocol` skill |
-| `rules` | `{}` (all on) | Per-rule switches (R1-R19; e.g. `{"R17": false}` disables the !!js config surface) |
-| `scanSurface` | all on | Static scan-surface switches (0.2.6, engine static-v14+, current static-v16): `configFiles` (cordis.yml/patch !!js detection, R17), `instructionFiles` (instruction/skill injection observation, R18); disabling only affects the new surfaces, the legacy surface keeps scanning |
+| `rules` | `{}` (all on) | Per-rule switches (R1-R20; e.g. `{"R17": false}` disables the !!js config surface) |
+| `scanSurface` | all on | Static scan-surface switches (0.2.6, engine static-v14+, current static-v20): `configFiles` (cordis.yml/patch !!js detection, R17), `instructionFiles` (instruction/skill injection observation, R18); disabling only affects the new surfaces, the legacy surface keeps scanning |
 | `observeLoopback` | `true` | Local-API loopback observation (0.2.6 default off; **0.3 default on** — loopback + control-plane path + third-party attribution, official attribution exempt, yellow dismissible): when on, plugin requests to 127.0.0.1 enter the N3 ledger, and hits on DSH control-plane paths (/api/, session.*, /plugins/) attributed to third-party plugins raise a yellow `loopback-control` observation (alarm-only, dismissible). Observation is not a fix — RPC auth is a dsh-side concern |
 | `telemetryDiff` | `true` | Telemetry config sensitization (0.2.6): periodically hashes telemetry exporter url/mode fields in profile config; cold start records only; host change → yellow (requires restart verification, G-3 shape). Hashes only — config content never enters alarms/archive |
 | `thirdPartyBaseline` | `false` (on under hardened/paranoid) | Third-party post-install integrity baseline (0.2.6): records first-install content hash for non-official packages; same-version content change → red (exempt via `acknowledgedPackageHashes`). Change-detection, not a trust anchor; the static scan still runs regardless |
 | `denyOn` | `critical` | Blocking threshold in `mode: deny` |
 | `allowlist` | `[]` | Package/plugin-id allowlist (skip scanning) |
-| `runtimeGuard` | `off` | Runtime guard (performance/stability cost, opt-in): `off` = disabled; `watch` enables the T1 sentinel + T2 hooks, **alarm-only** |
+| `runtimeGuard` | `off` | Runtime guard (performance/stability cost, opt-in): `off` = disabled; `watch` enables the T1 sentinel + T2 hooks (alarm-only) **plus the N7 confirmation block** (`confirmBlock` defaults to `block` — see below; wakes whenever `watch` is on, incl. via the `hardened`/`paranoid` tiers) |
 | `runtimeIntervalMs` | `2000` | T1 sentinel /proc sampling interval |
 | `runtimeMemLimitMb` | `2048` | T1 memory alarm threshold (host VmRSS, over limit → red) |
 | `runtimeForkBurstN` | `5` | T1 child-process burst alarm threshold (single-round delta → red) |
@@ -124,6 +139,7 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-0.1.4.tgz
 | `contentBaseline` | `true` | Official-package content-hash baseline (P-5): computes a SHA-256 over each `@deepseek-ai/*` package's files and compares it against the recorded baseline — a same-name impostor (file:/tarball with no registry validation) is judged by the strictest plugin rules on hash mismatch. First-seen stores and trusts the baseline; baseline storage is multi-version by `name@version` (capped: 1000 files / 50MB / 10s) |
 | `networkEgress` | `true` | Runtime network egress observation (P1): wraps http/https/net/http2/tls/dgram/fetch to observe plugin-originated outbound requests (alarm-only; needs `runtimeGuard: watch`) |
 | `transitiveDeps` | `false` | Transitive dependency vulnerability audit (P1, opt-in, default off): shells out to a *locally installed* `upstream-radar` CLI (never `npx`-auto-installed); missing / timeout / unexpected output shape degrades silently to direct-dependency-only. Hits surface as `OSV-T` medium findings |
+| `contract` | `enabled`; dir `~/.dsh/vet/contracts` | Runtime contract snapshots (0.3, M1): a per-plugin contract file states the operation surface the plugin declares acceptable; vet reconciles observed runtime actions against it — out-of-surface alarms are recorded as info `m1-contract-violation` (aggregated per plugin + field), a rejected contract is noted once per plugin (yellow), and an N1 hidden-capability finding invalidates ("distrusts") the contract (yellow, once per plugin). Record-tier only: contracts never gate or block loading. Env override: `DSH_PLUGIN_VET_CONTRACTS_DIR` |
 | `confirmBlock` | `block` | N7 confirmation block (0.1.14, needs `runtimeGuard: watch`): only irreversible destruction is intercepted. `block` (default) — families 1/2 intercept on certain confirmation; `alarm` — all families alarm-only; `off` — disabled. Every block throws with an actionable message and writes a red `n7-block` alarm; process-memory state (cleared on restart) |
 | `confirmBlockFamily3` | `alarm` | N7 family 3 override (persistence/privilege-surface writes: bashrc/cron/systemd/ld.so.preload/sudoers.d/profile.d/autostart/authorized_keys/hosts/ssl). Explicit `block` is user opt-in — interception risk is the user's choice; default alarms only |
 | `confirmBlockFamily4` | `alarm` | N7 family 4 override (supply-chain/install-state writes: node_modules package files, cordis.patch.yml / cordis.yml / plugin.json). Explicit `block` is user opt-in; default alarms only |
@@ -158,6 +174,12 @@ and a tier explainer inside the `?` help panel — no manual config editing need
 immediately and is persisted to the profile patch, the remaining tier-preset expansion keys apply after a DSH
 restart/hot-reload.
 
+**0.3.1 binding (guard ↔ tier)**: the defense tier and the runtime guard are no longer two independent knobs —
+Light defense ⇔ guard off; Medium/High defense ⇔ guard on. Pressing "enable guard" raises the tier to Medium
+(an already-High setting is never downgraded); pressing "disable guard" returns to Light; selecting a tier
+switches the guard immediately (the remaining preset-expansion keys apply on the DSH config reload — patch
+writes trigger the `watchUserPatches` hot-reload).
+
 ## Environment variables
 
 All `DSH_PLUGIN_VET_*` paths are **snapshotted at module load** (vet loads before third-party
@@ -182,7 +204,11 @@ the host environment (i.e. in the DSH profile/weekly launch script), not from in
   patch checked against the real release) / `git` (source-only repo, where `lib/` etc. usually aren't committed —
   R12 entry/patch-missing findings drop to info so git-only rescan doesn't false-positive). Since 0.1.21 the
   scorecard's capability block also reports the R16 ghost/zombie dependency fields (declared vs imported vs
-  installed).
+  installed). When vet scans **itself** (realpath-verified, not name-matched), the scorecard adds a `selfScan`
+  trust annotation — declared-capability-token downgrade (only *declared* tokens are exempt; undeclared
+  outbound/env/credential/IPC stays red) plus the per-version artifact pin (`vet-self-pins.json`, round-16:
+  the pin covers the shipped `lib/**` artifacts so production installs reach Trusted; byte-matching *any*
+  published pin counts as pinned-match) — the raw findings stay fully visible.
 - **`vet_diff`** — read-only, purely local: prints the stored version history of a package and the behavior
   diff between its last two recorded versions (N6). Outputs hosts/fsPaths/spawnCmds/imports added|removed and
   network/exec capability flips. No scan, no network.
@@ -200,7 +226,7 @@ the host environment (i.e. in the DSH profile/weekly launch script), not from in
   write capability. vet ships no audit tooling and does not investigate for the agent — it only provides the
   criteria and the on-disk convention.
 
-## Shield panel (0.4 revamp)
+## Shield panel (0.3 revamp)
 
 The GUI was reskinned per the OBSIDIAN MOSS GOLD design mock (dark recipe; a matching light
 variant ships in the same token set) and rebuilt as a **layer stack** — secondary panels slide
@@ -237,7 +263,8 @@ discipline as vet_label); the "blocked" mark comes from the N7 family-1 list.
   future schema adds code/source/script payloads it is scanned immediately; zero false positives today);
   `report` mode prefixes non-clean results with `VET:` (clean executions don't pollute machine-readable
   output), `deny` mode blocks outright (isError).
-- **Runtime guard (`runtimeGuard: watch`)** — alarm-only:
+- **Runtime guard (`runtimeGuard: watch`)** — T1/T2 observation is alarm-only; interception lives in the
+  dedicated N7 layer below ("N7 confirmation block"):
   - **T1 sentinel**: a sidecar subprocess reads the host /proc every `runtimeIntervalMs`
     (VmRSS / child-process count / fd count) and streams alarm JSON lines back to the host → shield turns
     yellow/red.
@@ -275,13 +302,13 @@ discipline as vet_label); the "blocked" mark comes from the N7 family-1 list.
     lifecycle (resets on restart). Auth boundary (P3-12 recorded): dismiss/restore only do same-origin
     validation (alarm-only display-layer risk — a same-origin page script could hide alarms, but records
     aren't deleted and nothing else is affected; acceptable within the system).
-  - **Display caps**: the panel shows the latest 8 alarms; the store is a ring buffer capped at 20, deduped
+  - **Display caps**: the panel shows the most recent alarms (at most 20); the store is a ring buffer capped at 20, deduped
     per id within 60s, 24h TTL (sustained triggers naturally renew) — 100 alarms are not displayed in full,
     and needn't be (new alarms push out the oldest). Recent-scan echo (suspicious → yellow) also expires on
     the 24h TTL (P3-2: one suspicious scan no longer turns the shield permanently yellow; sustained scanning
     renews naturally).
 
-## Static rule table (R1-R19)
+## Static rule table (R1-R20)
 
 | ID | Name | Default level | Scope | Determinism |
 |---|---|---|---|---|
@@ -293,18 +320,17 @@ discipline as vet_label); the "blocked" mark comes from the N7 family-1 list.
 | R6 | String coarse-scan fallback (obfuscation signals need combined evidence with dynamic execution) | info | both | heuristic |
 | R7 | Hardcoded secrets | high | both | likely |
 | R9 | Resource safety (unbounded allocation / exit-less synchronous loops / spawn-in-loop / ReDoS / non-terminating recursion / growth patterns in loops) | high (allocation/dead-loop/fork) / medium (ReDoS/recursion/Map.set) / info (resident loops/+=/Promise.all) | both | certain/likely/heuristic |
-| R10 | Supply chain (package.json install hooks incl. prepare/preuninstall; dependency manifest → info; **OSV exact-version vulnerability query**, opt-in osvCheck, network fail-open) | high (install hooks) / info (dependency manifest; OSV advisory) | files | likely/heuristic |
+| R10 | Supply chain (package.json install hooks incl. prepare/preuninstall; dependency manifest → info; **OSV exact-version vulnerability query** (default-on osvCheck, configurable; network fail-open) | high (install hooks) / info (dependency manifest; OSV advisory) | files | likely/heuristic |
 | R11 | Destructive file operations (fs deletes / sensitive-path reads-writes) | high (sensitive paths) / medium (deletes) | both | likely |
 | R12 | Cordis/DSH contract (entry file / bundle-patch declaration / name / engines.node) | high (missing patch / missing entry) / medium (no entry / missing name) / info (low node version) | files | certain/likely |
 | R13 | Hardcoded network exfiltration sinks (Discord/Telegram/Slack webhooks, cloud-metadata endpoints, .onion) in string literals | high | both | likely |
-| R14 | Download-and-exec primitives in shipped non-JS scripts (.sh/.bash/.ps1/.cmd/.bat/.psm1/.zsh: curl|sh, encoded PowerShell, IEX, certutil…; python -c / ruby -e / perl -e download-exec included) | high (plugin) / info (generic) | files | likely |
+| R14 | Download-and-exec primitives in shipped non-JS scripts (.sh/.bash/.ps1/.cmd/.bat/.psm1/.zsh: curl\|sh, encoded PowerShell, IEX, certutil…; python -c / ruby -e / perl -e download-exec included) | high (plugin) / info (generic) | files | likely |
 | R15 | Dynamic network targets (fetch / WebSocket / http(s).request|get / net.connect whose target argument cannot be statically resolved — "deliberately obscured" target) | info (observation; escalates only when other signals stack, e.g. N1 hidden capability fires) | both | heuristic |
 | R16 | Dependency consistency audit: **ghost deps** (imported by code but not declared in package.json — resolves only via transitive hoisting) and **zombie deps** (declared in package.json but missing from node_modules) | info (advisory; never into verdict) | files | heuristic |
 | R17 | !!js config injection (root-level cordis.yml / cordis.patch.yml / plugin.yml `!!js` expressions: presence observation + dangerous-verb enumeration + base64/hex decode hook-in; "verb + exfil-host/credential-path" double combos → high; test/CI dirs and generic packages stay info. **Text extraction only, never executed**) | high (double combo) / info (single verb / observation) | files (surface.configFiles; engine static-v14+) | likely (double combo) / heuristic (observation) |
-| R18 | Instruction/skill injection observation
+| R18 | Instruction/skill injection observation (AGENTS.md / CLAUDE.md / CODEGOV.md and SKILL.md under skills/ or *.skill dirs: combined-text features — instruction rewrite × credential/exfil/persistence action, ≥2 independent group hits to fire; v1 all-info observation, escalation after real-corpus tuning) | info (observation; never into verdict) | files (surface.instructionFiles; engine static-v14+) | heuristic |
 | R19 | Typosquat observation (package name / deps vs a curated core list of official @deepseek-ai names: Levenshtein <=1 or visual homoglyphs — dshh / d5h / dsh_tool_bash; only against the curated core list; everything else is covered by R10 dep manifest + OSV + manual pre-install review) | info (observation; never into verdict) | files | heuristic |
- (AGENTS.md / CLAUDE.md / CODEGOV.md and SKILL.md under skills/ or *.skill dirs: combined-text features — instruction rewrite × credential/exfil/persistence action, ≥2 independent group hits to fire; v1 all-info observation, escalation after real-corpus tuning) | info (observation; never into verdict) | files (surface.instructionFiles; engine static-v14+) | heuristic |
- **ghost deps** (imported by code but not declared in package.json — resolves only via transitive hoisting) and **zombie deps** (declared in package.json but missing from node_modules) | info (advisory; never into verdict) | files | heuristic |
+| R20 | Shell download-and-exec in exec/spawn-family arguments (0.3.2): hardcoded curl\|sh / wget\|sh / PowerShell -enc/IEX/DownloadString / system download primitives (certutil/bitsadmin/mshta/regsvr32/rundll32) / interpreter `-c`-style (python/ruby/perl) in **exec/spawn/execFile/fork argument literals** — incl. array form `spawn('sh', ['-c', …])` and N2-decoded args; child_process binding required ("exec call + dangerous command" two-signal gate); `curl -o` download-to-disk alone is medium (download ≠ exec) | high (pipe/encoded/primitive → suspicious) / medium (`curl -o`) / info (generic, test/CI) | both | likely |
 
 > **Engine pipeline additions (0.1.13)**: besides the rule set, the scanner now produces a per-package
 > **capability manifest (N1)** — hosts/fsPaths/spawnCmds/imports/hasNetwork/hasExec extracted from source
@@ -312,7 +338,7 @@ discipline as vet_label); the "blocked" mark comes from the N7 family-1 list.
 > (declaration-side facts, never verdicts, conservative over-collection) — and runs a **literal decode
 > preprocessor (N2)** that statically decodes base64 / hex / Buffer.from / String.fromCharCode / constant
 > concatenation / template literals (all-literal arguments only, ≤4KB, ≤2 nesting layers, never executes
-> code) and feeds the decoded text back into R13/R7/R11 matching (findings carry `decodedFrom` and the
+> code) and feeds the decoded text back into R13/R7/R11/R20 matching (findings carry `decodedFrom` and the
 > original line for audit). Capabilities enable the cross-layer diff (see Runtime monitoring below).
 
 ## Scoring model
@@ -343,7 +369,8 @@ and verdict are shown separately and never merged into a single total.
 | R11 | Destructive file operations: `fs.unlink/rm/rmdir(+Sync)` deleting sensitive paths (/etc/root/.ssh etc.) → high, plain deletes → medium; `fs.writeFile` etc. writing sensitive paths → high; `fs.readdir` traversing sensitive directories → medium | high → suspicious (sensitive paths); medium not into verdict | matrix ✓ |
 | R12 | Cordis/DSH contract: missing declared `dsh.bundle.patch` file → high; no entry (no main/exports["."] and no root index.js) → medium; declared entry file missing → high; plugin-intent package missing name → medium; `engines.node` major < 22 → info | high → suspicious (declared mount point/entry missing means guaranteed failure); medium/info not into verdict | matrix ✓ |
 | R13 | Network exfil: hardcoded Discord/Telegram/Slack webhooks, cloud-metadata endpoints (169.254.169.254 / metadata.*.internal / 100.100.100.200) and .onion destinations in string literals | high → suspicious | matrix + R13 tests ✓ |
-| R14 | Non-JS scripts: curl|sh, wget|sh, PowerShell download-pipe / -enc / IEX, certutil/bitsadmin/mshta/regsvr32/rundll32 in .sh/.bash/.ps1/.cmd/.bat/.psm1/.zsh (python -c / ruby -e / perl -e download-exec also covered; generic → info) | high → suspicious (plugin); info not into verdict (generic) | matrix + R14 tests ✓ |
+| R14 | Non-JS scripts: curl\|sh, wget\|sh, PowerShell download-pipe / -enc / IEX, certutil/bitsadmin/mshta/regsvr32/rundll32 in .sh/.bash/.ps1/.cmd/.bat/.psm1/.zsh (python -c / ruby -e / perl -e download-exec also covered; generic → info) | high → suspicious (plugin); info not into verdict (generic) | matrix + R14 tests ✓ |
+| R20 | Hardcoded download-and-exec in exec/spawn-family arguments (0.3.2): curl\|sh / wget\|sh / PowerShell -enc/IEX/DownloadString / system download primitives / interpreter -c-style — checked in **literal arguments of exec/spawn/execFile/fork** (array form and N2-decoded args included; child_process binding required) | high → suspicious (pipe/encoded/primitive); medium not into verdict (`curl -o` — download ≠ exec); generic/test-CI → info | matrix + R20 tests ✓ |
 
 ### Detected — advisory level (downgrades score only, never changes the verdict)
 
@@ -353,7 +380,7 @@ and verdict are shown separately and never merged into a single total.
 | R6 | String coarse scan: concatenated escape features, `getBuiltinModule`/`child_process`/dangerous-require module references, obfuscation features (`String.fromCharCode`/`Buffer.from(base64)`/`atob(`/`charCodeAt` — since round-7 reported only when combined with an in-file dynamic-execution signal (eval/new Function/vm etc.); routine byte handling for terminal protocols/encoding no longer false-positives) | info/heuristic |
 | R8 | Scan timeout / file-too-large skip | info meta-rule |
 
-### Runtime monitoring (when `runtimeGuard: watch`) — alarm only
+### Runtime monitoring (when `runtimeGuard: watch`) — observation alarm-only; the N7 confirmation block (row below) is the only interception layer
 
 | Layer | Mechanism | Catches | Limits |
 |---|---|---|---|
@@ -363,7 +390,7 @@ and verdict are shown separately and never merged into a single total.
 | N3 exfil/destruction ledger (0.1.14) | Per-plugin byte counters (sensitive-read / net-write, lifecycle cumulative) + 10s destruction signature windows + sequence signatures (READ_SECRET → SPAWN curl/wget/nc, READ_SECRET → NET_WRITE) | Read-secret-then-send-data: yellow n3-exfil (both counters > 0), red n3-exfil-match (magnitudes match — whole-package exfil), red sequence signatures (30s window); destruction family: mass delete / mass rename-to-encrypted-marker / read-then-overwrite-in-place / write amplification → yellow, two+ signatures together → red n3-ransom; honeypot/canary-confirmed (N4) plugins get lowest thresholds | No session/content inspection (bytes + operation-shape only); cross-session/ultra-slow exfil, native-binary internals, fd-level reads, fetch bodies not counted (documented boundary); per-plugin attribution best-effort |
 | N4 canary watermark (0.1.14) | High-entropy canaries embedded in honeypot lure values (in-memory set); network URL/body (write/end), dgram messages, fetch URLs/bodies and spawn args scanned for them | Canary found outbound → red `canary-leak` (100% exfil confirmation; direct / URL-decode / one base64-decode variants; offending plugin marked suspected in the N3 ledger) | Only confirms exfiltration of honeypot material; canary sharding/reassembly not countered (documented); needs honeypot lures (idempotent lures keep their canary) |
 | Integrity canaries (0.1.14) | Small marker files under ~/.dsh (fixed content + self sha256); write/delete → red kind `integrity` | Earliest ransomware trigger on the profile/credentials surface (backstop to N3 destruction signatures) | Scope limited to ~/.dsh (documented); reads not alarmed |
-| N7 confirmation block (0.1.14) | Wrapper-level intercept of destructive fs ops after certain confirmation (families 1/2) plus optional family 3/4 upgrade-to-block; guards: official attribution / unattributed ops / vet self IO never blocked, exact file-level credential matching, fail-open decision path | Family 1: post-confirmation (N3 ransom-signature combo / integrity-canary write-delete / N4 canary leak) destructive fs ops (write/unlink/rename/cp/truncate/createWriteStream) of that plugin throw; family 2: single-shot immediate block of credential-body deletion + overwrite-to-existing (exact files: ~/.ssh/id_*, ~/.dsh/.credentials.yaml, ~/.aws/credentials, .pgpass, .netrc, .git-credentials, .npmrc); families 3/4: yellow `persistence-write` / `install-write` alarms (never blocked by default) | Blocked set is process memory (restart clears); config changes need restart; recoverable writes (appendFile, new files) are never blocked; family 3/4 become blocking only via explicit user override (`confirmBlockFamily3/4: block`) |
+| N7 confirmation block (0.1.14) | Wrapper-level intercept of destructive fs ops after certain confirmation (families 1/2) plus optional family 3/4 upgrade-to-block; guards: official attribution / unattributed ops / vet self IO never blocked, exact file-level credential matching, fail-open decision path | Family 1: post-confirmation (N3 ransom-signature combo / integrity-canary write-delete / N4 canary leak) destructive fs ops (write/unlink/rename/cp/truncate/createWriteStream, plus write-flag open/openSync since 0.3.4/round-22 — fd-path truncation) of that plugin throw; family 2: single-shot immediate block of credential-body deletion + overwrite-to-existing (incl. write-flag open on existing credentials) (exact files: ~/.ssh/id_*, ~/.dsh/.credentials.yaml, ~/.aws/credentials, .pgpass, .netrc, .git-credentials, .npmrc); families 3/4: yellow `persistence-write` / `install-write` alarms (never blocked by default) | Blocked set is process memory (restart clears); config changes need restart; recoverable writes (appendFile, new files) are never blocked; family 3/4 become blocking only via explicit user override (`confirmBlockFamily3/4: block`) |
 | N6 version behavioral diff (0.1.15) | Per-`name@version` capability manifests (N1 output) recorded locally at `~/.dsh/vet/capabilities.json` (0600, LRU 1000 versions) on every auto-scan; on upgrade the new manifest is diffed against the previous recorded version (by recordedAt, no semver parsing) | New capabilities vs. the previous version → yellow `upgrade-diff` (new hosts/fsPaths/spawnCmds/imports/network-or-exec gain); a new high-sensitivity combination (exec+network / sensitive-path+network / sensitive-path+exec) → red; cold start (first install): records only, exec+network double-high gets a yellow `upgrade-cold` notice; removed capabilities are audit-only, never alarmed; `vet_diff` tool prints local history + last-two-version behavior changelog | Compares *declared* manifests only (runtime-hidden or dependency-carried capability changes are covered by N1 hidden-capability/N2 decode, not the manifest diff); "previous version" = last version actually scanned here; same-version reinstall not diffed (content-baseline hash covers same-version tampering); local-only (no network), alarm-only |
 | Forensics mode (0.1.21, P0-2) | After N4 canary confirmation, the confirmed-malicious plugin is armed and every subsequent fs/child_process/network op of that plugin is appended to `~/.dsh/vet/forensics/<plugin>-<ts>.jsonl` (0600/0700, fail-open) | Full micro-activity timeline for a confirmed-bad plugin — "no disturbance at rest, full net once confirmed" | In-memory armed set (cleared on restart); no session-content capture (operation-shape + target only, same data plane as N3); forensics is an enhancement, never a block path |
 | Hook integrity heartbeat (0.1.21, P0-2 #2) | Every T2 wrapper is branded with a module-closure-private `Symbol`; a periodic check (runtimeIntervalMs×4, min 5s) re-verifies the current module exports still carry the brand | Wrapper stripped/replaced (plugin rewrote a built-in module export to bypass T2) → yellow `t2:hook-heartbeat` listing the lost ops; alarm-only | Brand lives on the function object — a copied `toString()` cannot spoof it; only surfaces vet wrapped this process; brand absent → taken as stripped (conservative); TTL-bounded alarm, recovery via re-apply |
@@ -375,8 +402,8 @@ and verdict are shown separately and never merged into a single total.
 |---|---|
 | Indirect references: alias function `const f = Function; f(...)`, `process["getBuiltinModule"]`, `globalThis.process`, indirect eval `(0, eval)` | The alias-to-`Function` form (`const f = Function; f(...)`) remains undetected — R6 info or zero findings, verdict=clean (no variable-alias tracking; R1 alias tracking covers only `.constructor`); **round-9 (0.1.16) / F4**: `process["getBuiltinModule"]` (bracket access) → critical, `globalThis.process.*` → member-graded (critical/high/info), `(0, eval)`/`globalThis.eval`/`window.eval`/`globalThis['eval']` → R2 high — all now caught |
 | Runtime/externally constructed payloads: base64 strings, hex/charCode assembly, reading code from network/env/args, self-modifying code | **0.1.13 (N2)**: statically decodable base64/hex/charCode/constant-concat payloads are decoded and fed back to R13/R7/R11 (exfil/secret/destructive-path shapes now caught); direct `Function(atob(...))`/`eval(atob(...))` calls are flagged by R2 regardless of arguments; the empirically-tested zero-finding floor is now only the alias/dynamic-base constructor form (`x.constructor` with a runtime-constructed argument) plus payloads sourced from network/env/args/self-modification; **0.1.15 (N5/R15)**: such network sinks are flagged info ("刻意遮蔽" — runtime target not auditable from source) |
-| Non-source files: `.jsx`/`.tsx`/`.vue`/binaries/wasm, arbitrary `.md`/`.yml`, and `.json` outside package.json | Not in the general scan surface; shell/PowerShell/batch scripts (.sh/.bash/.ps1/.cmd/.bat/.psm1/.zsh) are covered by R14 (download-and-exec); package.json itself is always parsed (R10 install hooks/dependency manifest, R12 contract, R16 dep consistency); **0.2.6 (R17/R18)**: root-level configs cordis.yml/cordis.patch.yml (`!!js`) and instruction/skill files AGENTS.md/SKILL.md gained narrow surface-gated extras; README/docs still not scanned |
-| Dependency chain/supply chain (partial — the rest is R10's actual scan surface): full import/require graph resolution, licenses, author reputation | Not parsed beyond the checks below; **scanned instead**: package.json install hooks (R10, incl. prepare/preuninstall → high), dependency manifest (R10 → info), known-vulnerability matching via **OSV exact-version query** (opt-in osvCheck, network, fail-open), import/node_modules consistency (R16 ghost/zombie deps → info) |
+| Non-source files: `.jsx`/`.tsx`/`.vue`/binaries/wasm, arbitrary `.md`/`.yml`, and `.json` outside package.json | Not in the general scan surface; shell/PowerShell/batch scripts (.sh/.bash/.ps1/.cmd/.bat/.psm1/.zsh) are covered by R14 (download-and-exec); hardcoded download-and-exec in **JS/TS exec/spawn-family arguments** is covered by R20 (0.3.2); package.json itself is always parsed (R10 install hooks/dependency manifest, R12 contract, R16 dep consistency); **0.2.6 (R17/R18)**: root-level configs cordis.yml/cordis.patch.yml (`!!js`) and instruction/skill files AGENTS.md/SKILL.md gained narrow surface-gated extras; README/docs still not scanned |
+| Dependency chain/supply chain (partial — the rest is R10's actual scan surface): full import/require graph resolution, licenses, author reputation, transitive-vulnerability trees (opt-in, off by default) | Not parsed beyond the checks below; **scanned instead**: package.json install hooks (R10, incl. prepare/preuninstall → high), dependency manifest (R10 → info), **known-vulnerability matching via OSV exact-version query — the plugin package itself *and* its direct dependencies** (default-on `osvCheck`, configurable off; network, fail-open; exact versions only, ranges skipped), optional transitive tree via a *locally installed* `upstream-radar` CLI (`transitiveDeps`, default off — missing CLI degrades silently to direct-only), import/node_modules consistency (R16 ghost/zombie deps → info) |
 | Runtime behavior: network exfiltration, dynamic prototype-pollution chains, dead loops/resource exhaustion, timing, permission abuse | No dataflow/behavior analysis; static `<builtin>.prototype` override assignments are caught by R4 (round-7); **0.1.13 (N2)**: statically decodable base64/hex/charCode/constant-concat payloads are now caught (decoded corpus fed back to R13/R7/R11); runtime-constructed payloads read from network/env/args remain undetected statically — the cross-layer diff (N1) surfaces them as **hidden capabilities** when the runtime actually executes a sensitive action the static manifest never declared ; **0.1.14 (N3)**: the runtime ledger correlates per-plugin sensitive reads with outbound writes (bytes + sequence + destruction signatures), partially closing low-traffic exfil and pure-JS file-destruction; cross-session/ultra-slow exfil remains out of scope (read and write not in the same plugin lifetime) |
 | Semantic knowledge: the actual services a plugin injects, `process` in bundler polyfills, shadowing boundary | R5 only recognizes 4 variable names; shadowing check is a v1 heuristic (undercounts) |
 | Legitimate `process` use by host tool packages (`process.env` config reads, `process.stdin/stdout` protocol, `process.execPath` spawn) | Resolved: targetKind grading — non-DSH plugin packages/official packages (generic) downgrade R3/R2/R10/R9 dead-loop to capability-surface/advice (info/medium), not into verdict; DSH plugin packages stay strict. round-7 adds shape downgrades: app-type packages (package.json declares bin) and bin entry files are likewise downgraded to capability surface; round-7.1 read-only member classification: pure read-only members (`cwd`/`env`/`platform`/`pid`, etc.) drop to info even in plugin mode (no-bin MCP/tool plugins like bridges no longer hurt); side-effect/escape members (`kill`/`exit`, etc.) stay high/critical. 187 official packages tested all clean (0.1.1-rc.2 installed set) |
@@ -394,9 +421,12 @@ and verdict are shown separately and never merged into a single total.
 5. **This product is not a security boundary** — positioned as a "speed bump + forensics layer" (bypassable
    forms in Known Limitations 1 below, aligned with DSH's official stance).
 6. **Fail-open by default** — default `mode: report`; `deny` is explicitly enabled by the deployer.
-7. **Alarm-only** — the runtime guard only watches, never kills; vet's automatic behavior (deny interception)
-   exists only in the explicitly enabled opt-in mode. Alarms only carry advice; disposition is always left to
-   the user on their DSH.
+7. **Observation-first, interception explicit** — the runtime guard's T1/T2 layers only watch and never kill.
+   Interception is limited to documented scopes: the N7 confirmation-block of irreversible destruction
+   (default `confirmBlock: block` families 1/2; active whenever the runtime guard is on — incl. when woken
+   by the `hardened` tier or the shield toggle), and the explicitly enabled opt-in `deny` mode / `paranoid`
+   tier (load rollback + per-threshold block). Alarms only carry advice; disposition is always left to the
+   user on their DSH.
 
 ## 0.1.16 hardening batch (security review)
 
@@ -429,6 +459,34 @@ Fixes from the full code review (C1–C4 critical, M5–M9 major/minor, rule pat
   policy, R4 `Reflect.defineProperty`, R9 escaped-paren ReDoS counting, R10 `prepare` hook, R14 python/ruby/perl
   download-exec, R15 undici sinks (see Static rule table).
 - **Session-log rotation noise** — `isSessionLogFile` now also recognizes sharded session files (`session.jsonl.zstd.<shard>`); an unattributed session-log deletion under `~/.dsh/sessions/**` is downgraded from red `fs-destroy` to yellow (host self-maintenance can't attack itself), while an attributed deletion stays red (possible evidence destruction).
+
+## Platform Support
+
+The one-glance matrix — what actually runs where. T1 = out-of-process sentinel (samples memory /
+child-process count / fd every tick and alarms); T2 = in-process hooks (interception, honeypot, GUI
+shield); panel = live host-metrics display (`metrics.js`).
+
+| Capability | Linux | macOS 11+ | Windows / other |
+|---|---|---|---|
+| Static scan (scan_plugin, R1–R20, OSV) | ✅ | ✅ | ✅ |
+| T2 runtime hooks + honeypot + shield | ✅ full | ✅ full | ✅ (system-root prefix check is POSIX-shaped; segment-name/keyword checks still hit) |
+| T1 sentinel (out-of-process resource sampling) | ✅ `/proc`, every tick | ✅ `ps` + `lsof`, fd ~every 6s (since round-19) | ⛔ skipped via explicit platform gate (zero noise) |
+| Live metrics panel (`metrics.js`) | ✅ full | ✅ async `ps`/`lsof` sampling (since round-20); disk-I/O shows `—` | ⚠️ V8-side numbers only (rss/heap); OS counters show `—`/0 fallbacks (by design; since round-21 even `childCount` is honest `—`, never a fake 0) |
+
+macOS floor and CI: GitHub Actions retired the older hosted macOS images (12 fully gone, 13/14 on
+the deprecation path; `macos-latest` = macOS 15 Sequoia), so only modern macOS is ever CI-tested —
+consistent with the Node 22 floor (macOS 11+). Older macOS never crashes the guard: unparsable `ps`
+output degrades to "tick skipped", the same contract as a restricted-/proc container. Windows stays
+sentinel-less by design: no stock `ps`/`lsof` equivalent at comparable cost; T2 + static still guard it.
+Panel sampling on macOS is deliberately **async snapshot-cache** (TTL 4s, lsof 15s): the panel polls
+`readHostMetrics` every 5s **from inside the host process**, and a sync execFile there would freeze the
+host event loop — so reads never block, the first poll shows `—` and self-heals at the next. Disk-I/O
+(`read_bytes`/`write_bytes`) is Linux-only (no stock per-process byte counter on macOS/Windows):
+elsewhere the panel shows `—` (−1), never a fake 0. The panel also **refuses to render parseable
+non-snapshot JSON** (SEC-6 cross-origin 403 envelope, host error envelopes): poll only replaces the
+live snapshot when the payload matches the wire shape (`level` string + `alarms` array), so an error
+envelope can never paint a fake all-green shield (round-21; shape predicate shared single-source
+between server and client bundle).
 
 ## Known Limitations
 
@@ -490,25 +548,29 @@ Fixes from the full code review (C1–C4 critical, M5–M9 major/minor, rule pat
     run.js/util.js). Statically distinguishing `process.kill(child.pid)` (pid from this package's own spawn
     return) from arbitrary pids needs dataflow analysis — high cost, low benefit; kept as-is, to be ruled out
     manually by the agent during vet-audit-protocol review (conclusion recorded in the health record).
-16. **Platform support (Linux-first, graceful degradation elsewhere)**: the static scan layer (scanner-bin /
-    scan_plugin / R1-R12 / OSV), T2 runtime hooks, honeypot, GUI shield and audit protocol are all pure JS and
-    run cross-platform (macOS/Windows). **The T1 sentinel is Linux-only**: it depends on /proc for
-    VmRSS/children/fd; on non-Linux the sentinel is skipped via an explicit platform gate (0.1.21, P0-6) — no
-    sentinel is spawned, zero respawn/sentinel-down noise, and the metrics panel falls back to -1/0 (no errors,
-    by design). T2 sensitive paths match by path-segment name (backslashes are normalized,
-    so `.ssh`/`.env`/`credentials` etc. hit on Windows too), but the "system-root prefix" (/etc /usr /var) is
-    POSIX-shaped: on Windows, write/delete of `C:\Windows\System32`-style paths bypasses the system-root
-    judgment (segment-name/keyword checks still apply); macOS has /etc /usr /var, so T2 is fully functional.
-    Consistent with DSH current Linux-first adaptation state.
+16. **Platform support**: see the **Platform Support** matrix above — single source of truth.
+    One-line summary: static scan, T2 hooks and the shield run everywhere (Linux/macOS/Windows);
+    the T1 sentinel runs on Linux (`/proc`) and macOS 11+ (`ps`/`lsof`, fd ~every 6s, since round-19)
+    and is explicitly skipped on other platforms including Windows; the `metrics.js` host panel covers
+    macOS since round-20 (async snapshot cache — never blocks the host; disk-I/O stays Linux-only and
+    shows `—`, never a fake 0); on Windows only the V8-side numbers (rss/heap/external) are real.
 
 ## Development
 
 ```sh
 npm run build       # scanner-bin + src compiled to lib/ + client bundle
-npm run typecheck   # full tsc --noEmit
-npm test            # build + vitest (250 cases, incl. coverage thresholds)
-npx vitest run --coverage   # coverage report (lines/functions >= 70%, branches >= 50%)
+npm run typecheck   # full tsc --noEmit (scanner / src / client)
+npx vitest run      # full suite: 74 files / 1095 tests
+node scripts/count-assertions.mjs   # assertion census: 2864 standalone expect() calls (+18 chain-matcher helpers; lexical scan, comments/strings excluded)
+npx vitest run --coverage   # coverage report (v8 over lib/; thresholds: lines/functions/statements >= 85%, branches >= 80%; measured 89.5/93.5/89.5/84.7)
+npm run check:mutants       # mutation gate (34 mutants must all be killed, 8 benign controls stay clean; per-rule kill matrix enforced)
+node scripts/gen-self-pin.mjs && node scripts/check-self-contract.mjs   # artifact self-pin + release-pin match
+node scripts/check-pack-integrity.mjs   # shipped-file whitelist integrity
 ```
+
+Release gate: `prepublishOnly` runs build + pack-integrity + self-contract + mutant gate automatically. The
+full pre-release chain is: build → typecheck → vitest → check:mutants → gen-self-pin → check-self-contract →
+check-pack-integrity (all must be green; the pin is regenerated whenever the shipped artifacts change).
 
 Layout: `scanner-bin/` static engine (separate process); `src/` plugin body (tools/guards/audit/report/guard);
 `src/client/` GUI shield; `test/` fixtures + unit tests + adversarial matrix. Architecture in

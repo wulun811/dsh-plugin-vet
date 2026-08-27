@@ -15,6 +15,16 @@ shield status light). vet **never acts on your behalf** — it never auto-uninst
 rewrites configs; `deny` mode is an explicit deployer opt-in and is not part of the product identity. The final
 disposition is always decided by the user on their own DSH.
 
+**One deliberate exception: high-confidence destruction is interrupted at the call site.** When the runtime
+guard is in `watch` mode, confirmed destructive operations — family-1 (a plugin already confirmed as
+destructive/ransom-signature: N3 ledger, integrity-canary writes/deletes, canary leak) and family-2 (the
+credential files themselves being deleted or overwritten, e.g. `~/.ssh/id_rsa`, `~/.dsh/.credentials.yaml`)
+— throw inside the wrapper before the original call runs (confirmation block, default `block` mode); family-3/4
+(system persistence / install-tree tampering) are alarm-only by default and only block when the deployer
+explicitly opts in. That is the single enforcement primitive; everything else (scan verdicts, observations,
+spawns, network egress, honeypots) stays check/alarm/advise. `deny` mode additionally gates plugin installs at
+load time by static verdict — also a deployer opt-in.
+
 ```
 DSH host process:
   tools/execute guard ── intercepts cordis_define/cordis_run/run_code/workflow
@@ -84,7 +94,7 @@ The TypeScript compiler API (`createSourceFile`) read-only parses .js/.ts/.mjs/.
 Helpers: static string/number evaluation (literals/templates/concatenation/const bindings), lexical shadowing
 check.
 
-### 4.3 Rule set (R1-R12)
+### 4.3 Rule set (R1-R20)
 
 | ID | Name | Default level | Determinism |
 |---|---|---|---|
@@ -95,10 +105,19 @@ check.
 | R5 | ctx-escape attempt signal | medium | code only |
 | R6 | String coarse-scan fallback (obfuscation signals need combined evidence with dynamic execution, round-7) | info | heuristic |
 | R7 | Hardcoded secrets (placeholders excluded by segment) | high | likely |
+| R8 | Scan skip (file too large / beyond scan budget; keeps the file out of the judgment) | info | certain |
 | R9 | Resource safety (unbounded allocation / dead loops / spawn-in-loop / ReDoS / recursion; round-7: group-then-`?` not ReDoS, bounded traversal recursion not non-termination; round-7.2: labeled break to a label wrapping the loop counts as an exit signal) | high/medium/info | certain/likely/heuristic |
 | R10 | Supply chain (install hooks / dependency manifest) | high/info | likely/heuristic |
 | R11 | Destructive file operations (fs deletes / sensitive-path reads-writes) | high/medium | likely |
 | R12 | Cordis/DSH bundle contract (entry file / bundle-patch declaration / name / engines.node) | high/medium/info | certain/likely |
+| R13 | Hardcoded network exfiltration sinks (webhooks, cloud-metadata endpoints, .onion) in string literals | high | likely |
+| R14 | Download-and-exec primitives in shipped non-JS scripts (.sh/.ps1/.cmd/.bat/.psm1/.zsh; python -c / ruby -e / perl -e included) | high (plugin) / info (generic) | likely |
+| R15 | Dynamic network targets (sink target statically unresolvable — observation only; §4.10) | info | heuristic |
+| R16 | Dependency consistency audit (ghost deps: imported but undeclared; zombie deps: declared but missing; §4.11) | info (never into verdict) | heuristic |
+| R17 | !!js config injection (cordis.yml / cordis.patch.yml / plugin.yml `!!js` expressions; text extraction only, never executed; surface 0.2.6 engine static-v14+) | high (verb+host combo) / info (observation) | likely/heuristic |
+| R18 | Instruction/skill injection observation (AGENTS.md / SKILL.md combined-text features, ≥2 independent group hits) | info (observation) | heuristic |
+| R19 | Typosquat observation (name/deps vs curated official core list; Levenshtein ≤1 / homoglyphs) | info (observation) | heuristic |
+| R20 | Shell download-and-exec in exec/spawn-family argument literals (curl\|sh, -enc/IEX, download primitives, interpreter -c; child_process binding gate; 0.3.2, engine static-v16+, round-16: secondary bindings/decode/case shapes) | high (pipe/encoded/primitive) / medium (curl -o) / info (generic, test/CI) | likely |
 
 Per-rule switch: `rules: { "R7": false }` disables a single rule.
 
@@ -378,10 +397,14 @@ baseline compare) → **alarm only**, never risking a false block.
 - **Family 1 — destruction/ransomware confirmation** (`src/guard/confirm-block.ts`): once a plugin is
   confirmed destructive (N3 destruction-signature combination `n3-ransom` / integrity-canary write-delete /
   N4 canary leak — wired in `runtime-guard.ts`), its subsequent destructive-property fs ops
-  (write/unlink/rename/cp/truncate/createWriteStream, incl. Sync variants) throw.
+  (write/unlink/rename/cp/truncate/createWriteStream, incl. Sync variants; since round-22 also
+  write-flag `open`/`openSync` — fd-path open-truncation is the same destruction, read-only open is not)
+  throw.
 - **Family 2 — credential-body destruction** (single-shot, immediate, exact file-level): delete-family ops
   (unlink/rm/rmdir/rename to the credential) and overwrite-write to an *existing* credential file
-  (`writeFile`/`truncate`/`createWriteStream`) are blocked; `appendFile` and writing a *new* file (recoverable)
+  (`writeFile`/`truncate`/`createWriteStream`, plus write-flag `open`/`openSync` on an existing credential
+  since round-22 — the fd-path branch used to be implemented in `decideBlock` but unreachable from the
+  wrapper gate) are blocked; `appendFile` and writing a *new* file (recoverable)
   are alarm-only. Credential files: `~/.ssh/id_{rsa,ed25519,ecdsa,dsa}(.pub)`, `~/.dsh/.credentials.yaml`,
   `~/.aws/credentials`, `.pgpass`, `.netrc`, `.git-credentials`, `.npmrc` (HOME env first for testability).
 - **Family 3/4 — persistence/privilege & supply-chain write**: `classifyOp` flags writes to

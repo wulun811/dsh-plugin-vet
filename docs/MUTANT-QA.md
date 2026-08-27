@@ -23,7 +23,7 @@ vet 的静态引擎是确定性规则引擎、无 LLM 参与——同一输入�
 
 ```bash
 npm run mutant-score        # 报告模式：score card + reports/mutant-score.json（产物已 gitignore）
-npm run check:mutants       # 门禁模式：任一存活 / 任一误杀 / 任一评测失败 → exit 1
+npm run check:mutants       # 门禁模式：任一存活 / 任一误杀 / 任一评测失败 / 规则击杀矩阵未满 → exit 1
 ```
 
 `prepublishOnly` 已接入 `check:mutants` 作为第 4 道发布门禁（build → pack-integrity → check:self → mutants）。
@@ -70,14 +70,21 @@ npm run check:mutants       # 门禁模式：任一存活 / 任一误杀 / 任�
 
 ## 当前状态
 
-- 22 恶意 mutants，击杀率 100%，覆盖 **13 个规则面**：R1 构造器链×4、R2 动态执行×5
+- 34 恶意 mutants，击杀率 100%，覆盖 **17 个规则面**：R1 构造器链×4、R2 动态执行×5
   （eval/new Function/vm/间接 require/charCode 组合）、R3 process 直访、R5 未声明服务挂载、
   R6 组合证据混淆、R7 硬编码凭据、R9 资源面×2（fork 炸弹/ReDoS）、R10 postinstall 供应链钩子、
-  R11 破坏性路径×2、R13 外联 sink×2（Discord webhook/云元数据）、R17 patch yml !!js 注入、
-  R18 AGENTS.md 指令注入、R19 全角 typosquat；
-- 5 良性 controls 0 误杀：干净工具插件、参数遮蔽 process、独立 charCode 编码、异步常驻服务、
-  有条件递归——其中 4 只恶意 mutant 是「verdict clean 但规则命中」，反向验证击杀判据
-  必须用规则而非 verdict；
+  R11 破坏性路径×3（含 require('fs') 直引形态，round-16）、R13 外联 sink×2（Discord webhook/
+  云元数据，含 Array.join 拼接形态）、R14 非 JS 脚本下载即执行×1（round-17：大写 CURL|SH
+  大小写不敏感回归面）、R15 动态网络目标×1（round-17：sink 观测回归面）、R16 幽灵依赖×1
+  （round-17：子路径幽灵——父包未声明的子路径导入必须仍判幽灵）、R17 patch yml !!js 注入、
+  R18 AGENTS.md 指令注入、R19 全角 typosquat、R20 shell 下载执行×8（round-15/16：命令别名、
+  promisify 绑定、链式 a.b.cp、数组拼接、大小写/无扩展名/扩展名面、动态段、Buffer.concat、
+  冗余去重）；
+- 8 良性 controls 0 误杀：干净工具插件、参数遮蔽 process、独立 charCode 编码、异步常驻服务、
+  有条件递归、解码数据串含敏感路径但无 fs 足迹、形参遮蔽模块级敏感常量——其中 4 只恶意
+  mutant 是「verdict clean 但规则命中」，反向验证击杀判据必须用规则而非 verdict；
+- 门禁（round-16，QA-3）：`--gate` 除「任一存活/任一误杀/任一评测失败」外，规则击杀矩阵
+  **任一行 killed < required 也 exit 1**——单规则覆盖不能被同 mutant 的其他规则命中注水；
 - M20 语料（G-1 注入仿真）曾在代理会话中被实时加载并触发真实注入尝试——文件已加显式
   语料标注（不影响 R18 命中），这本身就是指令面威胁真实性的现场实证；
 - 语料集体检：`test/mutant-score.test.ts` 每轮 vitest 全量跑 gate + 幽灵条目检查。
