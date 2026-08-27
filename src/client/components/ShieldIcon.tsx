@@ -2,13 +2,17 @@
  * 盾牌图标（三态符号，纯路径绘制不依赖字体）：green → 盾内 √；yellow → 盾内 ?；red → 盾内 !。
  * 从 Shield.tsx 拆出（P0 目录化），绘制逻辑不变。
  */
+import { useId } from 'react'
 import type { ReactNode } from 'react'
 
 const SHIELD_PATH = 'M8 0.9 L13.1 2.9 V7 C13.1 10.7 11 13.3 8 14.3 C5 13.3 2.9 10.7 2.9 7 V2.9 Z'
 
 export function ShieldIcon({ level, color, size = 20 }: { level: 'green' | 'yellow' | 'red'; color: string; size?: number }): ReactNode {
-  // 符号掏空：用 mask 让符号区域真正透明，露出面板底色
-  const maskId = `shield-mask-${level}`
+  // round-22：mask id 实例唯一（useId）——旧实现按 level 固定命名，同页多处盾牌
+  // （主盾 + IntroPanel 等）产生重复 <mask id>，url(#mask) 按文档序绑定第一个，
+  // 跨实例耦合（未来某实例改内容会静默串改其它实例的渲染）。
+  const uid = useId()
+  const maskId = 'shield-mask-' + uid + '-' + level
   const maskContent =
     level === 'green' ? (
       <path d="M5.2 8.2 L7.1 10.1 L10.8 5.9" stroke="black" strokeWidth={2} fill="none" strokeLinecap="round" strokeLinejoin="round" />

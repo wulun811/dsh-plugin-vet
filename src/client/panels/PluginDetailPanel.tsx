@@ -4,7 +4,7 @@
  * 能力清单（雷达/营养标签）+ 版本史差分 + 审计态。404 → 诚实空态。
  * 雷达六维口径见 RadarChart 头注释；营养标签只报声明面（诚实边界，D5）。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { T, ThemeTokens } from '../theme.ts'
 import { cardBg, cardInset } from '../theme.ts'
@@ -25,10 +25,11 @@ function ruleTagColor(code: string): string {
   return code === 'OSV' || /^(R8|R11)$/.test(code) ? 'critical' : 'hit'
 }
 
-/** 有悬停说明的规则码全集（i18n 键：rule.<code>.name / rule.<code>.desc；与 scanner 引擎规则表同步）。 */
+/** 有悬停说明的规则码全集（i18n 键：rule.<code>.name / rule.<code>.desc；与 scanner 引擎规则表同步）。
+ * round-16（DOC-4/5）：R20（shell 下载执行）与 OSV-T（直接依赖漏洞）补入。 */
 const RULE_KNOWN = new Set([
-  'OSV', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9',
-  'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19',
+  'OSV', 'OSV-T', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9',
+  'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19', 'R20',
 ])
 
 export function PluginDetailPanel({ pal, dark, t, name, onBack }: {
@@ -44,6 +45,12 @@ export function PluginDetailPanel({ pal, dark, t, name, onBack }: {
     | { phase: 'error'; note: string }
     | { phase: 'ready'; data: NonNullable<PluginDetailWire['plugin']> }
   >({ phase: 'loading' })
+  // round-21（review B2）：t 经 ref 供 effect 内异步错误文案使用，不进依赖数组——
+  // t 由宿主槽渲染器透传，本仓库无法保证其引用稳定；若每次宿主渲染新建 t，
+  // 旧写法会让本 effect 在面板打开期间随父层任意重渲染而重跑（loading 闪退 + 重复拉取）。
+  // ref 恒取最新 t（语言切换即时生效），effect 只跟 name 走。
+  const tRef = useRef(t)
+  tRef.current = t
 
   useEffect(() => {
     let alive = true
@@ -53,7 +60,7 @@ export function PluginDetailPanel({ pal, dark, t, name, onBack }: {
         const res = await fetch('/vet/plugin?name=' + encodeURIComponent(name), { cache: 'no-store' })
         if (!alive) return
         if (res.status === 404) {
-          setState({ phase: 'error', note: t('detail.notFound') })
+          setState({ phase: 'error', note: tRef.current('detail.notFound') })
           return
         }
         const body = await res.json() as PluginDetailWire
@@ -61,15 +68,16 @@ export function PluginDetailPanel({ pal, dark, t, name, onBack }: {
         if (body.ok === true && body.plugin !== undefined) {
           setState({ phase: 'ready', data: body.plugin })
         } else {
-          setState({ phase: 'error', note: t('detail.notFound') })
+          setState({ phase: 'error', note: tRef.current('detail.notFound') })
         }
       } catch {
-        if (alive) setState({ phase: 'error', note: t('guard.requestFailed') })
+        if (alive) setState({ phase: 'error', note: tRef.current('guard.requestFailed') })
       }
     }
     void load()
     return () => { alive = false }
-  }, [name, t])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- t 走 tRef 是刻意豁免（见上注释）
+  }, [name])
 
   return (
     <div style={{ width: '100%', height: '100%' }}>

@@ -8,6 +8,18 @@ const PKG = JSON.parse(
   readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
 )
 
+// 面板内嵌 logo：由脚本读文件 → base64 data URI → define 注入（不走 esbuild 资源解析，
+// 保证构建确定性）；素材单源存于仓库根 assets/（README 同源引用）。
+const assetDataURI = (rel) => {
+  const buf = readFileSync(fileURLToPath(new URL(rel, import.meta.url)))
+  const mime = rel.endsWith('.svg') ? 'image/svg+xml' : 'image/png'
+  return `data:${mime};base64,${buf.toString('base64')}`
+}
+const __VET_ASSETS__ = JSON.stringify({
+  vetLogo: assetDataURI('../assets/logo.png'),
+  dshSoLogo: assetDataURI('../assets/dsh-so-logo-dark.svg'),
+})
+
 const loadBanner = (
   'window.__ModuleLoader__.load({\n' +
   `\tid: ${JSON.stringify(PKG.name)},\n` +
@@ -29,7 +41,10 @@ await build({
   legalComments: 'none',
   charset: 'utf8',
   external: ['react', 'react/jsx-runtime', 'react-dom'],
-  define: { __VET_VERSION__: JSON.stringify(PKG.version) },
+  define: {
+    __VET_VERSION__: JSON.stringify(PKG.version),
+    __VET_ASSETS__,
+  },
   banner: { js: loadBanner },
   footer: { js: '\n\t\treturn module.exports;\n\t}\n});\n' },
 })

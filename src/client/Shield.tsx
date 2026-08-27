@@ -29,6 +29,7 @@ import { AlarmTimelinePanel } from './panels/AlarmTimelinePanel.tsx'
 import { PluginsListPanel } from './panels/PluginsListPanel.tsx'
 import { AuditCenterPanel } from './panels/AuditCenterPanel.tsx'
 import { PluginDetailPanel } from './panels/PluginDetailPanel.tsx'
+import { isShieldSnapshotShape } from '../guard/shield-shape.ts'
 import type { ShieldSnapshotWire } from './types.ts'
 
 /** wire 类型从 types.ts 再导出（历史导入路径兼容）。 */
@@ -100,8 +101,6 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const loadRef = useRef<() => void>(() => {})
-  const openTimer = useRef<number | null>(null)
-  const closeTimer = useRef<number | null>(null)
   /** 开关成功提示的自动消失定时器（「开启/关闭完毕！」2s 后消失，用户 2026-08-26 反馈）。 */
   const doneTimer = useRef<number | null>(null)
   const clearDone = (): void => {
@@ -115,12 +114,25 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
 
   useEffect(() => {
     let alive = true
+    // round-22：轮询竞态序号——5s 间隔 + 手动刷新都可能让两个请求同时在途；慢的旧响应
+    // 若晚于新响应到达会整体覆盖新快照（安全指示器回退到陈旧状态，与「宁可保留上次
+    // 状态」的语义冲突）。响应落地前校验自己仍是「最新一次发起的请求」，过期即弃。
+    let seq = 0
     const load = async (): Promise<void> => {
+      const mySeq = ++seq
       try {
         const res = await fetch('/vet/status.json', { cache: 'no-store' })
         if (!alive) return
         const text = await res.text()
-        setSnap(JSON.parse(text) as ShieldSnapshotWire)
+        const parsed: unknown = JSON.parse(text)
+        // round-21（安全信号完整性）：可解析的**非快照 JSON 信封**（SEC-6 跨源 403
+        // {ok:false,note}、宿主错误信封等）若直接 setSnap，会把旧快照整体覆盖成缺省
+        // 形状——渲染层 `??` 回退把「数据拿不到」画成**假全绿 0 报警**（对安全插件是
+        // 最坏静默）。形状谓词与服务端共用单源（guard/shield-shape）。校验不过 =
+        // 与 fetch 失败同级：保留上次状态，绝不覆盖。
+        if (!isShieldSnapshotShape(parsed)) return
+        if (mySeq !== seq) return // 已有更新的请求发起——过期响应丢弃，不让旧数据覆盖新数据
+        setSnap(parsed as ShieldSnapshotWire)
         setDark(isDark())
         setLoadedAt(Date.now())
       } catch {
@@ -292,31 +304,9 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   const profile = tierOverride ?? snap?.profile ?? 'standard'
   const stats = snap?.stats
 
-  // 「?」介绍面板：悬停 400ms 或点击打开（仅当当前 L2 是 about 或空）；弹层内移动不误关。
-  const cancelHelpClose = (): void => {
-    if (closeTimer.current !== null) {
-      window.clearTimeout(closeTimer.current)
-      closeTimer.current = null
-    }
-  }
-  const scheduleHelpClose = (): void => {
-    cancelHelpClose()
-    // M6：关闭延迟必须 > 打开延迟(400ms)——鼠标从按钮移向介绍栏途中会短暂离开 root，
-    // 600ms 足够穿越间隔；进入任何层（root/panel 子元素）时 onMouseEnter 会取消关闭。
-    // 只关 about 层：时间线/审计/详情是点击显式打开的，悬停离开不吞掉。
-    closeTimer.current = window.setTimeout(() => setL2(v => (v === 'about' ? null : v)), 600)
-  }
-  const onHelpEnter = (): void => {
-    cancelHelpClose()
-    if (openTimer.current !== null) window.clearTimeout(openTimer.current)
-    openTimer.current = window.setTimeout(() => setL2('about'), 400)
-  }
+  // 「?」介绍面板：纯点击开合（原 400ms hover 弹出被用户反馈「经过就弹」不舒服，
+  // 2026-08-27 改为与时间线/审计一致的点开/再点关；Esc 与主面板收起同样能关）。
   const toggleL2 = (kind: L2Kind): void => {
-    cancelHelpClose()
-    if (openTimer.current !== null) {
-      window.clearTimeout(openTimer.current)
-      openTimer.current = null
-    }
     setL2(v => (v === kind ? null : kind))
   }
 
@@ -340,16 +330,12 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
 
   // 卸载时清理定时器。
   useEffect(() => () => {
-    if (openTimer.current !== null) window.clearTimeout(openTimer.current)
-    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current)
     clearDone()
   }, [])
 
   return (
     <div
       ref={rootRef}
-      onMouseEnter={cancelHelpClose}
-      onMouseLeave={scheduleHelpClose}
       style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}
     >
       <button
@@ -405,8 +391,6 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
         <div
           ref={panelRef}
           className="vet-panel-root"
-          onMouseEnter={cancelHelpClose}
-          onMouseLeave={scheduleHelpClose}
           style={{
             position: 'fixed',
             top: pos.top,
@@ -563,8 +547,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                       <GroupLabel pal={tok}>{t('metrics.runtime')}</GroupLabel>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
                         <Metric pal={tok} dark={dark} label={t('metric.cpu')} value={metrics.cpuPct + '%'} />
-                        <Metric pal={tok} dark={dark} label={t('metric.ioRead')} value={metrics.ioReadMb + ' MB'} />
-                        <Metric pal={tok} dark={dark} label={t('metric.ioWrite')} value={metrics.ioWriteMb + ' MB'} />
+                        <Metric pal={tok} dark={dark} label={t('metric.ioRead')} value={metrics.ioReadMb >= 0 ? metrics.ioReadMb + ' MB' : '—'} />
+                        <Metric pal={tok} dark={dark} label={t('metric.ioWrite')} value={metrics.ioWriteMb >= 0 ? metrics.ioWriteMb + ' MB' : '—'} />
                         <Metric pal={tok} dark={dark} label={t('metric.children')} value={metrics.childCount >= 0 ? String(metrics.childCount) : '—'} />
                       </div>
                     </div>
@@ -660,9 +644,6 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
               role="button"
               aria-label={t('guard.helpLabel')}
               onClick={() => toggleL2('about')}
-              onMouseEnter={onHelpEnter}
-              onFocus={onHelpEnter}
-              onBlur={scheduleHelpClose}
               style={{
                 marginLeft: 8,
                 width: 16,
@@ -676,7 +657,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                cursor: 'help',
+                cursor: 'pointer',
                 flexShrink: 0,
               }}
             >

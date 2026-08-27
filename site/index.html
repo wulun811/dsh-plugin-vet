@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>dsh-plugin-vet — Trust layer for DeepSeek Harness plugins</title>
-<meta name="description" content="The trust layer for DeepSeek Harness (dsh) plugins. Vet any plugin before it runs on your machine: deterministic static scan, alarm-only runtime guard with honeypot lures, audit-protocol skill, and a live GUI shield.">
+<meta name="description" content="The trust layer for DeepSeek Harness (dsh) plugins. Vet any plugin before it runs on your machine: deterministic static scan (R1&#8211;R20), an alarm-only runtime guard with honeypot lures, an audit-protocol skill, and a live GUI shield. Alarm-only by default: vet checks, reports, advises &#8212; it never uninstalls and never kills; in the opt-in watch mode it may block only confirmed destructive operations.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2l12 4v9c0 8-5 13-12 15C9 28 4 23 4 15V6z' fill='%230ecb8b'/%3E%3Cpath d='M11 16.5l3.5 3.5L21 12.5' stroke='%23051320' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -181,7 +181,7 @@ code{font-family:var(--mono)}
     <div>
       <span class="eyebrow" data-i18n="hero.eyebrow">A Plugin for DeepSeek Harness (dsh)</span>
       <h1 data-i18n="hero.title">The trust layer for<br><span class="hl">DeepSeek Harness</span> plugins.</h1>
-      <p class="lead" data-i18n="hero.lead">dsh-plugin-vet is the trust layer for DeepSeek Harness: deterministic static scan (R1–R12), an alarm-only runtime guard with honeypot lures, an agent audit-protocol skill, and a live GUI shield.</p>
+      <p class="lead" data-i18n="hero.lead">dsh-plugin-vet is the trust layer for DeepSeek Harness: deterministic static scan (R1–R20), an alarm-only runtime guard with honeypot lures, an agent audit-protocol skill, and a live GUI shield.</p>
       <div class="callout">
         <b data-i18n="hero.positioning">A monitoring alarm, not an enforcer.</b>
         <span data-i18n="hero.positioning2"> vet never acts on your behalf — it only does <i>check → alarm → advise</i>. The final call is always yours on your own DSH.</span>
@@ -218,10 +218,10 @@ code{font-family:var(--mono)}
 
 <section class="stats">
   <div class="container stats-inner">
-    <div class="stat"><b id="sTests">243</b><span data-i18n="stats.tests">tests · 239 passed</span></div>
-    <div class="stat"><b id="sCov">87.7%</b><span data-i18n="stats.cov">line coverage</span></div>
-    <div class="stat"><b id="sRules">12</b><span data-i18n="stats.rules">static rules R1–R12</span></div>
-    <div class="stat"><b id="sMatrix">52</b><span data-i18n="stats.matrix">adversarial samples</span></div>
+    <div class="stat"><b id="sTests">1095</b><span data-i18n="stats.tests">tests · 1095 passed</span></div>
+    <div class="stat"><b id="sCov">89.5%</b><span data-i18n="stats.cov">line coverage</span></div>
+    <div class="stat"><b id="sRules">20</b><span data-i18n="stats.rules">static rules R1–R20</span></div>
+    <div class="stat"><b id="sMatrix">39</b><span data-i18n="stats.matrix">adversarial samples</span></div>
     <div class="stat"><b id="sOfficial">195</b><span data-i18n="stats.official">official packages · clean</span></div>
   </div>
 </section>
@@ -237,14 +237,14 @@ code{font-family:var(--mono)}
       <div class="card">
         <div class="icon">🔬</div>
         <h3 data-i18n="f1.t">Deterministic static scan</h3>
-        <p data-i18n="f1.d">R1–R12 rules over an AST, verdicts produced only by the static layer — never spoofable by prompt injection. The scanner runs as an isolated subprocess: AST read-only, never eval'd.</p>
+        <p data-i18n="f1.d">R1–R20 rules over an AST, verdicts produced only by the static layer — never spoofable by prompt injection. The scanner runs as an isolated subprocess: AST read-only, never eval'd.</p>
         <span class="tag g" data-i18n="f1.tag">verdict · critical / suspicious / clean</span>
       </div>
       <div class="card">
         <div class="icon">📡</div>
         <h3 data-i18n="f2.t">Runtime guard — alarm only</h3>
-        <p data-i18n="f2.d">T1 sentinel watches host /proc (memory, forks, fds); T2 hooks wrap fs/child_process and attribute dangerous operations to the plugin that did them. Watches, never kills.</p>
-        <span class="tag a" data-i18n="f2.tag">never blocks a call</span>
+        <p data-i18n="f2.d">T1 sentinel watches host resources (Linux: /proc; macOS: ps/lsof — memory, forks, fds); T2 hooks wrap fs/child_process and attribute dangerous operations to the plugin that did them. Watches, never kills.</p>
+        <span class="tag a" data-i18n="f2.tag">alarm-only by default</span>
       </div>
       <div class="card">
         <div class="icon">🪤</div>
@@ -287,7 +287,7 @@ code{font-family:var(--mono)}
           <h3>🖥️ <span data-i18n="arch.host">DSH host process</span> <span class="chip">in-process</span></h3>
           <div class="box g"><b data-i18n="a1.t">tools/execute guard</b><span data-i18n="a1.d">Scans cordis_define / cordis_run / run_code / workflow before execution.</span></div>
           <div class="box g"><b data-i18n="a2.t">internal/plugin guard</b><span data-i18n="a2.d">Auto-scans newly installed third-party packages + requireAudit gate.</span></div>
-          <div class="box"><b>T1 sentinel</b><span data-i18n="a3.d">Sidecar subprocess polls host /proc → alarm JSON lines back.</span></div>
+          <div class="box"><b>T1 sentinel</b><span data-i18n="a3.d">Sidecar subprocess samples host resources (/proc on Linux, ps/lsof on macOS) → alarm JSON lines back.</span></div>
           <div class="box"><b>T2 hooks</b><span data-i18n="a4.d">Wraps fs / child_process; stack attribution to the plugin package.</span></div>
           <div class="box"><b>🪤 Honeypot</b><span data-i18n="a5.d">Fake key lures; touching them = high-confidence key hunt.</span></div>
           <div class="box cy"><b>webServer /vet/*</b><span data-i18n="a6.d">GET status.json (shield polling) · POST runtime-guard toggle.</span></div>
@@ -300,7 +300,7 @@ code{font-family:var(--mono)}
           <h3>🧠 <span data-i18n="arch.scanner">scanner-bin</span> <span class="chip" data-i18n="arch.isolated">isolated subprocess</span></h3>
           <div class="box"><b data-i18n="s1.t">Read stdin JSON</b><span data-i18n="s1.d">code / files / rules / targetKind / runtime.</span></div>
           <div class="box"><b>AST parse</b><span data-i18n="s2.d">TypeScript compiler API — read-only, never eval'd.</span></div>
-          <div class="box g"><b data-i18n="s3.t">Run rules R1–R12</b><span data-i18n="s3.d">score → staticScore → verdict → single-line stdout JSON.</span></div>
+          <div class="box g"><b data-i18n="s3.t">Run rules R1–R20</b><span data-i18n="s3.d">score → staticScore → verdict → single-line stdout JSON.</span></div>
           <div class="box"><b>⚡ Cache</b><span data-i18n="s4.d">content hash + engine version + rule set + targetKind/runtime.</span></div>
           <div class="box"><b>🧯 OSV</b><span data-i18n="s5.d">Exact-version known-vuln query; silent network downgrade.</span></div>
         </div>
@@ -320,22 +320,22 @@ code{font-family:var(--mono)}
     <div class="dash-grid">
       <div class="chart-card">
         <h3 data-i18n="d1.t">Coverage vs. enforced thresholds</h3>
-        <div class="sub" data-i18n="d1.sub">vitest v8 · v8 provider · thresholds lines/functions ≥ 70%, branches ≥ 50%</div>
+        <div class="sub" data-i18n="d1.sub">vitest v8 · v8 provider · thresholds lines/functions/statements ≥ 85%, branches ≥ 80% (ratchet, round-18)</div>
         <div class="chart-box"><canvas id="covChart"></canvas></div>
       </div>
       <div class="chart-card">
-        <h3 data-i18n="d2.t">243 tests by suite</h3>
-        <div class="sub" data-i18n="d2.sub">239 passed · 4 skipped (platform/external-data)</div>
+        <h3 data-i18n="d2.t">1095 tests by suite</h3>
+        <div class="sub" data-i18n="d2.sub">1095 passed · 0 skipped</div>
         <div class="chart-box"><canvas id="testsChart"></canvas></div>
       </div>
       <div class="chart-card">
         <h3 data-i18n="d3.t">Adversarial matrix verdicts</h3>
-        <div class="sub" data-i18n="d3.sub">52 attack-shape samples across R1–R12</div>
+        <div class="sub" data-i18n="d3.sub">34 mutants + 8 controls across R1–R20</div>
         <div class="chart-box"><canvas id="matrixChart"></canvas></div>
       </div>
       <div class="chart-card">
         <h3 data-i18n="d4.t">Static rule severity map</h3>
-        <div class="sub" data-i18n="d4.sub">Default severity per rule (R1–R12)</div>
+        <div class="sub" data-i18n="d4.sub">Default severity per rule (R1–R20)</div>
         <div class="chart-box"><canvas id="rulesChart"></canvas></div>
       </div>
     </div>
@@ -353,7 +353,7 @@ code{font-family:var(--mono)}
       <div class="trust-item"><div class="n">02</div><p data-i18n="t2">The static layer is physically isolated from plugin code — a separate process, AST read-only, never eval'd.</p></div>
       <div class="trust-item"><div class="n">03</div><p data-i18n="t3">No single merged score — the verdict is never blended with subjective review into one number.</p></div>
       <div class="trust-item"><div class="n">04</div><p data-i18n="t4">Fail-open by default — `mode: report`; deny interception is an explicit deployer opt-in.</p></div>
-      <div class="trust-item"><div class="n">05</div><p data-i18n="t5">Alarm-only runtime guard — watches, never kills. Automatic behavior exists only in the opt-in mode.</p></div>
+      <div class="trust-item"><div class="n">05</div><p data-i18n="t5">Alarm-only runtime guard — watches, never kills. Interception exists only in the opt-in watch mode, for confirmed destructive operations.</p></div>
       <div class="trust-item"><div class="n">06</div><p data-i18n="t6">Not a security boundary — a "speed bump + forensics layer", aligned with DSH's official stance.</p></div>
     </div>
   </div>
@@ -411,15 +411,15 @@ const I18N = {
     "nav.features":"Features","nav.arch":"Architecture","nav.dash":"Dashboard","nav.trust":"Trust boundaries","nav.limits":"Limitations",
     "hero.eyebrow":"A Plugin for DeepSeek Harness (dsh)",
     "hero.title":"The trust layer for<br><span class=\"hl\">DeepSeek Harness</span> plugins.",
-    "hero.lead":"dsh-plugin-vet is the trust layer for DeepSeek Harness: deterministic static scan (R1–R12), an alarm-only runtime guard with honeypot lures, an agent audit-protocol skill, and a live GUI shield. Vet the plugin before it runs on your machine.",
-    "hero.positioning":"A monitoring alarm, not an enforcer.","hero.positioning2":" vet never acts on your behalf — it only does check → alarm → advise. The final call is always yours on your own DSH.",
+    "hero.lead":"dsh-plugin-vet is the trust layer for DeepSeek Harness: deterministic static scan (R1–R20), an alarm-only runtime guard with honeypot lures, an agent audit-protocol skill, and a live GUI shield. Vet the plugin before it runs on your machine.",
+    "hero.positioning":"A monitoring alarm, not an enforcer.","hero.positioning2":" vet never acts on your behalf by default — it only does check → alarm → advise; the opt-in watch mode may block confirmed destructive operations. The final call is always yours on your own DSH.",
     "hero.copy":"Copy","hero.dash":"View dashboard",
     "shield.status":"● live guard · alarm-only",
-    "stats.tests":"tests · 239 passed","stats.cov":"line coverage","stats.rules":"static rules R1–R12","stats.matrix":"adversarial samples","stats.official":"official packages · clean",
+    "stats.tests":"tests · 1095 passed","stats.cov":"line coverage","stats.rules":"static rules R1–R20","stats.matrix":"adversarial samples","stats.official":"official packages · clean",
     "feat.kicker":"What it does","feat.title":"One pipeline, <span class=\"hl\">from download to runtime.</span>",
-    "feat.sub":"vet occupies the whole trust chain — download → scan → audit → score → decide → runtime watch — and stops there: it reports, it advises, it never enforces.",
-    "f1.t":"Deterministic static scan","f1.d":"R1–R12 rules over an AST, verdicts produced only by the static layer — never spoofable by prompt injection. The scanner runs as an isolated subprocess: AST read-only, never eval'd.","f1.tag":"verdict · critical / suspicious / clean",
-    "f2.t":"Runtime guard — alarm only","f2.d":"T1 sentinel watches host /proc (memory, forks, fds); T2 hooks wrap fs/child_process and attribute dangerous operations to the plugin that did them. Watches, never kills.","f2.tag":"never blocks a call",
+    "feat.sub":"vet occupies the whole trust chain — download → scan → audit → score → decide → runtime watch — and by default stops there: it reports, it advises; interception exists only in the opt-in watch mode.",
+    "f1.t":"Deterministic static scan","f1.d":"R1–R20 rules over an AST, verdicts produced only by the static layer — never spoofable by prompt injection. The scanner runs as an isolated subprocess: AST read-only, never eval'd.","f1.tag":"verdict · critical / suspicious / clean",
+    "f2.t":"Runtime guard — alarm only","f2.d":"T1 sentinel watches host resources (Linux: /proc; macOS: ps/lsof — memory, forks, fds); T2 hooks wrap fs/child_process and attribute dangerous operations to the plugin that did them. Watches, never kills.","f2.tag":"alarm-only by default",
     "f3.t":"Honeypot lures","f3.d":"Fake credentials planted in an unobtrusive location (no honeypot keywords — anti-honeypot). Anyone rifling through key files gets caught red-handed with high confidence.","f3.tag":"opt-in · honeypot.enabled",
     "f4.t":"Audit-protocol skill","f4.d":"The agent reviews a plugin in preset steps and writes a health record to disk; `requireAudit` turns \"unaudited\" into \"unusable\". vet ships criteria, not conclusions.","f4.tag":"vet-audit-protocol",
     "f5.t":"Live GUI shield","f5.d":"A green/yellow/red status light in the DSH web header with live metrics, per-alarm advice, one-click dismiss, and a runtime-guard toggle. Click to inspect, never to act.","f5.tag":"status.json · polled",
@@ -429,27 +429,27 @@ const I18N = {
     "arch.host":"DSH host process","arch.isolated":"isolated subprocess","arch.scanner":"scanner-bin","arch.note":"Detail in docs/ARCHITECTURE.md · trust boundaries below.",
     "a1.t":"tools/execute guard","a1.d":"Scans cordis_define / cordis_run / run_code / workflow before execution.",
     "a2.t":"internal/plugin guard","a2.d":"Auto-scans newly installed third-party packages + requireAudit gate.",
-    "a3.d":"Sidecar subprocess polls host /proc → alarm JSON lines back.",
+    "a3.d":"Sidecar subprocess samples host resources (/proc on Linux, ps/lsof on macOS) → alarm JSON lines back.",
     "a4.d":"Wraps fs / child_process; stack attribution to the plugin package.",
     "a5.d":"Fake key lures; touching them = high-confidence key hunt.",
     "a6.d":"GET status.json (shield polling) · POST runtime-guard toggle.",
     "s1.t":"Read stdin JSON","s1.d":"code / files / rules / targetKind / runtime.",
     "s2.d":"TypeScript compiler API — read-only, never eval'd.",
-    "s3.t":"Run rules R1–R12","s3.d":"score → staticScore → verdict → single-line stdout JSON.",
+    "s3.t":"Run rules R1–R20","s3.d":"score → staticScore → verdict → single-line stdout JSON.",
     "s4.d":"content hash + engine version + rule set + targetKind/runtime.",
     "s5.d":"Exact-version known-vuln query; silent network downgrade.",
     "dash.kicker":"Dashboard","dash.title":"Measured, <span class=\"hl\">not marketed.</span>",
     "dash.sub":"Real numbers from the test suite and coverage run — a security layer should be able to show its receipts.",
-    "d1.t":"Coverage vs. enforced thresholds","d1.sub":"vitest v8 · v8 provider · thresholds lines/functions ≥ 70%, branches ≥ 50%",
-    "d2.t":"243 tests by suite","d2.sub":"239 passed · 4 skipped (platform/external-data)",
-    "d3.t":"Adversarial matrix verdicts","d3.sub":"52 attack-shape samples across R1–R12",
-    "d4.t":"Static rule severity map","d4.sub":"Default severity per rule (R1–R12)",
+    "d1.t":"Coverage vs. enforced thresholds","d1.sub":"vitest v8 · v8 provider · thresholds lines/functions/statements ≥ 85%, branches ≥ 80% (ratchet, round-18)",
+    "d2.t":"1095 tests by suite","d2.sub":"1095 passed · 0 skipped",
+    "d3.t":"Adversarial matrix verdicts","d3.sub":"34 mutants + 8 controls across R1–R20",
+    "d4.t":"Static rule severity map","d4.sub":"Default severity per rule (R1–R20)",
     "trust.kicker":"Trust boundaries","trust.title":"Design constraints <span class=\"hl\">that keep it honest.</span>",
     "t1":"The verdict comes only from the deterministic static layer — regex/AST judgments, not spoofable by prompt injection.",
     "t2":"The static layer is physically isolated from plugin code — a separate process, AST read-only, never eval'd.",
     "t3":"No single merged score — the verdict is never blended with subjective review into one number.",
     "t4":"Fail-open by default — `mode: report`; deny interception is an explicit deployer opt-in.",
-    "t5":"Alarm-only runtime guard — watches, never kills. Automatic behavior exists only in the opt-in mode.",
+    "t5":"Alarm-only runtime guard — watches, never kills. Interception exists only in the opt-in watch mode, for confirmed destructive operations.",
     "t6":"Not a security boundary — a \"speed bump + forensics layer\", aligned with DSH's official stance.",
     "lim.kicker":"Known limitations","lim.title":"What we <span class=\"hl\">openly admit</span> it can't catch.",
     "lim.sub":"A trust layer that hides its blind spots isn't a trust layer. All of these are empirically verified and documented.",
@@ -469,15 +469,15 @@ const I18N = {
     "nav.features":"功能","nav.arch":"架构","nav.dash":"仪表盘","nav.trust":"信任边界","nav.limits":"已知局限",
     "hero.eyebrow":"DeepSeek Harness (dsh) 插件",
     "hero.title":"DeepSeek Harness 插件的<br><span class=\"hl\">信任层</span>。",
-    "hero.lead":"dsh-plugin-vet 是 DeepSeek Harness 的信任层：确定性静态扫描（R1–R12）、只报警不拦截的运行时守卫与蜜罐诱饵、agent 审查协议技能，以及实时 GUI 盾牌。先审查插件，再让它在你的机器上跑。",
-    "hero.positioning":"监控报警器，不是打手。","hero.positioning2":" vet 永不替用户动手——只做「检查 → 报警 → 给建议」，最终处置永远由你在自己的 DSH 上决定。",
+    "hero.lead":"dsh-plugin-vet 是 DeepSeek Harness 的信任层：确定性静态扫描（R1–R20）、只报警不拦截的运行时守卫与蜜罐诱饵、agent 审查协议技能，以及实时 GUI 盾牌。先审查插件，再让它在你的机器上跑。",
+    "hero.positioning":"监控报警器，不是打手。","hero.positioning2":" vet 默认永不动手——只做「检查 → 报警 → 给建议」；显式开启 watch 后也只拦截已确认的破坏操作。最终处置永远由你在自己的 DSH 上决定。",
     "hero.copy":"复制","hero.dash":"查看仪表盘",
     "shield.status":"● 实时守卫 · 只报警",
-    "stats.tests":"用例 · 239 通过","stats.cov":"行覆盖率","stats.rules":"静态规则 R1–R12","stats.matrix":"对抗样本","stats.official":"官方包 · 全 clean",
+    "stats.tests":"用例 · 1095 通过","stats.cov":"行覆盖率","stats.rules":"静态规则 R1–R20","stats.matrix":"对抗样本","stats.official":"官方包 · 全 clean",
     "feat.kicker":"它能做什么","feat.title":"一条流水线，<span class=\"hl\">从下载到运行时。</span>",
-    "feat.sub":"vet 占据整条信任链——下载 → 扫描 → 审计 → 评分 → 决定 → 运行时盯梢——并止步于此：报告、建议，绝不执法。",
-    "f1.t":"确定性静态扫描","f1.d":"AST 上的 R1–R12 规则，verdict 只由静态层产出——提示注入无法欺骗。扫描器是独立子进程：AST 只读、从不 eval。","f1.tag":"verdict · critical / suspicious / clean",
-    "f2.t":"运行时守卫 — 只报警","f2.d":"T1 哨兵监控宿主 /proc（内存/子进程/fd）；T2 钩子包装 fs/child_process，把危险操作按栈归因到对应插件。只看，从不杀。","f2.tag":"从不阻断调用",
+    "feat.sub":"vet 占据整条信任链——下载 → 扫描 → 审计 → 评分 → 决定 → 运行时盯梢——默认止步于此：报告、建议；拦截只存在于显式 opt-in 的 watch 模式。",
+    "f1.t":"确定性静态扫描","f1.d":"AST 上的 R1–R20 规则，verdict 只由静态层产出——提示注入无法欺骗。扫描器是独立子进程：AST 只读、从不 eval。","f1.tag":"verdict · critical / suspicious / clean",
+    "f2.t":"运行时守卫 — 只报警","f2.d":"T1 哨兵监控宿主资源（Linux 走 /proc；macOS 走 ps/lsof——内存/子进程/fd）；T2 钩子包装 fs/child_process，把危险操作按栈归因到对应插件。只看，从不杀。","f2.tag":"默认只报警",
     "f3.t":"蜜罐诱饵","f3.d":"在隐蔽位置放置假凭据（无蜜罐关键词——反蜜罐设计）。谁偷偷翻找密钥文件，当场高置信现形。","f3.tag":"opt-in · honeypot.enabled",
     "f4.t":"审查协议技能","f4.d":"agent 按预设步骤审查插件并落盘健康档案；`requireAudit` 把「未经审计」变成「不可用」。vet 只给判据，不给结论。","f4.tag":"vet-audit-protocol",
     "f5.t":"实时 GUI 盾牌","f5.d":"DSH web 头部绿/黄/红状态灯，带实时指标、逐条建议、单击忽略、守卫一键开关。点开查看，从不代你行动。","f5.tag":"status.json · 轮询",
@@ -487,27 +487,27 @@ const I18N = {
     "arch.host":"DSH 宿主进程","arch.isolated":"独立子进程","arch.scanner":"scanner-bin","arch.note":"详见 docs/ARCHITECTURE.md · 信任边界见下。",
     "a1.t":"tools/execute 守卫","a1.d":"执行前扫描 cordis_define / cordis_run / run_code / workflow。",
     "a2.t":"internal/plugin 守卫","a2.d":"新装第三方包自动静态扫描 + requireAudit 门槛。",
-    "a3.d":"旁路子进程轮询宿主 /proc → 报警 JSON 行回传。",
+    "a3.d":"旁路子进程采样宿主资源（Linux：/proc；macOS：ps/lsof）→ 报警 JSON 行回传。",
     "a4.d":"包装 fs / child_process；栈归因到插件包名。",
     "a5.d":"放假密钥诱饵；触碰 = 高置信翻找密钥信号。",
     "a6.d":"GET status.json（盾牌轮询）· POST runtime-guard 开关。",
     "s1.t":"读 stdin JSON","s1.d":"code / files / rules / targetKind / runtime。",
     "s2.d":"TypeScript compiler API —— 只读、从不 eval。",
-    "s3.t":"执行规则 R1–R12","s3.d":"评分 → staticScore → verdict → 单行 stdout JSON。",
+    "s3.t":"执行规则 R1–R20","s3.d":"评分 → staticScore → verdict → 单行 stdout JSON。",
     "s4.d":"内容 hash + 引擎版本 + 规则集 + targetKind/runtime。",
     "s5.d":"精确版本已知漏洞查询；网络失败静默降级。",
     "dash.kicker":"仪表盘","dash.title":"用数据说话，<span class=\"hl\">不靠营销。</span>",
     "dash.sub":"来自测试套件与覆盖率实测的真实数字——安全层应当拿得出收据。",
-    "d1.t":"覆盖率 vs 强制阈值","d1.sub":"vitest v8 · v8 provider · lines/functions ≥ 70%、branches ≥ 50%",
-    "d2.t":"243 用例按套件分布","d2.sub":"239 通过 · 4 跳过（平台/外部数据）",
-    "d3.t":"对抗矩阵 verdict 分布","d3.sub":"52 个攻击形态样本，覆盖 R1–R12",
-    "d4.t":"静态规则严重度地图","d4.sub":"各规则默认严重度（R1–R12）",
+    "d1.t":"覆盖率 vs 强制阈值","d1.sub":"vitest v8 · v8 provider · lines/functions/statements ≥ 85%、branches ≥ 80%（round-18 棘轮）",
+    "d2.t":"1095 用例按套件分布","d2.sub":"1095 通过 · 0 跳过",
+    "d3.t":"对抗矩阵 verdict 分布","d3.sub":"34 个恶意变异 + 8 个良性对照，覆盖 R1–R20",
+    "d4.t":"静态规则严重度地图","d4.sub":"各规则默认严重度（R1–R20）",
     "trust.kicker":"信任边界","trust.title":"让它保持诚实的<span class=\"hl\">设计约束。</span>",
     "t1":"verdict 只由确定性静态层产出——正则/AST 判定，提示注入无法欺骗。",
     "t2":"静态层与插件代码物理隔离——独立进程，AST 只读、从不 eval。",
     "t3":"不合成单一总分——verdict 绝不与主观审查混成一个数字。",
     "t4":"默认 fail-open——`mode: report`；deny 拦截是部署者显式 opt-in。",
-    "t5":"运行时守卫只报警——只看不杀；自动行为只存在于显式 opt-in 模式。",
+    "t5":"运行时守卫默认只报警——只看不杀；拦截只存在于显式 opt-in 的 watch 模式，且仅限已确认的破坏操作。",
     "t6":"不是安全边界——「减速带 + 取证层」，与 DSH 官方立场一致。",
     "lim.kicker":"已知局限","lim.title":"我们<span class=\"hl\">公开承认</span>抓不到的。",
     "lim.sub":"一个藏起盲区的信任层，不配叫信任层。以下全部经过实测验证并有文档记录。",
@@ -561,7 +561,7 @@ function makeCharts(){
     data:{
       labels:['lines','functions','statements','branches'],
       datasets:[{
-        data:[87.67,95.23,87.67,79.75],
+        data:[89.49,93.48,89.49,84.68],
         backgroundColor:['#0ecb8b','#38bdf8','#0ecb8b','#a78bfa'],
         borderRadius:7, barPercentage:.62
       }]
@@ -576,9 +576,9 @@ function makeCharts(){
   charts.tests = new Chart(document.getElementById('testsChart'), {
     type:'bar',
     data:{
-      labels:['scanner','scanner-fixes','plugin','runtime-guard','matrix'],
+      labels:['scanner','runtime','plugins','self','qa'],
       datasets:[{
-        data:[40,25,38,79,61],
+        data:[288,330,232,158,87],
         backgroundColor:['#38bdf8','#60a5fa','#a78bfa','#0ecb8b','#fbbf24'],
         borderRadius:7, barPercentage:.6
       }]
@@ -594,7 +594,7 @@ function makeCharts(){
     type:'doughnut',
     data:{
       labels:[lang==='en'?'critical':'高危','suspicious','clean'],
-      datasets:[{ data:[7,17,28], backgroundColor:['#f87171','#fbbf24','#0ecb8b'], borderColor:'#0b1120', borderWidth:3 }]
+      datasets:[{ data:[6,20,16], backgroundColor:['#f87171','#fbbf24','#0ecb8b'], borderColor:'#0b1120', borderWidth:3 }]
     },
     options:{ responsive:true, maintainAspectRatio:false, cutout:'64%',
       plugins:{ legend:{ position:'bottom', labels:{ color:txt, padding:16 } } } }
@@ -603,11 +603,11 @@ function makeCharts(){
   charts.rules = new Chart(document.getElementById('rulesChart'), {
     type:'bar',
     data:{
-      labels:['R1','R2','R3','R4','R5','R6','R7','R8','R9','R10','R11','R12'],
+      labels:['R1','R2','R3','R4','R5','R6','R7','R8','R9','R10','R11','R12','R13','R14','R15','R16','R17','R18','R19','R20'],
       datasets:[{
-        data:[5,4,4,4,2,1,4,1,4,3,3,4],
+        data:[5,4,4,4,2,1,4,1,4,3,3,4,4,4,2,3,1,1,1,4],
         backgroundColor:(ctx)=>{
-          const sev=[COL.red,COL.amber,COL.red,COL.amber,COL.amber,COL.blue,COL.amber,COL.blue,COL.amber,COL.amber,COL.amber,COL.amber];
+          const sev=[COL.red,COL.amber,COL.red,COL.amber,COL.amber,COL.blue,COL.amber,COL.blue,COL.amber,COL.amber,COL.amber,COL.amber,COL.red,COL.red,COL.amber,COL.amber,COL.blue,COL.blue,COL.blue,COL.red];
           return sev[ctx.dataIndex];
         },
         borderRadius:5, barPercentage:.66

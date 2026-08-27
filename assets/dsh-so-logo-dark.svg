@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="70 60 680 180" role="img" aria-label="dsh.so logo">
+  <defs>
+    <linearGradient id="dshG" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16a34a"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+  </defs>
+  <!-- DSH 品牌方块标记（与 favicon.svg 同构，放大版） -->
+  <rect x="100" y="80" width="140" height="140" rx="35" fill="#0b0f0a"/>
+  <rect x="104" y="84" width="132" height="132" rx="33" fill="none" stroke="#22d3ee" stroke-opacity=".35" stroke-width="8"/>
+  <rect x="124.1" y="115" width="52.5" height="52.5" rx="13.1" fill="url(#dshG)"/>
+  <rect x="165.6" y="145.6" width="52.5" height="52.5" rx="13.1" fill="#22d3ee" opacity=".9"/>
+  <rect x="139.4" y="156.6" width="26.3" height="26.3" rx="8.8" fill="#4ade80" opacity=".7"/>
+  <!-- 深色背景版字标：白色 + 亮绿 -->
+  <text x="296" y="150" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" font-size="118" font-weight="700" letter-spacing="-1" dominant-baseline="central" fill="#f8fafc">dsh<tspan fill="#4ade80">.so</tspan></text>
+</svg>

@@ -87,10 +87,12 @@ export function PluginsListPanel({ pal, dark, t, plugins, onBack, onOpenPlugin }
                         <span style={{ fontSize: 10.5, fontWeight: 700, color: verdictColor }}>
                           {p.verdict ?? t('plugins.never')}
                         </span>
-                        {p.staticScore !== undefined && (
+                        {typeof p.staticScore === 'number' && Number.isFinite(p.staticScore) && (
                           <span style={{ fontSize: 10, color: pal.faint }}>{p.staticScore.toFixed(2)}</span>
                         )}
-                        <span style={{ fontSize: 10, color: pal.faint }}>{fmtRel(p.at, now, relUnits)}</span>
+                        {Number.isFinite(p.at) ? (
+                          <span style={{ fontSize: 10, color: pal.faint }}>{fmtRel(p.at, now, relUnits)}</span>
+                        ) : null}
                       </span>
                     </button>
                   </li>

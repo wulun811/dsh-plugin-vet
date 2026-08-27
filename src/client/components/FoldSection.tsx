@@ -57,7 +57,10 @@ export function FoldSection({ tok, dark, open, onToggle, title, summary, childre
       </div>
       <div style={{
         maxHeight: open ? 420 : 0,
-        overflow: 'hidden',
+        overflowX: 'hidden',
+        // round-22：展开态允许纵向滚动——折叠体内容超过 420px 时此前被硬裁且无任何
+        // 滚动/提示（超长报警文不可达）；收起态仍硬裁（视觉折叠）。
+        overflowY: open ? 'auto' : 'hidden',
         opacity: open ? 1 : 0,
         transition: `max-height 0.4s ${tok.ease}, opacity 0.3s ease`,
       }}>

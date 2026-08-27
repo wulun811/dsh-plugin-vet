@@ -1,5 +1,5 @@
 /**
- * 「关于 vet」介绍面板（P3 迁入次级面板层栈；顶栏 ? 的 hover 快捷通道保留同一组件）。
+ * 「关于 vet」介绍面板（P3 迁入次级面板层栈；顶栏 ? 点击打开同一组件）。
  * 内容与 P0 版一致；壳统一走 SubPanel（玻璃/头部/滚动），定位由编排层负责。
  */
 import type { ReactNode } from 'react'
@@ -7,16 +7,19 @@ import type { T, ThemeTokens } from '../theme.ts'
 import { cardBg, cardInset } from '../theme.ts'
 import { SubPanel } from '../components/SubPanel.tsx'
 import { ShieldIcon } from '../components/ShieldIcon.tsx'
+// 内嵌 logo（build-client.mjs define 注入的 data URI，见 assets.d.ts）
+const vetLogo = __VET_ASSETS__.vetLogo
+const dshSoLogo = __VET_ASSETS__.dshSoLogo
 
 /** 构建时注入：package.json version（scripts/build-client.mjs define）。 */
 declare const __VET_VERSION__: string
 
 /** 介绍栏卖点骨架：5 个分区，每个有图标 + 标题 + 短要点列表。 */
 const INTRO_SECTIONS = [
-  { icon: '🛡', titleKey: 'intro.s1title', bullets: ['intro.s1b1', 'intro.s1b2', 'intro.s1b3'] },
+  { icon: '🛡', titleKey: 'intro.s1title', bullets: ['intro.s1b1', 'intro.s1b2', 'intro.s1b3', 'intro.s1b4'] },
   { icon: '👁', titleKey: 'intro.s2title', bullets: ['intro.s2b1', 'intro.s2b2', 'intro.s2b3'] },
   { icon: '🍯', titleKey: 'intro.s3title', bullets: ['intro.s3b1', 'intro.s3b2', 'intro.s3b3'] },
-  { icon: '📋', titleKey: 'intro.s4title', bullets: ['intro.s4b1', 'intro.s4b2', 'intro.s4b3'] },
+  { icon: '📋', titleKey: 'intro.s4title', bullets: ['intro.s4b1', 'intro.s4b2', 'intro.s4b3', 'intro.s4b4'] },
   { icon: '🔔', titleKey: 'intro.s5title', bullets: ['intro.s5b1', 'intro.s5b2', 'intro.s5b3'] },
 ]
 
@@ -31,12 +34,23 @@ export function IntroPanel({ pal, dark, t, onBack }: {
     <div style={{ width: '100%', height: '100%' }}>
       <SubPanel tok={pal} title={t('intro.title')} ariaLabel={t('intro.aria')} onBack={onBack} backLabel={t('panel.back')}>
         <div style={{ paddingBottom: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
             <ShieldIcon level="green" color={pal.sage} size={18} />
-            <span style={{ fontWeight: 800, fontSize: 15, letterSpacing: '0.02em', color: pal.ink }}>{t('intro.title')}</span>
+            <span style={{ fontWeight: 800, fontSize: 15, letterSpacing: '0.02em', color: pal.ink }}>{t('intro.headline')}</span>
           </div>
-          <div style={{ fontSize: 12, color: pal.faint, marginBottom: 10 }}>
+          {/* 用户反馈 2026-08-27：自家 logo 独占一排 200px（品牌位）；dsh.so logo
+              降格为低调的一行并排（不独占、不跳转）——SVG 已裁白边，
+              33% 宽下字标 ~17px 可读。 */}
+          <div style={{ display: 'flex', justifyContent: 'center', margin: '2px 0 6px' }}>
+            <img src={vetLogo} alt="vet" style={{ width: 200, height: 'auto' }} />
+          </div>
+          <div style={{ textAlign: 'center', fontSize: 12, color: pal.faint, marginBottom: 10 }}>
             @jieai/dsh-plugin-vet v{typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'}
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: pal.faint, marginBottom: 10 }}>
+            <img src={dshSoLogo} alt="dsh.so" style={{ width: '33%', height: 'auto', flexShrink: 0 }} />
+            <span>{t('intro.provider')}</span>
           </div>
 
           <div style={{ fontWeight: 800, fontSize: 13, color: pal.ink, marginBottom: 8 }}>
@@ -85,6 +99,9 @@ export function IntroPanel({ pal, dark, t, onBack }: {
 
           <div style={{ fontSize: 12, color: pal.faint, borderTop: '1px solid ' + pal.borderSoft, paddingTop: 10 }}>
             {t('intro.cost')}
+          </div>
+          <div style={{ fontSize: 12, color: pal.faint, marginTop: 4 }}>
+            {t('intro.position')}
           </div>
         </div>
       </SubPanel>
