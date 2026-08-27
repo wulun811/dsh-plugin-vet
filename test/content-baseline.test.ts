@@ -13,7 +13,7 @@ import {
   baselinePath,
   setBaselineDirForTest,
   type BaselineStore,
-} from '../src/guards/content-baseline.js'
+} from '../lib/guards/content-baseline.js'
 
 describe('content-baseline', () => {
   let testDir: string

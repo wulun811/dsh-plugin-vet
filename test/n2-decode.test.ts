@@ -8,7 +8,7 @@ function findCall(s: SourceFile, name: string): CallExpression {
     if (ts.isCallExpression(n)) {
       const callee = n.expression
       if (ts.isIdentifier(callee) && callee.text === name) { found = n; return }
-      if (ts.isPropertyAccessExpression(callee) && name === "Buffer" && callee.name.text === "from") { found = n; return }
+      if (ts.isPropertyAccessExpression(callee) && callee.name.text === name) { found = n; return }
       if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === name) { found = n; return }
     }
     ts.forEachChild(n, walk)
@@ -95,6 +95,47 @@ describe("tryDecodeLiteral（解码器单元）", () => {
     expect(d).toBeDefined()
     expect(d!.text).toBe("https://evil.com/x")
   })
+
+  it("round-16 Array.join 组装 → 明文（method=concat；拼 separator）", () => {
+    const s = sf(`const u = ["https://", "evil", ".com/x"].join("")`)
+    const call = findCall(s, "join")
+    const d = tryDecodeLiteral(call, s)
+    expect(d).toBeDefined()
+    expect(d!.method).toBe("concat")
+    expect(d!.text).toBe("https://evil.com/x")
+  })
+
+  it("round-16 Array.join 默认分隔符 = ','（JS 语义）", () => {
+    const s = sf(`const u = ["a", "b"].join()`)
+    const call = findCall(s, "join")
+    const d = tryDecodeLiteral(call, s)
+    expect(d).toBeDefined()
+    expect(d!.text).toBe("a,b")
+  })
+
+  it("round-16 join 含动态元素 → undefined（不猜测）", () => {
+    const s = sf(`const u = ["https://", url, ".com"].join("")`)
+    const call = findCall(s, "join")
+    expect(tryDecodeLiteral(call, s)).toBeUndefined()
+  })
+
+  it("round-16 Buffer.from(拼接串, base64) → 明文（与 atob 递归对齐）", () => {
+    const s = sf(`const b = "aHR0cHM6Ly9ldmlsLmNvbS94" + "Lw=="; const u = Buffer.from(b, "base64")`)
+    const call = findCall(s, "Buffer")
+    const d = tryDecodeLiteral(call, s)
+    expect(d).toBeDefined()
+    expect(d!.method).toBe("base64")
+    expect(d!.text).toBe("https://evil.com/x/")
+  })
+
+  it("round-16 Buffer.from(标识符, hex) → 明文（递归分支也覆盖标识符）", () => {
+    const s = sf(`const h = "2f6574632f706173737764"; const p = Buffer.from(h, "hex")`)
+    const call = findCall(s, "Buffer")
+    const d = tryDecodeLiteral(call, s)
+    expect(d).toBeDefined()
+    expect(d!.method).toBe("hex")
+    expect(d!.text).toBe("/etc/passwd")
+  })
 })
 
 describe("collectDecodedLiterals（全文件采集）", () => {
@@ -141,5 +182,26 @@ describe("N2 解码语料并入规则", () => {
     const res = scan(codeReq(`fetch("https://" + "discord" + ".com/api/webhooks/1")`))
     expect(res.ok).toBe(true)
     expect(findingOf(res.report!, "R13").some(f => f.decodedFrom === "template")).toBe(true)
+  })
+
+  it("round-16 join 藏 webhook → R13 命中（decodedFrom=concat）", () => {
+    const res = scan(codeReq(`fetch(["https://", "discord.com/api/webhooks/1"].join(""))`))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, "R13").some(f => f.decodedFrom === "concat")).toBe(true)
+  })
+
+  it("round-16 R11 语料门控：文件无任何 fs 足迹时解码敏感路径不判红（实证 FP 形态）", () => {
+    const res = scan(codeReq(`const token = Buffer.from("L2V0Yy9wYXNzd2Q6cm9vdDp4", "base64").toString(); console.log("token:", token)`))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, "R11")).toHaveLength(0)
+    expect(res.report!.verdict).toBe("clean")
+  })
+
+  it("round-16 R11 语料门控：有 fs 足迹时解码敏感路径照常判红", () => {
+    const res = scan(codeReq(`const token = Buffer.from("L2V0Yy9wYXNzd2Q6cm9vdDp4", "base64").toString(); require("fs").readFileSync(token)`))
+    expect(res.ok).toBe(true)
+    const r11 = findingOf(res.report!, "R11").find(f => f.decodedFrom === "base64")
+    expect(r11).toBeDefined()
+    expect(r11!.message).toContain("解码还原")
   })
 })

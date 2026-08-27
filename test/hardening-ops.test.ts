@@ -118,16 +118,35 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
 
   describe('M9 侧车 PID 身份校验', () => {
     it.skipIf(process.platform === 'win32')('cmdline 含 vet-sidecar 才杀；非侧车进程拒绝终止（PID 复用保护）', () => {
-      const sidecar = spawn(process.execPath, ['-e', 'setInterval(()=>{},1e9)', '--vet-sidecar'], { stdio: 'ignore' })
+      // round-18 review（根因修复）：旧夹具 spawn(node, ['-e', script, '--vet-sidecar']) 里
+      // flag 位于 -e 脚本之后 → 被 node 当**自身选项**解析 → bad option exit(9)，子进程从不存活；
+      // 用例此前能过纯属僵尸窗口竞态（同步测试阻塞 libuv reaper，/proc/<pid>/cmdline 残读），
+      // 全量并行下实测 flake。生产形态（runtime-guard.ts:304）是 [sidecarPath, '--vet-sidecar']
+      // ——脚本路径在前、flag 是脚本 argv，选项解析器不碰。夹具与生产同构才是真验证。
+      // 夹具目录/文件刻意不含 "vet-sidecar" 连续子串——innocent 的 cmdline 必须干净。
+      const dir = mkdtempSync(join(tmpdir(), 'm9-fixture-'))
+      const script = join(dir, 'keepalive.js')
+      writeFileSync(script, 'setInterval(() => {}, 1e9)')
+      const sidecar = spawn(process.execPath, [script, '--vet-sidecar'], { stdio: 'ignore' })
       const pid1 = sidecar.pid!
-      expect(pidCmdlineIsVetSidecar(pid1)).toBe(true)
-      const killed = safeKillSidecar(pid1)
-      expect(killed).toBe(true)
-      const innocent = spawn(process.execPath, ['-e', 'setInterval(()=>{},1e9)'], { stdio: 'ignore' })
-      const pid2 = innocent.pid!
-      expect(pidCmdlineIsVetSidecar(pid2)).toBe(false)
-      expect(safeKillSidecar(pid2)).toBe(false)
-      innocent.kill()
+      let innocent: ReturnType<typeof spawn> | undefined
+      // exec 完成前 /proc/<pid>/cmdline 尚无标记（并行负载下窗口可达数百 ms），轮询等待就绪
+      // （同 QA-8 抖动吸收，预算 10s；就绪即出，正常路径 <100ms）。
+      const deadline = Date.now() + 10_000
+      const nap = new Int32Array(new SharedArrayBuffer(4))
+      try {
+        while (Date.now() < deadline && !pidCmdlineIsVetSidecar(pid1)) Atomics.wait(nap, 0, 0, 25)
+        expect(pidCmdlineIsVetSidecar(pid1)).toBe(true)
+        expect(safeKillSidecar(pid1)).toBe(true)
+        innocent = spawn(process.execPath, [script], { stdio: 'ignore' })
+        const pid2 = innocent.pid!
+        expect(pidCmdlineIsVetSidecar(pid2)).toBe(false)
+        expect(safeKillSidecar(pid2)).toBe(false)
+      } finally {
+        try { process.kill(pid1) } catch { /* 已随断言通过被杀或已退出（ESRCH） */ }
+        try { innocent?.kill() } catch { /* 同上 */ }
+        rmSync(dir, { recursive: true, force: true })
+      }
     })
   })
 

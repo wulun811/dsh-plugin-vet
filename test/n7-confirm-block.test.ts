@@ -9,6 +9,7 @@ import {
 import {
   DEFAULT_HOOK_CONFIG, patchModule, classifyOp, withVetSelfIo,
 } from '../lib/guard/runtime-hooks.js'
+import { markOfficialTrusted, resetOfficialTrustForTest } from '../lib/guard/runtime-attrib.js'
 
 /** patchModule 返回的 disposer 统一在 afterAll 清理（避免串测）。 */
 const patches: (() => void)[] = []
@@ -18,6 +19,7 @@ describe('N7 decideBlock：族 2 凭据本体（精确文件级）', () => {
   let dir = ''
   beforeEach(() => {
     resetConfirmBlock()
+    resetOfficialTrustForTest()  // round-16（SEC-1）：信任锚按测试隔离（修正豁免用例不再串测）
     dir = mkdtempSync(join(tmpdir(), '.n7-h-'))
     // C3（review）：凭据清单基准 = 模块加载快照——测试经 setCredentialHomeForTest 覆写，
     // 不再依赖运行时改 process.env.HOME（快照后 env 注入对拦截面无效，见下方回归用例）
@@ -93,6 +95,20 @@ describe('N7 decideBlock：族 1 破坏/勒索确认后拦截', () => {
     for (const op of expected) expect(BLOCK_FS_OPS.has(op), op).toBe(true)
     expect(BLOCK_FS_OPS.has('appendFile')).toBe(false)
     expect(BLOCK_FS_OPS.has('appendFileSync')).toBe(false)
+    // round-22：open/openSync 不属于 BLOCK_FS_OPS（读/探测语义），写标志形态在
+    // decideBlock 内单独判定（族 1 写标志 open 也要拦）
+    expect(BLOCK_FS_OPS.has('open')).toBe(false)
+    expect(BLOCK_FS_OPS.has('openSync')).toBe(false)
+  })
+
+  // round-22（族 1 open 写入面）：确认破坏插件此前可用 openSync(path,'w') 打开即截断
+  // 任意目标（BLOCK_FS_OPS 不含 open，族 1 判定短路）——写标志 open 与 writeFile 同属破坏
+  it('族 1 + open/openSync 写标志 → 拦截；只读标志 → 不拦', () => {
+    confirmBlock.markFamily1('extorter')
+    expect(decideBlock('extorter', 'open', ['/home/u/a.txt', 'w'])?.family).toBe(1)
+    expect(decideBlock('extorter', 'openSync', ['/home/u/a.txt', 'w+'])?.family).toBe(1)
+    expect(decideBlock('extorter', 'open', ['/home/u/a.txt', 'r'])).toBeNull()
+    expect(decideBlock('extorter', 'openSync', ['/home/u/a.txt', 'rs'])).toBeNull()
   })
 })
 
@@ -132,7 +148,7 @@ describe('N7 族 3/4 谓词（alarm-only，永不拦截）', () => {
 })
 
 describe('N7 接线：hooks 包装器拦截矩阵（每族三向）', () => {
-  beforeEach(() => { resetConfirmBlock() })
+  beforeEach(() => { resetConfirmBlock(); resetOfficialTrustForTest() })
 
 
 
@@ -197,11 +213,23 @@ describe('N7 接线：hooks 包装器拦截矩阵（每族三向）', () => {
     }
   })
 
-  it('豁免 1：官方归因永不拦截（族 1 标记也不拦）', () => {
+  it('豁免 1：内容信任锚官方归因永不拦截（族 1 标记也不拦）', () => {
     const mod: Record<string, unknown> = { writeFile: (p: string, d: string) => true }
     confirmBlock.markFamily1('@deepseek-ai/evil')
+    // round-16（SEC-1）：官方豁免 = 内容信任锚（markOfficialTrusted 模拟 classifyOfficial
+    // match / registry 对账通过后的登记）；仅名字前缀不再构成豁免（见下方 SEC-1 用例）
+    markOfficialTrusted('@deepseek-ai/evil')
     patches.push(patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, () => {}, () => rootFor('@deepseek-ai/evil')))
     expect(() => (mod.writeFile as (p: string, d: string) => unknown)('/home/u/a.txt', 'x')).not.toThrow()
+  })
+
+  it('SEC-1：仅名字前缀的官方归因不再豁免——伪名包照常拦截（族 1 标记生效）', () => {
+    const mod: Record<string, unknown> = { writeFile: (p: string, d: string) => true }
+    confirmBlock.markFamily1('@deepseek-ai/evil')
+    // 不加 markOfficialTrusted：@deepseek-ai/* 前缀在 SEC-1 后不再是拦截豁免（伪名 tarball
+    // 可伪造前缀；内容信任锚才作数）——族 1 破坏确认后照常拦截
+    patches.push(patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, () => {}, () => rootFor('@deepseek-ai/evil')))
+    expect(() => (mod.writeFile as (p: string, d: string) => unknown)('/home/u/a.txt', 'x')).toThrow(/vet.*拦截/)
   })
 
   it('豁免 2：无主操作永不拦截（归因映射为空 → plugin undefined）', () => {
@@ -266,5 +294,62 @@ describe('N7 接线：hooks 包装器拦截矩阵（每族三向）', () => {
     confirmBlock.setMode('alarm')
     patches.push(patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, () => {}, () => rootFor('evil')))
     expect(() => (mod.writeFile as (p: string, d: string) => unknown)('/home/u/.bashrc', 'x')).not.toThrow()
+  })
+})
+describe('round-22：N7 接线——open/openSync 进入判定面（族 2 SA2-5 可达性回归）', () => {
+  beforeEach(() => { resetConfirmBlock(); resetOfficialTrustForTest() })
+
+  // 归因脚手架（与既有接线测试同款）：测试文件路径 → 插件名
+  const rootFor = (name: string): Map<string, string> =>
+    new Map([[process.cwd() + '/test', name]])
+
+  it('族 2：openSync(凭据, "w") 经包装器 → 抛错拦截 + n7-block（此前 blockRelevant 短路不可达）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.n7-open-'))
+    setCredentialHomeForTest(dir)
+    try {
+      const npmrc = join(dir, '.npmrc')
+      writeFileSync(npmrc, 'old') // 已存在：打开即截断 = 原文不可恢复
+      const mod: Record<string, unknown> = { openSync: (p: string, f: string) => 3 }
+      const sunk: string[] = []
+      patches.push(patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, (a) => sunk.push(a.kind), () => rootFor('evil')))
+      expect(() => (mod.openSync as (p: string, f: string) => unknown)(npmrc, 'w')).toThrow(/vet.*拦截/)
+      expect(sunk).toContain('n7-block')
+    } finally {
+      setCredentialHomeForTest(undefined)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('族 2：open(凭据, "r") 只读 → 不拦（写标志判定在先）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.n7-open-r-'))
+    setCredentialHomeForTest(dir)
+    try {
+      const npmrc = join(dir, '.npmrc')
+      writeFileSync(npmrc, 'old')
+      const mod: Record<string, unknown> = { open: (p: string, f: string, cb: () => void) => { cb() } }
+      const sunk: string[] = []
+      patches.push(patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, (a) => sunk.push(a.kind), () => rootFor('evil')))
+      expect(() => (mod.open as (p: string, f: string, cb: () => void) => unknown)(npmrc, 'r', () => {})).not.toThrow()
+      expect(sunk).not.toContain('n7-block')
+    } finally {
+      setCredentialHomeForTest(undefined)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('族 1：确认插件 openSync(普通文件, "w") → 拦截（fd 面破坏同属族 1 面）', () => {
+    const mod: Record<string, unknown> = { openSync: (p: string, f: string) => 3 }
+    confirmBlock.markFamily1('extorter')
+    const sunk: string[] = []
+    patches.push(patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, (a) => sunk.push(a.kind), () => rootFor('extorter')))
+    expect(() => (mod.openSync as (p: string, f: string) => unknown)('/home/u/a.txt', 'w')).toThrow(/vet.*拦截/)
+    expect(sunk).toContain('n7-block')
+  })
+
+  it('族 1：确认插件 openSync(普通文件, "r") → 不拦（只读不是破坏）', () => {
+    const mod: Record<string, unknown> = { openSync: (p: string, f: string) => 3 }
+    confirmBlock.markFamily1('extorter')
+    patches.push(patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, () => {}, () => rootFor('extorter')))
+    expect(() => (mod.openSync as (p: string, f: string) => unknown)('/home/u/a.txt', 'r')).not.toThrow()
   })
 })

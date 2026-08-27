@@ -91,3 +91,35 @@ describe('vet_label / vet_diff 单记录渲染边界（三轮审查回归）', (
     expect(rendered[0]!.text).not.toContain('undefined')
   })
 })
+describe('round-22：残缺记录 ghostDeps/zombieDeps 为 null → 渲染不崩', () => {
+  let testDir: string
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'vet-render22-'))
+    setCapabilitiesDirForTest(testDir)
+  })
+  afterEach(() => {
+    setCapabilitiesDirForTest(undefined)
+    rmSync(testDir, { recursive: true, force: true })
+  })
+
+  it('vet_label：ghostDeps:null / zombieDeps:null → execute+render 全程不抛错', async () => {
+    writeFileSync(join(testDir, 'capabilities.json'), JSON.stringify({
+      records: {
+        '@x/ghost@1.0.0': {
+          name: '@x/ghost', version: '1.0.0', recordedAt: Date.now(),
+          capabilities: {
+            hosts: [], fsPaths: [], spawnCmds: [], imports: ['dep'], hasNetwork: false, hasExec: false,
+            ghostDeps: null, zombieDeps: null,
+          },
+        },
+      },
+    }))
+    const tool = createVetLabelTool()
+    const args = { package: '@x/ghost' }
+    const value = await tool.execute(args) as Record<string, unknown>
+    const rendered = tool.output.render(args as never, value as never) as { type: string; text: string }[]
+    expect(rendered[0]!.text).toContain('@x/ghost')
+    expect(rendered[0]!.text).not.toContain('幽灵依赖') // null 段不渲染（不崩也不画假行）
+    expect(rendered[0]!.text).toContain('dep')
+  })
+})

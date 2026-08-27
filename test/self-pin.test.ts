@@ -63,13 +63,17 @@ describe('pinStateFor（round-16：any-pin 匹配 + 升级窗口）', () => {
 })
 
 describe('listShippedFiles（round-16：发布物范围，生产安装可 pinned-match）', () => {
-  it('白名单：lib/ + 根级清单 + docs/ 进面；src/ 与 vet-self-pins.json 不进面', () => {
+  it('白名单：lib/ + 根级清单 + docs/ARCHITECTURE.md 进面；docs/ 其他文件不进面（QA-6）；src/ 与 vet-self-pins.json 不进面', () => {
     const dir = tmpTree({
       'lib/index.js': 'a',
       'lib/scanner/x.js': 'b',
       'package.json': '{}',
       'README.md': 'x',
       'docs/ARCHITECTURE.md': 'y',
+      // round-16（QA-6）：docs/ 前缀收窄为 ARCHITECTURE.md——local/ 与 MUTANT-QA.md
+      // 不进 tarball（files 白名单仅 ARCHITECTURE.md），旧前缀会让钉扎范围 ⊋ 发布物
+      'docs/local/design.html': 'd',
+      'docs/MUTANT-QA.md': 'm',
       'src/report/self-pin.ts': 'z',
       'vet-self-pins.json': '{}',
       'cordis.patch.yml': 'p',

@@ -154,4 +154,13 @@ describe('computeSelfScore（与 scanner-bin/score.ts 镜像）', () => {
     expect(computeSelfVerdict(findings)).toBe('clean')
     expect(computeSelfScore(findings)).toBe(100)
   })
+  it('未知 severity（协议漂移/伪造报告）不 NaN 整分（round-21 与 score.ts ?? 0 对齐）', () => {
+    const poisoned = [
+      F({ rule: 'R1', severity: 'critical', message: 'a', evidence: 'a' }),
+      { ...F({ rule: 'RX', severity: 'info', message: 'x', evidence: '' }), severity: 'apocalypse' } as unknown as Finding,
+    ]
+    const s = computeSelfScore(poisoned)
+    expect(Number.isFinite(s)).toBe(true)
+    expect(s).toBe(55) // critical certain 45 → 55；未知按 0 计分但不再摧毁形状
+  })
 })

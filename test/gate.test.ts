@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // Mock scan and buildRequest before importing gate
-vi.mock('../src/scanner/client.js', () => ({
+vi.mock('../lib/scanner/client.js', () => ({
   scan: vi.fn(),
   // round-5（B-A5）：gate 的预算已收敛到 scanBudget 单源——mock 补真实实现
   scanBudget: (files: number, explicitMs?: number, capMs?: number) => {
@@ -13,14 +13,14 @@ vi.mock('../src/scanner/client.js', () => ({
   },
 }))
 
-vi.mock('../src/tools/scan-plugin.js', () => ({
+vi.mock('../lib/tools/scan-plugin.js', () => ({
   buildRequest: vi.fn(),
 }))
 
-import { scan } from '../src/scanner/client.js'
-import { buildRequest } from '../src/tools/scan-plugin.js'
-import { runGate } from '../src/gate.js'
-import type { ScanResponse } from '../src/scanner/protocol.js'
+import { scan } from '../lib/scanner/client.js'
+import { buildRequest } from '../lib/tools/scan-plugin.js'
+import { runGate } from '../lib/gate.js'
+import type { ScanResponse } from '../lib/scanner/protocol.js'
 
 const mockScan = vi.mocked(scan)
 const mockBuildRequest = vi.mocked(buildRequest)
@@ -251,5 +251,39 @@ describe('runGate', () => {
     // mode defaults to 'report' → blocked is always false
     expect(result.blocked).toBe(false)
     expect(result.verdict).toBe('critical')
+  })
+})
+
+describe('round-22：CLI 参数与 deny 判定 fail-closed', () => {
+  it('parseCliArgs：--key=value 与 --key value 双形态等价（旧实现 --mode=deny 静默失效）', async () => {
+    const { parseCliArgs } = await import('../lib/cli-args.js')
+    const eq = parseCliArgs(['node', 'vet-gate', '--mode=deny', '--denyOn=suspicious', '--timeout=30000', '--osv'])
+    expect(eq.mode).toBe('deny')
+    expect(eq.denyOn).toBe('suspicious')
+    expect(eq.timeout).toBe('30000')
+    expect(eq.osv).toBe(true)
+    const sp = parseCliArgs(['vet-gate', '--mode', 'deny', '--package', '/tmp/x'])
+    expect(sp.mode).toBe('deny')
+    expect(sp.package).toBe('/tmp/x')
+    // 混合形态
+    const mix = parseCliArgs(['--mode=deny', '--format', 'json'])
+    expect(mix.mode).toBe('deny')
+    expect(mix.format).toBe('json')
+  })
+
+  it('decideDenyBlock：非法 denyOn 归位最严档位 critical（fail-closed，不静默失效）', async () => {
+    const { decideDenyBlock } = await import('../lib/gate.js')
+    // 非法 denyOn：旧实现 `RANK[verdict] >= undefined` 恒 false → deny 对任何判定都失效；
+    // 修复后按最严档位 critical 处理（可疑不拦、critical 拦）
+    expect(decideDenyBlock('deny', 'bogus', 'suspicious', true)).toBe(false)
+    expect(decideDenyBlock('deny', 'bogus', 'critical', true)).toBe(true)
+    expect(decideDenyBlock('deny', 'bogus', 'clean', true)).toBe(false) // clean 仍放行
+    // 合法值语义不变
+    expect(decideDenyBlock('deny', 'critical', 'critical', true)).toBe(true)
+    expect(decideDenyBlock('deny', 'critical', 'suspicious', true)).toBe(false)
+    expect(decideDenyBlock('deny', 'suspicious', 'suspicious', true)).toBe(true)
+    // report 模式不拦；未知 verdict fail-closed
+    expect(decideDenyBlock('report', 'bogus', 'suspicious', true)).toBe(false)
+    expect(decideDenyBlock('deny', 'critical', 'alien', false)).toBe(true)
   })
 })

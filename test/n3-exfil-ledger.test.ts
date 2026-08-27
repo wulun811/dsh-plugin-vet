@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  ExfilLedger, isEncryptionRename, isNoisePath, resetExfilLedger,
+  ExfilLedger, isEncryptionRename, isNoisePath, resetExfilLedger, shouldPruneReadTimes,
 } from '../lib/guard/exfil-ledger.js'
 import {
   DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, isTrackedNetHost, chunkBytes,
@@ -416,5 +416,36 @@ describe('round-16 S2：窗口数组计数上限（防无界增长 + O(n²)）',
   it('stateSize：未知插件 → undefined', () => {
     const l = new ExfilLedger()
     expect(l.stateSize('ghost')).toBeUndefined()
+  })
+})
+
+describe('round-21：readTimes 修剪时间闸（观测放大防护）', () => {
+  it('shouldPruneReadTimes：阈值以下恒 false；初始放行；间隔未到不重扫；恰好越界扫', () => {
+    expect(shouldPruneReadTimes(256, 10_000, 0, 5000)).toBe(false) // 热路径零开销
+    expect(shouldPruneReadTimes(257, 10_000, 0, 5000)).toBe(true) // 初始 0 → 首次越阈即扫
+    expect(shouldPruneReadTimes(300, 12_000, 10_000, 5000)).toBe(false) // 间隔未到
+    expect(shouldPruneReadTimes(300, 15_000, 10_000, 5000)).toBe(true) // >= 边界放行
+  })
+
+  it('集成：越阈扫描清陈旧——被剪枝的旧读不再参与 IN_PLACE 判定（对照面命中）', () => {
+    vi.useFakeTimers()
+    try {
+      const l = new ExfilLedger({ windowMs: 5000, inPlaceN: 1 })
+      // t0：300 个不同敏感路径（越 256 阈 → 首扫发生但键都在窗口内，不删）
+      for (let i = 0; i < 300; i++) {
+        l.observeFs(fsEvt({ plugin: 'p', op: 'readFileSync', target: `/home/u/.ssh/f${i}`, sensitive: true, bytes: 10 }))
+      }
+      vi.advanceTimersByTime(6000) // 全部出窗
+      // 再读一个 → 过闸（距首扫 ≥ windowMs）→ 全表修剪，300 个陈旧键清出
+      l.observeFs(fsEvt({ plugin: 'p', op: 'readFileSync', target: '/home/u/.ssh/f300', sensitive: true, bytes: 10 }))
+      const afterPrune = l.observeFs(fsEvt({ plugin: 'p', op: 'writeFileSync', target: '/home/u/.ssh/f0', bytes: 5 }))
+      expect(afterPrune.some(a => a.kind === 'n3-in-place')).toBe(false)
+      // 对照：不越阈的插件，窗口内读→写正常命中（证明检测通路本身没坏）
+      l.observeFs(fsEvt({ plugin: 'q', op: 'readFileSync', target: '/home/u/.ssh/g0', sensitive: true, bytes: 5 }))
+      const ctrl = l.observeFs(fsEvt({ plugin: 'q', op: 'writeFileSync', target: '/home/u/.ssh/g0', bytes: 5 }))
+      expect(ctrl.some(a => a.kind === 'n3-in-place')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

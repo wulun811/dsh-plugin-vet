@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { describeScannerCrash } from '../src/scanner/client.js'
+import { describeScannerCrash } from '../lib/scanner/client.js'
 
 /**
  * 0.2.4 用户机回归：typescript 被误删后，扫描子进程启动即崩，用户看到的警报是

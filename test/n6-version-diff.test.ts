@@ -228,6 +228,21 @@ describe('n6 version diff (upgrade behavioral diff)', () => {
       expect(removed.hosts).toEqual([])
     })
 
+    it('diffManifests 对字段级损坏容错（round-21：数组字段为标量 → 不抛 TypeError、整包差分不静默）', () => {
+      // 篡改/手工编辑落盘记录把 hosts 写成字符串：对象级守卫与 ?? [] 都拦不住 'abc'.filter——
+      // 曾致 recordScan 的 catch 吞掉整次记录（该包 upgrade-diff 永久失效且新记录永不落盘）。
+      const { added, removed } = diffManifests(
+        manifest({ hosts: 'abc' as unknown as string[] }),
+        manifest({ hosts: ['a'] }),
+      )
+      expect(added.hosts).toEqual(['a']) // 损坏 prev 按空集：a 算新增
+      expect(removed.hosts).toEqual([])
+      // 反向：next 损坏也只是按空集差分，绝不抛
+      const back = diffManifests(manifest({ fsPaths: ['/x'] }), manifest({ fsPaths: { o: 1 } as unknown as string[] }))
+      expect(back.removed.fsPaths).toEqual(['/x'])
+      expect(back.added.fsPaths).toEqual([])
+    })
+
     it('upgradeSeverity：无新增 → null；单新增 → yellow；组合 → red', () => {
       expect(upgradeSeverity({ hosts: [], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false })).toBeNull()
       expect(upgradeSeverity({ hosts: ['x'], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false })).toBe('yellow')

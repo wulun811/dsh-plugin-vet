@@ -225,15 +225,15 @@ describe('decideRespawn / t2AlarmId（P0-2/P1-6 判定逻辑）', () => {
   })
 })
 
-describe('P0-6：sidecarSupportedOn 平台门（Windows/macOS 显式跳过 T1）', () => {
-  it('linux → true（唯一支持的平台）', () => {
+describe('P0-6/round-19：sidecarSupportedOn 平台门（Linux + macOS 支持，其余跳过 T1）', () => {
+  it('linux / darwin → true（Linux 走 /proc，macOS 走 ps/lsof）', () => {
     expect(sidecarSupportedOn('linux')).toBe(true)
-    expect(sidecarSupportedOn(process.platform)).toBe(process.platform === 'linux')
+    expect(sidecarSupportedOn('darwin')).toBe(true)
+    expect(sidecarSupportedOn(process.platform)).toBe(process.platform === 'linux' || process.platform === 'darwin')
   })
 
-  it('win32 / darwin / freebsd 等 → false（不拉哨兵，避免"首轮 exit→重拉×5"噪音）', () => {
+  it('win32 / freebsd 等 → false（不拉哨兵，避免"首轮 exit→重拉×5"噪音）', () => {
     expect(sidecarSupportedOn('win32')).toBe(false)
-    expect(sidecarSupportedOn('darwin')).toBe(false)
     expect(sidecarSupportedOn('freebsd')).toBe(false)
     expect(sidecarSupportedOn('sunos')).toBe(false)
     expect(sidecarSupportedOn('openbsd')).toBe(false)
@@ -270,7 +270,9 @@ describe('round-16 S6：hostPpidChanged（宿主 PID 复用复检）', () => {
   it('本进程 ppid 未变 → false（不误杀）', () => {
     expect(hostPpidChanged(process.ppid)).toBe(false)
   })
-  it.skipIf(process.platform === 'win32')('ppid 与快照不符 → true（宿主退出后哨兵被 init 收养——kill(0) 在 PID 复用下误判存活的对冲）', () => {
+  // round-19（mac CI 兼容）：true 分支依赖 /proc 真读——macOS/其他无 /proc 平台 hostPpidChanged
+  // 恒走 catch→false（这正是它的受限环境契约），故该断言仅 Linux 有效；旧门 skipIf(win32) 是漏洞。
+  it.skipIf(process.platform !== 'linux')('ppid 与快照不符 → true（宿主退出后哨兵被 init 收养——kill(0) 在 PID 复用下误判存活的对冲）', () => {
     // 传一个不可能等于当前 ppid 的期望值（快照语义：宿主死亡后本进程 ppid 必变）
     expect(hostPpidChanged(process.ppid + 1)).toBe(true)
   })
@@ -453,6 +455,15 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     expect(isSensitivePath('/home/u/.ssh/node_modules/x', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
   })
 
+  it('round-17：~/.dsh/**/node_modules 豁免语义保持（顺序/尾斜杠边界）', () => {
+    // /.dsh/ 段之后有 /node_modules/ 段 → 豁免（hoisted 顶层树）
+    expect(isSensitivePath('/home/u/.dsh/.npm-cache/node_modules/x/y.js', DEFAULT_HOOK_CONFIG, 'read')).toBe(false)
+    // 顺序反了（node_modules 在 .dsh 之前）→ 不豁免；.ssh 敏感段照报
+    expect(isSensitivePath('/home/u/.ssh/node_modules/y/.dsh/x', DEFAULT_HOOK_CONFIG, 'read')).toBe(true)
+    // rmdir node_modules 本体（无尾斜杠）不在豁免内——与旧正则一致
+    expect(isSensitivePath('/home/u/.dsh/node_modules', DEFAULT_HOOK_CONFIG)).toBe(true)
+  })
+
   it('isSessionLogFile: 识别会话日志文件（用于轮换误报降噪）', () => {
     expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl.zst')).toBe(true)
     expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.jsonl.zstd')).toBe(true)
@@ -465,6 +476,9 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     // 非会话目录下的日志文件不算
     expect(isSessionLogFile('/home/user/.dsh/profiles/web/session.jsonl.zst')).toBe(false)
     expect(isSessionLogFile('/tmp/session.jsonl.zst')).toBe(false)
+    // round-17（去嵌套量词重写后的语义保持）：非字母数字分片不命中（.2026-01 带连字符）
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/session.log.2026-01')).toBe(false)
+    expect(isSessionLogFile('/home/user/.dsh/sessions/abc/a.jsonl.9a3')).toBe(true)
     // 会话目录下的非日志文件不算
     expect(isSessionLogFile('/home/user/.dsh/sessions/abc/credentials')).toBe(false)
     expect(isSessionLogFile('/home/user/.dsh/sessions/abc/config.json')).toBe(false)
@@ -801,13 +815,14 @@ describe('patchModule（包装 + 恢复）', () => {
   })
 })
 
-describe('readHostMetrics（宿主实时指标）', () => {
-  it('Linux 下返回完整形状且字段在界内', () => {
+describe('readHostMetrics（宿主实时指标·跨平台容差）', () => {
+  it('返回完整形状且字段在界内（Linux 全量；macOS 首轮 -1/0 回退合法）', () => {
     const m = readHostMetrics()
     expect(m.rssMb).toBeGreaterThanOrEqual(0)
     expect(m.cpuPct).toBeGreaterThanOrEqual(0)
-    expect(m.ioReadMb).toBeGreaterThanOrEqual(0)
-    expect(m.ioWriteMb).toBeGreaterThanOrEqual(0)
+    // io 自 round-20 起"不可得 = -1"（macOS/受限容器），不再伪装 0
+    expect(m.ioReadMb === -1 || m.ioReadMb >= 0).toBe(true)
+    expect(m.ioWriteMb === -1 || m.ioWriteMb >= 0).toBe(true)
     expect(m.mcpRssMb).toBeGreaterThanOrEqual(0)
     expect(m.mcpCount).toBeGreaterThanOrEqual(0)
     expect(m.vetRssMb).toBeGreaterThanOrEqual(0)

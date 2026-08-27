@@ -20,7 +20,7 @@ describe('0.1.20 新功能', () => {
 
   describe('stats 模块', () => {
     it('loadStats: 文件不存在返回默认值', async () => {
-      const { loadStats, setStatsDirForTest } = await import('../src/guard/stats.js')
+      const { loadStats, setStatsDirForTest } = await import('../lib/guard/stats.js')
       setStatsDirForTest(testDir)
       const stats = loadStats()
       expect(stats.scannedCount).toBe(0)
@@ -30,7 +30,7 @@ describe('0.1.20 新功能', () => {
     })
 
     it('saveStats + loadStats: 原子写后读回', async () => {
-      const { loadStats, saveStats, setStatsDirForTest } = await import('../src/guard/stats.js')
+      const { loadStats, saveStats, setStatsDirForTest } = await import('../lib/guard/stats.js')
       setStatsDirForTest(testDir)
       saveStats({ scannedCount: 5, alarmsRecorded: 3, blockedCount: 1, activeDefenseCount: 2, updatedAt: 0 })
       const loaded = loadStats()
@@ -42,7 +42,7 @@ describe('0.1.20 新功能', () => {
     })
 
     it('incrementScanned/AlarmsRecorded/Blocked: 自增计数', async () => {
-      const { incrementScanned, incrementAlarmsRecorded, incrementBlocked, loadStats, getStats, setStatsDirForTest } = await import('../src/guard/stats.js')
+      const { incrementScanned, incrementAlarmsRecorded, incrementBlocked, loadStats, getStats, setStatsDirForTest } = await import('../lib/guard/stats.js')
       setStatsDirForTest(testDir)
       incrementScanned()
       incrementScanned()
@@ -56,7 +56,7 @@ describe('0.1.20 新功能', () => {
     })
 
     it('setActiveDefenseCount + getActiveDefenseCount: 内存态不持久化', async () => {
-      const { setActiveDefenseCount, getActiveDefenseCount, getStats, loadStats, setStatsDirForTest } = await import('../src/guard/stats.js')
+      const { setActiveDefenseCount, getActiveDefenseCount, getStats, loadStats, setStatsDirForTest } = await import('../lib/guard/stats.js')
       setStatsDirForTest(testDir)
       setActiveDefenseCount(7)
       expect(getActiveDefenseCount()).toBe(7)
@@ -70,8 +70,8 @@ describe('0.1.20 新功能', () => {
 
   describe('upgrade-cold 联审计', () => {
     it('recordScan: 冷启动 + 有审计档案 → 不报 upgrade-cold', async () => {
-      const { recordScan, setCapabilitiesDirForTest } = await import('../src/guard/version-diff.js')
-      const { setArchiveDirForTest } = await import('../src/audit/archive.js')
+      const { recordScan, setCapabilitiesDirForTest } = await import('../lib/guard/version-diff.js')
+      const { setArchiveDirForTest } = await import('../lib/audit/archive.js')
       setCapabilitiesDirForTest(testDir)
       setArchiveDirForTest(testDir)
       // 创建审计档案
@@ -84,8 +84,8 @@ describe('0.1.20 新功能', () => {
     })
 
     it('recordScan: 冷启动 + 无审计档案 → 报 upgrade-cold', async () => {
-      const { recordScan, setCapabilitiesDirForTest } = await import('../src/guard/version-diff.js')
-      const { setArchiveDirForTest } = await import('../src/audit/archive.js')
+      const { recordScan, setCapabilitiesDirForTest } = await import('../lib/guard/version-diff.js')
+      const { setArchiveDirForTest } = await import('../lib/audit/archive.js')
       setCapabilitiesDirForTest(testDir)
       setArchiveDirForTest(testDir)
       const outcome = recordScan('test-plugin', '1.0.0', { hasNetwork: true, hasExec: true })
@@ -98,8 +98,8 @@ describe('0.1.20 新功能', () => {
   describe('升级差分 red 级别文案', () => {
     it('buildUpgradeAlarm: red 级别提示用户重新审计', async () => {
       // 通过 recordScan 间接测试
-      const { recordScan, setCapabilitiesDirForTest } = await import('../src/guard/version-diff.js')
-      const { setArchiveDirForTest } = await import('../src/audit/archive.js')
+      const { recordScan, setCapabilitiesDirForTest } = await import('../lib/guard/version-diff.js')
+      const { setArchiveDirForTest } = await import('../lib/audit/archive.js')
       setCapabilitiesDirForTest(testDir)
       setArchiveDirForTest(testDir)
       // 先记录旧版本

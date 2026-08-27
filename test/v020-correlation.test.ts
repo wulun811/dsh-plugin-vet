@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { ExfilLedger, resetExfilLedger, detectKeyLeak, detectKeyLeaks } from '../src/guard/exfil-ledger'
+import { ExfilLedger, resetExfilLedger, detectKeyLeak, detectKeyLeaks } from '../lib/guard/exfil-ledger'
+
+// round-16（QA-9 顺手，仓库秘密门禁纪律）：测试夹具的字面量也不能出现完整
+// AKIA/PEM 形态——与 honeypot/exampleKey 同款：运行时拼接（拼接结果与字面量完全一致）。
+const PEM1 = ['-----BEGIN ', 'PRIVATE KEY-----'].join('')
+const PEM_RSA = ['-----BEGIN RSA ', 'PRIVATE KEY-----'].join('')
+const PEM_OPENSSH = ['-----BEGIN OPENSSH ', 'PRIVATE KEY-----'].join('')
+const AWS_KEY = 'AKIA' + '0123456789ABCDEF'
 
 describe('0.1.20 关联检测', () => {
   beforeEach(() => {
@@ -8,21 +15,21 @@ describe('0.1.20 关联检测', () => {
 
   describe('密钥外泄内容匹配（detectKeyLeaks 纯函数）', () => {
     it('PKCS#8 PEM 私钥命中', () => {
-      const leaks = detectKeyLeaks('data: -----BEGIN PRIVATE KEY-----')
+      const leaks = detectKeyLeaks('data: ' + PEM1)
       expect(leaks.length).toBe(1)
       expect(leaks[0].kind).toBe('pem')
     })
     it('RSA/OPENSSH PEM 私钥命中', () => {
-      expect(detectKeyLeaks('-----BEGIN RSA PRIVATE KEY-----')[0].kind).toBe('pem')
-      expect(detectKeyLeaks('-----BEGIN OPENSSH PRIVATE KEY-----')[0].kind).toBe('pem')
+      expect(detectKeyLeaks(PEM_RSA)[0].kind).toBe('pem')
+      expect(detectKeyLeaks(PEM_OPENSSH)[0].kind).toBe('pem')
     })
     it('AWS Access Key 命中，含 EXAMPLE 的示例 key 不算', () => {
       // 动态构造避免字面量触发秘密扫描器
       const exampleKey = 'AKIA' + 'IOSFODNN7EXAMPLE'
       expect(detectKeyLeaks(exampleKey).length).toBe(0)
-      const leaks = detectKeyLeaks('key=AKIA0123456789ABCDEF')
+      const leaks = detectKeyLeaks('key=' + AWS_KEY)
       expect(leaks.length).toBe(1)
-      expect(leaks[0]).toEqual({ kind: 'aws', match: 'AKIA0123456789ABCDEF', index: 4 })
+      expect(leaks[0]).toEqual({ kind: 'aws', match: AWS_KEY, index: 4 })
     })
     it('非密钥内容不命中', () => {
       expect(detectKeyLeaks('hello world').length).toBe(0)
@@ -30,20 +37,20 @@ describe('0.1.20 关联检测', () => {
       expect(detectKeyLeaks('AKIASHORT').length).toBe(0)
     })
     it('同一文本含 PEM + AWS 都命中（Issue AY 修复）', () => {
-      const text = '-----BEGIN RSA PRIVATE KEY-----\nMIIEpA...\naws_key=AKIA0123456789ABCDEF'
+      const text = PEM_RSA + '\nMIIEpA...\naws_key=' + AWS_KEY
       const leaks = detectKeyLeaks(text)
       expect(leaks.length).toBe(2)
       expect(leaks.some(l => l.kind === 'pem')).toBe(true)
       expect(leaks.some(l => l.kind === 'aws')).toBe(true)
     })
     it('同一文本含多个 PEM 都命中', () => {
-      const text = '-----BEGIN RSA PRIVATE KEY-----\n...\n-----BEGIN RSA PRIVATE KEY-----'
+      const text = PEM_RSA + '\n...\n' + PEM_RSA
       const leaks = detectKeyLeaks(text)
       expect(leaks.length).toBe(2)
       expect(leaks.every(l => l.kind === 'pem')).toBe(true)
     })
     it('detectKeyLeak 向后兼容（返回第一个）', () => {
-      const hit = detectKeyLeak('-----BEGIN RSA PRIVATE KEY-----')
+      const hit = detectKeyLeak(PEM_RSA)
       expect(hit).not.toBeNull()
       expect(hit!.kind).toBe('pem')
     })

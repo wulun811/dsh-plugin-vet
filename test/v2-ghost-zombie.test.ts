@@ -93,6 +93,38 @@ describe('R16 幽灵依赖（代码引用但 package.json 未声明）', () => {
     expect(res.report!.capabilities?.ghostDeps).toBeUndefined()
   })
 
+  it('round-17：子路径导入（父包已声明）不误报幽灵——react/jsx-runtime 形态（R16 前缀解析）', () => {
+    writeFile(root, 'package.json', JSON.stringify({
+      name: 'p', version: '1.0.0',
+      devDependencies: { react: '18.3.1' },
+    }))
+    writeFile(root, 'index.js', 'import { jsx as _jsx } from "react/jsx-runtime"; export default _jsx("div", null)')
+    const res = scanPkg()
+    expect(res.ok).toBe(true)
+    expect(res.report!.capabilities?.ghostDeps).toBeUndefined()
+    expect(res.report!.findings.filter(f => f.rule === 'R16')).toHaveLength(0)
+  })
+
+  it('round-17：scoped 父包已声明的子路径导入不误报幽灵', () => {
+    writeFile(root, 'package.json', JSON.stringify({
+      name: 'p', version: '1.0.0',
+      dependencies: { '@scope/ui': '1.0.0' },
+    }))
+    writeFile(root, 'index.js', 'import { Button } from "@scope/ui/button"')
+    makeDepDir(root, '@scope/ui')
+    const res = scanPkg()
+    expect(res.ok).toBe(true)
+    expect(res.report!.capabilities?.ghostDeps).toBeUndefined()
+  })
+
+  it('round-17：父包未声明的子路径导入仍判幽灵', () => {
+    writeFile(root, 'package.json', JSON.stringify({ name: 'p', version: '1.0.0' }))
+    writeFile(root, 'index.js', 'require("ghost-pkg/sub")')
+    const res = scanPkg()
+    expect(res.ok).toBe(true)
+    expect(res.report!.capabilities?.ghostDeps).toEqual(['ghost-pkg/sub'])
+  })
+
   it('round-15：Node 内建（fs/path/os 裸名 CJS 惯用）不列幽灵依赖', () => {
     writeFile(root, 'package.json', JSON.stringify({ name: 'p', version: '1.0.0' }))
     // 传统 CJS 裸名内建导入：不依赖 package.json dependencies，但也不是「引用了未声明的包」

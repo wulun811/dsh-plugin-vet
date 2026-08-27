@@ -385,7 +385,12 @@ describe('internal/plugin guard', () => {
     installInternalPluginGuard(ctx as never, cfg())
     const h = ctx.handlers.get('internal/plugin')![0]
     await h(fiber({ entry: { options: { name: '@vet-test/clean' } } }))
-    expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining('auto-scan @vet-test/clean → clean'))
+    // round-16（QA-8，防抖）：扫描经子进程 spawn + 引擎预算在并行 CI 下有落地抖动——
+    // 终态断言改 vi.waitFor（≤10s 轮询），断言语义不变：日志终态必须出现 auto-scan → clean
+    await vi.waitFor(
+      () => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining('auto-scan @vet-test/clean → clean')),
+      { timeout: 10_000, interval: 100 },
+    )
   })
 
   it('deny 模式 + critical → 同步抛错并 dispose（回滚挂载）', () => {
@@ -769,5 +774,43 @@ describe('分数构成解释（explainScore，clean+低分可读性）', () => {
   })
   it('无发现 → 满分说明', () => {
     expect(explainScore([])).toContain('满分')
+  })
+})
+describe('invariant watch 档位平台门（round-22）', () => {
+  it('纯判定：平台支持但哨兵未启动 → fail 文案；其余组合 → null', async () => {
+    const { watchInvariantMessage } = await import('../lib/invariant.js')
+    // Windows 等不支持平台 + watch 档：T1 按设计跳过（runtime-guard 平台门）→ 不 fail
+    expect(watchInvariantMessage('win32', false)).toBeNull()
+    expect(watchInvariantMessage('freebsd', false)).toBeNull()
+    // Linux/macOS 支持但哨兵未启动 → fail（真故障）
+    expect(watchInvariantMessage('linux', false)).toEqual(expect.stringContaining('T1 哨兵未启动'))
+    expect(watchInvariantMessage('darwin', false)).toEqual(expect.stringContaining('T1 哨兵未启动'))
+    // 已启动 → 不 fail
+    expect(watchInvariantMessage('linux', true)).toBeNull()
+    expect(watchInvariantMessage('darwin', true)).toBeNull()
+  })
+
+  it('watch 档位装配：按平台门判定（平台支持且哨兵未启动 → fail；平台不支持 → 不 fail）', async () => {
+    const { sidecarSupportedOn, setSidecarSpawned, sidecarSpawned } = await import('../lib/guard/runtime-sidecar.js')
+    const { installInvariant } = await import('../lib/invariant.js')
+    const prev = sidecarSpawned
+    setSidecarSpawned(false)
+    try {
+      const register = vi.fn()
+      const ctx = new FakeCtx()
+      ctx.invariants = { register }
+      installInvariant(ctx as never, { runtimeGuard: 'watch' } as never)
+      expect(register).toHaveBeenCalledTimes(1)
+      const installer = register.mock.calls[0][1] as (child: unknown, fail: (m: string) => never) => Promise<void>
+      const fail = vi.fn()
+      await installer({}, fail as never)
+      if (sidecarSupportedOn(process.platform)) {
+        expect(fail).toHaveBeenCalled()
+      } else {
+        expect(fail).not.toHaveBeenCalled()
+      }
+    } finally {
+      setSidecarSpawned(prev)
+    }
   })
 })

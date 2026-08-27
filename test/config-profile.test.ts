@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { VetConfigSchema, applyProfile } from '../src/config.js'
-import type { VetConfig } from '../src/config.js'
-import { observationAlarmsFor } from '../src/guards/internal-plugin.js'
+import { VetConfigSchema, applyProfile } from '../lib/config.js'
+import type { VetConfig } from '../lib/config.js'
+import { observationAlarmsFor } from '../lib/guards/internal-plugin.js'
 
 /** 用 schema 解析出带默认值的配置（模拟 cordis 装配后的 resolved config；schemastery schema 可调用）。 */
 const parse = (raw: Record<string, unknown>): VetConfig =>

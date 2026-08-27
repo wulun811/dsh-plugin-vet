@@ -45,6 +45,22 @@ describe('Phase 3.2 遥测配置敏感化（G-3，round-13；round-15 适配 DSH
     expect(f.mode).toBe('REDACTED')
   })
 
+  it('round-21：行尾 # 注释不并入值（无害注释编辑不刷假黄警、配置原文不进报警）', () => {
+    const bare = extractTelemetryFields('telemetry:\n  exporter:\n    url: https://x.example.com\n    mode: FULL\n')
+    const commented = extractTelemetryFields('telemetry:\n  exporter:\n    url: https://x.example.com # prod collector\n    mode: FULL # enable fully\n')
+    expect(commented).toEqual(bare) // 与无注释版逐字段一致（旧实现会把 " # ..." 并入值/hash）
+    const quoted = extractTelemetryFields('telemetry:\n  exporter:\n    url: "https://x.example.com/v1" # c\n    mode: "FULL"\n')
+    const quotedRef = extractTelemetryFields('telemetry:\n  exporter:\n    url: https://x.example.com/v1\n    mode: FULL\n')
+    expect(quoted).toEqual(quotedRef) // 引号+注释 与 裸值 提取一致（旧实现残留 `https://x..." # c`）
+    expect(quoted.mode).toBe('FULL')
+    const row = extractTelemetryFields(
+      '- id: session-telemetry-otel\n  config:\n    mode: REDACTED # keep redaction\n    exporter:\n      url: "https://t.example.com" # prod\n')
+    expect(row.mode).toBe('REDACTED')
+    expect(row.urlHash).toBeDefined()
+    // 全行注释值不误收
+    expect(extractTelemetryFields('telemetry:\n  exporter:\n    url: # moved, see vault\n    mode: FULL\n').mode).toBe('FULL')
+  })
+
   it('extractTelemetryFields：无 telemetry 块 → 空对象', () => {
     expect(extractTelemetryFields('a: 1\nb: 2\n')).toEqual({})
   })

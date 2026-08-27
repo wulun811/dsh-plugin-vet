@@ -1,7 +1,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest'
-import { ExfilLedger, resetExfilLedger } from '../src/guard/exfil-ledger'
-import { hashShort } from '../src/guard/runtime-guard'
+import { ExfilLedger, resetExfilLedger } from '../lib/guard/exfil-ledger'
+import { hashShort } from '../lib/guard/runtime-guard'
 
 describe('0.1.20 补充测试覆盖', () => {
   beforeEach(() => {
@@ -104,14 +104,18 @@ describe('0.1.20 补充测试覆盖', () => {
   })
 
   describe('hashShort 去重 id', () => {
+    // round-16（QA-9 顺手，仓库秘密门禁纪律）：夹具不出现完整 AKIA/PEM 字面量
+    const PEM_RSA = ['-----BEGIN RSA ', 'PRIVATE KEY-----'].join('')
+    const AWS_KEY = 'AKIA' + '0123456789ABCDEF'
+
     it('不同内容生成不同 hash', () => {
-      const hash1 = hashShort('-----BEGIN RSA PRIVATE KEY-----\nMIIEpA...1111')
-      const hash2 = hashShort('-----BEGIN RSA PRIVATE KEY-----\nMIIEpA...2222')
+      const hash1 = hashShort(PEM_RSA + '\nMIIEpA...1111')
+      const hash2 = hashShort(PEM_RSA + '\nMIIEpA...2222')
       expect(hash1).not.toBe(hash2)
     })
 
     it('相同内容生成相同 hash', () => {
-      const content = 'AKIA0123456789ABCDEF'
+      const content = AWS_KEY
       const hash1 = hashShort(content)
       const hash2 = hashShort(content)
       expect(hash1).toBe(hash2)

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { VetStatus } from '../src/guard/status'
+import { VetStatus } from '../lib/guard/status'
 
 describe('VetStatus 合并去重（事件风暴降噪）', () => {
   it('同 (kind,plugin) 跨 target 的关联签名折叠为一条并累计 count', () => {

@@ -7,7 +7,7 @@ import {
   setRootIndexing,
   withVetSelfIo,
   type HookAlarm,
-} from '../src/guard/runtime-hooks.js'
+} from '../lib/guard/runtime-hooks.js'
 
 const CFG = DEFAULT_HOOK_CONFIG
 

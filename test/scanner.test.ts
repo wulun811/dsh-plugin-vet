@@ -486,3 +486,85 @@ describe('开源自检（dogfood）：vet 扫描自己的蜜罐源码不该 R7 �
 function baseDir(): string {
   return join(import.meta.dirname, '..')
 }
+
+describe('round-22：engine 回归（static-v20）', () => {
+  it('require() 无实参不再整扫描崩溃（此前 capability 提取 TypeError → ok:false 且多文件全丢）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-r22a-'))
+    try {
+      const good = join(dir, 'good.js')
+      writeFileSync(good, 'const fs = require("fs"); fs.readFileSync("/etc/passwd")\n')
+      const bad = join(dir, 'bad.js')
+      writeFileSync(bad, 'const x = require();\n')
+      const r = await scan({ kind: 'files', files: [good, bad] })
+      expect(r.ok).toBe(true)
+      // good.js 的发现不再被坏文件吞掉（此前整个请求 ok:false）
+      expect(r.report!.findings.length).toBeGreaterThan(0)
+      expect(r.report!.engine).toBe(ENGINE_VERSION)
+      const code = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'const x = require();' })
+      expect(code.ok).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('capabilities：node: 前缀模块归一（hasNetwork/hasExec 不再漏记，imports 仍排除内建）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-r22b-'))
+    try {
+      const nh = join(dir, 'nh.js')
+      writeFileSync(nh, 'require("node:http").request("http://x")')
+      const nc = join(dir, 'nc.js')
+      writeFileSync(nc, 'require("node:child_process").exec("id")')
+      const a = await scan({ kind: 'files', files: [nh] })
+      expect(a.report!.capabilities!.hasNetwork).toBe(true)
+      const b = await scan({ kind: 'files', files: [nc] })
+      expect(b.report!.capabilities!.hasExec).toBe(true)
+      expect(b.report!.capabilities!.imports).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('R3：globalThis[\'process\'] 元素访问形态（此前零命中）→ 成员口径 critical / 裸引用 info', async () => {
+    const r = await scan({ kind: 'code', language: 'js', runtime: 'host', code: "globalThis['process'].exit(1)" })
+    expect(r.report!.findings.some(f => f.rule === 'R3' && f.severity === 'critical')).toBe(true)
+    const bare = await scan({ kind: 'code', language: 'js', runtime: 'host', code: "var p = globalThis['process']" })
+    expect(bare.report!.findings.filter(f => f.rule === 'R3')[0]!.severity).toBe('info')
+  })
+
+  it('R3：解构成员形态（const { exit } = process; exit(1)）→ critical（此前只报 info）', async () => {
+    const r = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'const { exit, pid } = process; exit(1); console.log(pid)' })
+    const r3 = r.report!.findings.filter(f => f.rule === 'R3')
+    expect(r3.some(f => f.severity === 'critical' && f.message.includes('exit'))).toBe(true)
+    expect(r3.some(f => f.severity === 'info' && f.message.includes('pid'))).toBe(true)
+  })
+
+  it('R1/R2：括号与前缀元素访问逃逸形态（此前零命中）', async () => {
+    const a = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'var x={}; x.constructor("return (process)")' })
+    expect(a.report!.findings.some(f => f.rule === 'R1' && f.severity === 'critical')).toBe(true)
+    const b = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'new Function("return globalThis[\'process\']")' })
+    expect(b.report!.findings.some(f => f.rule === 'R2' && f.severity === 'critical')).toBe(true)
+  })
+
+  it('R1：别名遮蔽不再误判 critical（形参 c 遮蔽模块级 const c = x.constructor）', async () => {
+    const r = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'var x={}; const c = x.constructor; function f(c){ new c("return process") } f("nope")' })
+    expect(r.report!.findings.some(f => f.rule === 'R1')).toBe(false)
+    // 未遮蔽的合法别名追踪照常
+    const legit = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'var x={}; const c = x.constructor; new c("return process")' })
+    expect(legit.report!.findings.some(f => f.rule === 'R1' && f.severity === 'critical')).toBe(true)
+  })
+
+  it('R7：sk-proj- 与 github_pat_ 现行密钥格式命中（旧字符类被 - 打散整族漏报）', async () => {
+    const a = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'const k = "sk-proj-1234567890abcdef1234567890abcdef1234"' })
+    expect(a.report!.findings.some(f => f.rule === 'R7')).toBe(true)
+    // 20 字符假种子面：满足 R7 的 {20,}（hook 门禁的 {22,} 以下——测试语料不触发真密钥门禁）
+    const b = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'const k = "github_pat_1234567890abcdef1234"' })
+    expect(b.report!.findings.some(f => f.rule === 'R7')).toBe(true)
+  })
+
+  it('R2：函数体 const require 报 code 场景逃逸尝试中介；真·模块顶层仍降噪', async () => {
+    const fn = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'function f(){ const fs = require("fs"); return fs; }' })
+    expect(fn.report!.findings.some(f => f.rule === 'R2' && f.severity === 'medium')).toBe(true)
+    const top = await scan({ kind: 'code', language: 'js', runtime: 'host', code: 'const fs = require("fs"); fs.readFileSync("/etc/passwd")' })
+    expect(top.report!.findings.some(f => f.rule === 'R2')).toBe(false)
+  })
+})
