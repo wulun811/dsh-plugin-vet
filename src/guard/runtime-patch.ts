@@ -11,7 +11,7 @@ import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStri
 import { classifyOp } from './runtime-classify.js'
 import { classifyNetworkOp, extractNetworkTarget, isTrackedNetHost, isLoopbackHost, isControlPlanePath, NET_OPS } from './runtime-net.js'
 import { fsOpBytes, attachWriteCounter, attachCanaryScanner, attachReadCounter } from './runtime-count.js'
-import { isOfficial, pluginFromStack } from './runtime-attrib.js'
+import { isOfficial, isOfficialTrusted, pluginFromStack } from './runtime-attrib.js'
 import { brandVetHook, registerHookTarget } from './runtime-heartbeat.js'
 
 /**
@@ -43,7 +43,11 @@ export function patchModule(
       }
       let alarm = classifyOp({ module: moduleName, op: opName, args }, cfg)
       const ledgerRelevant = observe !== undefined && FS_LEDGER_OPS.has(opName)
-      const blockRelevant = moduleName === 'fs' && BLOCK_FS_OPS.has(opName) && confirmBlock.mode() === 'block'
+      // round-22：open/openSync 必须进入判定面——decideBlock 内按写标志判断是否破坏
+      // （read 不拦）；此前不含 open → 族 2 SA2-5 分支（fd 面凭据破坏拦截）生产不可达。
+      const blockRelevant = moduleName === 'fs'
+        && (BLOCK_FS_OPS.has(opName) || opName === 'open' || opName === 'openSync')
+        && confirmBlock.mode() === 'block'
       // C4（0.1.16 加固）：归因链被篡改（prepareStackTrace 替换 / stackTraceLimit<2）时栈文本不可信
       const stackTampered = isStackTraceTampered()
       let hint: string | undefined
@@ -91,9 +95,11 @@ export function patchModule(
       // N7 确认拦截：判定（族 1/2）在调用原函数之前执行——拦截 = 抛错（fail-open：异常 → 放行）
       // C4：归因被篡改时用哨兵身份（不匹配任何已知插件）参与族 2 凭据本体判定——
       // 故意隐藏归因的凭据破坏照样拦截；族 1（已确认插件的后续破坏）在归因不可用下降级（记录边界）
+      // round-16（SEC-1）：官方豁免改内容信任锚——名称级 isOfficial 会让伪名 tarball
+      // 的破坏类操作整个跳过 N7 拦截（身份判定被名字欺骗）。
       let block: BlockDecision | null = null
       const blockIdentity: string | undefined = stackTampered ? '__vet_attribution_tampered__' : hint
-      if (blockRelevant && blockIdentity !== undefined && (stackTampered || !isOfficial(blockIdentity))) {
+      if (blockRelevant && blockIdentity !== undefined && (stackTampered || !isOfficialTrusted(blockIdentity))) {
         try {
           block = confirmBlock.decideBlock(blockIdentity, opName, args)
           // 族 3/4 覆写：用户显式 'block' 才拦（默认 alarm 只报警，零误拦护栏不变——
@@ -238,12 +244,15 @@ export function patchNetworkModule(
         }
       }
       if (alarm !== null) {
-        if (hint === undefined || !isOfficial(hint)) {
+        // round-16（SEC-1）：内容信任锚（同 fs 面抑制判据）；回环观测走廊（下方 247）
+        // 保留名称级 isOfficial——纯展示观测，不构成防线盲区。
+        if (hint === undefined || !isOfficialTrusted(hint)) {
           sink({ ...alarm, pluginHint: hint })
         }
       }
       // round-13（Phase 3）：本地 API 回环观测——observeLoopback=true、命中 DSH 控制面路径、
       // 归因第三方插件（非官方/非无主）→ yellow 观测（alarm-only；观测不是修复，RPC 认证需 dsh 侧）
+      // round-16（SEC-1）：本条保留名称级 isOfficial（纯展示走廊，不构成防线盲区）。
       if (cfg.observeLoopback === true && hint !== undefined && !isOfficial(hint)) {
         const lp = extractNetworkTarget(args)
         if (lp !== null && isLoopbackHost(lp.hostname) && isControlPlanePath(lp.path)) {

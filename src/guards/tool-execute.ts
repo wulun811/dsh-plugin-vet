@@ -108,6 +108,13 @@ export function installToolExecuteGuard(ctx: Context, config: VetConfig, status?
     }
 
     const result = await next()
+    // round-22：宿主契约漂移防护——next() 返回非 ToolExecutionResult 形态（content
+    // 缺失/非数组/空）时按原样透传，不在此处二次抛错（下游 handler 的真实异常仍按
+    // 原有语义向上传播，不受影响）。此前 result.content 解引用会在宿主异常形态下
+    // 把「宿主返回异常」伪装成「vet 守卫抛错」。
+    if (result === null || typeof result !== 'object' || !Array.isArray(result.content)) {
+      return result as ToolExecutionResult
+    }
     const first = result.content[0]
     // P2-5：notes 为空（全部 clean）时原样返回——旧实现即使 notes 为空也会前置 '\n\n'，
     // 与 M5「干净执行不污染机器可读输出」矛盾（JSON 解析/管道消费方看到脏前缀）

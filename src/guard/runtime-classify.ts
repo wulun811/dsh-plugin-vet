@@ -8,10 +8,32 @@ import { isPersistenceWriteTarget, isInstallWriteTarget } from './confirm-block.
 import {
   firstString, allStrings, commandString, hitsShellToken, pathTokens, redirectTarget,
   isSensitivePath, isHoneypotPath, isIntegrityPath, isLockSiblingPath, isSessionLogFile,
+  joinCapped, MAX_ARG_CHARS,
 } from './runtime-denoise.js'
 
 /** P1-8：破坏性命令词——命中且命令里出现敏感路径（参数或重定向目标）才报警，避免 rm -rf /tmp 这类常规清理误报。 */
 const DESTRUCTIVE_TOKENS = new Set(['rm', 'mv', 'cp', 'dd', 'mkfs', 'mkfs.ext4', 'mkfs.xfs', 'shred', 'truncate'])
+/**
+ * round-16（SA2-2）：相对裸 token 判定的破坏头（DESTRUCTIVE_TOKENS 的子集）——
+ * rm/shred/truncate/dd/mkfs 族。排除 cp/mv：`cp id_rsa.pub backup/` 的相对裸名
+ * （id_rsa.pub）命中敏感词是合法备份形态，纳入裸 token 判定会误报。
+ */
+const REL_DESTROY_TOKENS = new Set(['rm', 'shred', 'truncate', 'dd', 'mkfs', 'mkfs.ext4', 'mkfs.xfs'])
+
+/**
+ * round-16（SA2-2）：相对敏感裸 token 命中——命令含破坏头且存在不含 '/'、不以 '~' 开头、
+ * 但 isSensitivePath 判为敏感的词（`rm -rf .ssh` / `shred -u id_rsa`：pathTokens 只收
+ * 含 '/' 或 '~' 的词，相对裸名全漏——破坏命令+敏感相对目标的组合此前不报警）。
+ * 复合词（-rf、--force）不会命中敏感判定；整词=命令本身（rm）等破坏头也不敏感。
+ */
+function relativeSensitiveHit(full: string, cfg: HookConfig, destr: boolean): boolean {
+  if (!destr || !hitsShellToken(full, [...REL_DESTROY_TOKENS])) return false
+  return full.split(/\s+/).some(w => {
+    const bare = w.replace(/^['"]|['"]$/g, '')
+    return bare !== '' && !bare.includes('/') && !bare.startsWith('~')
+      && isSensitivePath(bare, cfg, 'mutate')
+  })
+}
 /** 危险操作分类（纯函数）：返回报警候选（pluginHint 由调用方经栈归因补全）。 */
 export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
   const { module, op: name, args } = op
@@ -27,7 +49,8 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
     const cmd = commandString(args)
     // 命令全貌（含 spawn argv 数组的元素）：exec('rm -rf ~/.ssh') 与 spawn('rm', ['-rf', '/home/u/.ssh'])
     // 都能被词/路径检测覆盖。注意 cmd 是字符串，不能展开成字符数组（...cmd 会每字符间插空格）。
-    const full = [cmd, ...allStrings(args)].join(' ')
+    // round-22：总长 joinCapped 封顶（args 数 × 单参长均可被放大）——观测侧不承接无限输入。
+    const full = joinCapped([cmd, ...allStrings(args)], MAX_ARG_CHARS)
     // P1-8：破坏性命令（rm -rf ~/.ssh / dd of=/etc/… / mkfs / cp 覆盖敏感路径）——只对命令里
     // 出现敏感路径（参数或重定向目标）的组合报警；exec('rm -rf /tmp/x') 常规清理不报。
     const destr = hitsShellToken(full, [...DESTRUCTIVE_TOKENS])
@@ -37,7 +60,7 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
       // 触发条件：破坏性命令 + 敏感路径参数，或 shell 重定向到敏感路径（echo x > /etc/passwd）
       if (!destr && !redirectSensitive) return null
       const paths = [...pathTokens(full), redirect].filter((p): p is string => p !== undefined)
-      if (!paths.some(p => isSensitivePath(p, cfg, 'mutate'))) return null
+      if (!paths.some(p => isSensitivePath(p, cfg, 'mutate')) && !relativeSensitiveHit(full, cfg, destr)) return null
     }
     return {
       severity: 'yellow',

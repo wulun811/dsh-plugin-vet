@@ -35,6 +35,12 @@ const KIND_LABEL: Record<ObservedKind, string> = {
   fsMutate: "敏感路径写删",
 }
 
+/** round-16（SA2-7）：观测集上限——每（插件 × 类别）最多 128 个去重观测值；
+ * 全表最多 200 个插件。失控/风暴插件不再让观测表（M2 展示与差分扫描都遍历它）
+ * 无限膨胀。淘汰策略 = 最旧优先（Set/Map 按插入序迭代）。 */
+const OBSERVED_MAX_PER_KIND = 128
+const OBSERVED_MAX_PLUGINS = 200
+
 /** 某类观测是否被静态清单覆盖（保守：imports 非空即覆盖一切；否则看本类足迹）。
  * round-4 review（M1）：数组字段缺省守卫——旧扫描器产物/schema 演进可能缺某字段，
  * `undefined.length` 会抛 TypeError 沿 sink → 包装器冒泡到插件自己的调用（唯一违背
@@ -80,7 +86,21 @@ export class CapabilityDiffStore {
     const perPlugin = this.observedByPlugin.get(action.plugin) ?? new Map()
     const set = perPlugin.get(action.kind) ?? new Set()
     if (action.value !== "") set.add(action.value)
+    // round-16（SA2-7）：每类观测值上限——超出淘汰最旧（插入序），观测集仍是最新窗口。
+    while (set.size > OBSERVED_MAX_PER_KIND) {
+      const oldest = set.values().next()
+      if (oldest.done) break
+      set.delete(oldest.value)
+    }
     perPlugin.set(action.kind, set)
+    // round-16（SA2-7）：新插件入表前超插件数上限 → 淘汰最旧插件整行。
+    if (!this.observedByPlugin.has(action.plugin)) {
+      while (this.observedByPlugin.size >= OBSERVED_MAX_PLUGINS) {
+        const oldest = this.observedByPlugin.keys().next()
+        if (oldest.done) break
+        this.observedByPlugin.delete(oldest.value)
+      }
+    }
     this.observedByPlugin.set(action.plugin, perPlugin)
     // 保守差分：静态无任何足迹（含 imports）且触发敏感操作 → 隐藏能力（red/certain）
     if (!covered(manifest, action.kind)) {

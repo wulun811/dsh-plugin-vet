@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, mkdirSync, unlinkSync } from 'node:fs'
+import { writeTmpExclusive } from './path-utils.js'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
@@ -70,7 +71,7 @@ function saveDismissed(store: DismissedStore): boolean {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true })
       }
-      writeFileSync(tmp, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 })
+      writeTmpExclusive(tmp, JSON.stringify(store, null, 2), 0o600)
       renameSync(tmp, DISMISSED_FILE)
       return true
     } catch (error) {

@@ -65,7 +65,10 @@ export function ensureHoneypot(dir: string, logger?: { warn(m: string): void }):
       const canary = generateCanary()
       try {
         // P2-8：诱饵文件 0600——旧默认 0644 对同机其他用户可读（虽是假密钥也应收紧）
-        writeFileSync(full, build(canary), { mode: 0o600 })
+        // round-16（SEC-5）：'wx' 排他创建——existsSync 检查与写入之间的竞态窗口里
+        // 被预置的路径（符号链接/占位）不再被跟随覆写（EEXIST 即失败，诱饵不落位；
+        // 预置在蜜罐根下的路径本身是触碰信号，下次启动自愈重建）
+        writeFileSync(full, build(canary), { mode: 0o600, flag: 'wx' })
         canaryStore.register(canary)
       } catch {
         return
@@ -80,7 +83,8 @@ export function ensureHoneypot(dir: string, logger?: { warn(m: string): void }):
     const full = join(root, name)
     if (!existsSync(full)) {
       try {
-        writeFileSync(full, content, { mode: 0o600 })
+        // round-16（SEC-5）：同 putWithCanary——'wx' 排他创建，竞态窗口不跟随预置路径
+        writeFileSync(full, content, { mode: 0o600, flag: 'wx' })
       } catch {
         return
       }
@@ -151,7 +155,8 @@ export function ensureIntegrityCanaries(baseDir: string, logger?: { warn(m: stri
     const full = join(root, name)
     if (!existsSync(full)) {
       try {
-        writeFileSync(full, integrityCanaryContent(name), { mode: 0o600 })
+        // round-16（SEC-5）：'wx' 排他创建（同蜜罐诱饵；完整性金丝雀内容固定，重写无害）
+        writeFileSync(full, integrityCanaryContent(name), { mode: 0o600, flag: 'wx' })
       } catch {
         continue
       }

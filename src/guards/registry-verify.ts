@@ -86,29 +86,55 @@ async function doVerify(name: string, version: string, timeoutMs: number): Promi
 
 /** tarball 字节 → 解包 → computePackageHash（与守卫同算法同预算）。导出仅供测试。
  * round-5 review（A#4）：tar 命令带 timeoutMs——解包是「先于 computePackageHash 预算」的
- * 无界步骤（预算管不到解包），超时由 execFile 以 SIGTERM 终止。 */
+ * 无界步骤（预算管不到解包），超时由 execFile 以 SIGTERM 终止。
+ * round-16（SEC-2/3）：见 hashPackTarball 内注释。 */
 export async function hashPackTarball(buf: Buffer, tarTimeoutMs = 30_000): Promise<string | null> {
   const dir = mkdtempSync(join(tmpdir(), 'vet-regcheck-'))
   try {
     const tgzPath = join(dir, 'pkg.tgz')
     writeFileSync(tgzPath, buf)
-    // 三轮审查加固：解包前先列成员并校验——拒绝绝对路径 / '..' / 盘符 / 反斜杠成员。
-    // GNU tar 默认不拦 '..' 成员，恶意 tarball 可借其把文件写出 tmpdir 之外；反斜杠在
-    // GNU tar 里是字面字符，但 Windows bsdtar 会当路径分隔符转换（四轮审查补口）。
-    // npm 官方 pack 归一化路径分隔符，正常 tarball 不含反斜杠成员，误杀风险为零。
-    // 残留限制（记录）：符号链接成员仍可能指向目录外；registry 走 TLS 属可信源，此为纵深防御而非边界。
-    const listed = await execFileAsync('tar', ['-tzf', tgzPath], { timeout: tarTimeoutMs })
+    // round-16（SEC-2/3）：清单从 `tar -tzf`（仅名字）升级为 `tar -tvzf`（类型+大小+名字）：
+    // - SEC-2：符号链接/硬链接/设备/管道成员（类型列 l/h/c/b/p）整体拒绝——旧 `tar -tzf`
+    //   不显示成员类型，含 `package/x -> /etc/passwd` 链接成员的恶意 tarball 通过名字校验
+    //   后被解包，computePackageHash 跟随链接可读到包根之外的文件（纵深防御：registry 走
+    //   TLS 属可信源，仅作边界补强）。npm pack 产物为普通文件（实测 vet/react/tar/esbuild
+    //   tarball 全部 '-' 成员），误杀风险为零。
+    // - SEC-3：普通成员解包总字节 ≤1GB 且成员数 ≤10 万——单成员名字校验不构成解包体积
+    //   上限（压缩炸弹形态：小 tgz 解出巨大目录树），解包前按清单累计并拒绝超限。
+    //   行格式（GNU vs BSD 双布局）：GNU `-rw-r--r-- 0/0 1234 2024-01-01 12:00 package/f`
+    //   （fields[1] 含 '/'）；BSD `-rw-r--r-- 1 user group 1234 Jan 1 12:00 package/f`
+    //   （owner/group 分列，size 在 fields[4]、名字起点 fields[8]）。
+    const TOTAL_UNPACKED_LIMIT = 1024 * 1024 * 1024
+    const MEMBER_COUNT_LIMIT = 100_000
+    const REJECT_TAR_TYPES = new Set(['l', 'h', 'c', 'b', 'p'])
+    // maxBuffer：100k 成员 × ~120B/行 ≈ 12MB（默认 1MB 会让大包清单在解包前就抛 maxBuffer）
+    const listed = await execFileAsync('tar', ['-tvzf', tgzPath], { timeout: tarTimeoutMs, maxBuffer: 32 * 1024 * 1024 })
+    let totalBytes = 0
+    let memberCount = 0
     for (const raw of listed.stdout.split('\n')) {
-      const entry = raw.trim()
-      if (entry === '') continue
+      const line = raw.trim()
+      if (line === '') continue
+      const type = line[0] ?? ''
+      // SEC-2：链接/设备/管道成员整体拒绝（见上注释；目录 'd' 与普通文件 '-' 放行，
+      // pax 扩展头 'x'/'g' 等 GNU 兼容形态放行——误杀面保持为零）
+      if (REJECT_TAR_TYPES.has(type)) return null
+      const fields = line.split(/\s+/)
+      const gnu = (fields[1] ?? '').includes('/')
+      const sizeField = gnu ? fields[2] : fields[4]
+      const size = Number.parseInt(sizeField ?? '0', 10)
+      const name = (gnu ? fields.slice(5) : fields.slice(8)).join(' ')
+      if (Number.isFinite(size) && size >= 0) totalBytes += size
+      memberCount += 1
+      // 名称危险校验（与旧 tar -tzf 清单同款：绝对路径 / '..' / 盘符 / 反斜杠；分行解析后
+      // 裸 '..' 也能精确命中——GNU tar 默认不拦，解包可直接写出 tmpdir 之外）
       if (
-        // round-4 review（L2 补漏）：裸 '..' 成员此前漏检——`includes('../')`/`endsWith('/..')`
-        // 都不覆盖恰好等于 '..' 的成员（GNU tar 默认不拦，解包可直接写出 tmpdir 之外）
-        entry === '..' ||
-        entry.startsWith('/') || entry.includes('../') || entry.endsWith('/..') ||
-        /^[a-zA-Z]:/.test(entry) || entry.includes('\\')
+        name === '..' ||
+        name.startsWith('/') || name.includes('../') || name.endsWith('/..') ||
+        /^[a-zA-Z]:/.test(name) || name.includes('\\')
       ) return null
     }
+    // SEC-3：解包体积/成员数上限（累计超限直接拒绝——不进入解包步骤）
+    if (memberCount > MEMBER_COUNT_LIMIT || totalBytes > TOTAL_UNPACKED_LIMIT) return null
     await execFileAsync('tar', ['-xzf', tgzPath, '-C', dir], { timeout: tarTimeoutMs })
     // round-5 review（B-A4）：哈希预算取函数默认值（content-baseline 单点维护）
     const r = computePackageHash(join(dir, 'package'))

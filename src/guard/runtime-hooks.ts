@@ -26,6 +26,6 @@ export {
 } from './runtime-denoise.js'
 
 export { classifyOp } from './runtime-classify.js'
-export { pluginFromStack, isOfficial } from './runtime-attrib.js'
+export { pluginFromStack, isOfficial, isOfficialTrusted, markOfficialTrusted, resetOfficialTrustForTest } from './runtime-attrib.js'
 export { isTrackedNetHost, extractNetworkTarget, classifyNetworkOp, isLoopbackHost, isControlPlanePath } from './runtime-net.js'
 export { patchModule, patchNetworkModule } from './runtime-patch.js'

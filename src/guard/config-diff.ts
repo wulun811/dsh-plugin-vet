@@ -44,6 +44,26 @@ function sha16(s: string): string {
   return createHash('sha256').update(s).digest('hex').slice(0, 16)
 }
 
+/** 取 `key:` 之后一行的 YAML 标量值（round-21 review）：先剥外层引号（引号内空格/# 原样保留，
+ * 闭合引号之后的 ` # 注释` 忽略），无引号则从首个空白+`#` 处截断行尾注释——与 YAML 语义一致
+ * （`#` 仅在前置空白或行首时开注释）。旧实现 `tail.replace(/^["']|["']$/g,'')` 不处理行尾注释：
+ * `mode: FULL # prod` 把 ` # prod` 并入值 → 仅加/改注释的无害编辑即触发假「遥测变化」黄警，
+ * 且注释原文经 `'mode=' + next.mode` 进入报警，违背本模块「配置原文绝不进报警」隐私纪律。
+ * 整行注释（值以 `#` 起）→ 返回 ''（调用方按无值跳过）。 */
+function readYamlScalar(tail: string): string {
+  let s = tail.trim()
+  if (s === '' || s[0] === '#') return ''
+  const q = s[0]
+  if (q === '"' || q === "'") {
+    const end = s.indexOf(q, 1)
+    if (end > 0) return s.slice(1, end) // 引号值：取内部，闭合引号后的一切（注释）丢弃
+    s = s.slice(1) // 缺闭合引号（截断/畸形）→ 退化为去首引号后按裸值处理
+  }
+  const c = s.search(/\s#/)
+  if (c >= 0) s = s.slice(0, c)
+  return s.trim()
+}
+
 /** 在含 {…} 的文本段里提取 url:/mode: 键值（flow 形态共用）。 */
 function extractUrlModeFlow(out: TelemetryFields, flow: string): void {
   URL_MODE_RE.lastIndex = 0
@@ -91,8 +111,8 @@ export function extractTelemetryFields(text: string): TelemetryFields {
       } else {
         const key = keyMatch[2].toLowerCase()
         const tail = line.slice(keyMatch[0].length).trim()
-        const value = tail.replace(/^["']|["']$/g, '').trim()
-        if (value !== '' && !value.startsWith('#')) {
+        const value = readYamlScalar(tail)
+        if (value !== '') { // readYamlScalar 已把纯注释值折成 ''（round-21：旧 value.startsWith('#') 判为死码，删除）
           // round-15 review（过宽键匹配修复）：旧 endsWith('mode'/'url') 会把
           // compatMode / callbackUrl 等无关键误当遥测字段 → 配置里加个无关键就刷
           // 一条假「遥测配置变化」黄灯。只认键名恰为 url/mode，或作为路径末段
@@ -121,8 +141,8 @@ export function extractTelemetryFields(text: string): TelemetryFields {
     // telemetry 块内：url/mode 键（含 exporter.url / exporter.mode 深层键）
     // round-15 review：与 row 形态同修——精确键/路径末段匹配，不误收 compatMode 等
     const tail = line.slice(keyMatch[0].length).trim()
-    const value = tail.replace(/^["']|["']$/g, '').trim()
-    if (value === '' || value.startsWith('#')) continue
+    const value = readYamlScalar(tail)
+    if (value === '') continue
     if (key === 'url' || key.endsWith('.url')) out.urlHash = sha16(value)
     else if (key === 'mode' || key.endsWith('.mode')) out.mode = value
   }

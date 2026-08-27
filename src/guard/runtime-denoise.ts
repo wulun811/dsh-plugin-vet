@@ -6,6 +6,39 @@
 import type { HookConfig } from './runtime-ops.js'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * T2 观测面单实参上限（round-22）：路径/命令实参超长按前缀截断。超长实参本身必然
+ * syscall 失败（Linux PATH_MAX 4096 / 巨型 argv E2BIG），却会在钩子侧被全量扫描——
+ * 恶意插件把一条巨型字符串复用进循环（每次调用重新构造的成本为零），观测面就变成
+ * 「宿主事件循环为必然失败的调用支付 O(输入) 每事件」的放大面。截断保住恶意前缀的
+ * 检测面（敏感路径/命令头都在前部），同时把单实参成本钉死在常量内。
+ */
+export const MAX_ARG_CHARS = 64 * 1024
+
+function capStr(s: string): string {
+  return s.length > MAX_ARG_CHARS ? s.slice(0, MAX_ARG_CHARS) : s
+}
+
+/**
+ * 有界 join（round-22）：参数个数 × 单参长度都可被攻击者放大——全量 join 总长封顶，
+ * 超限截断（保住前部 token，命令头/敏感路径在前）。与 MAX_ARG_CHARS 一起把 classify
+ * 的每事件正则扫描成本钉在常量级。
+ */
+export function joinCapped(parts: ReadonlyArray<string>, max: number): string {
+  let len = 0
+  const out: string[] = []
+  for (const p of parts) {
+    if (len + p.length + 1 > max) {
+      const room = max - len
+      if (room > 1) out.push(p.slice(0, room - 1))
+      break
+    }
+    out.push(p)
+    len += p.length + 1
+  }
+  return out.join(' ')
+}
+
 /** 关键词边界匹配：须出现在段首或 . _ - 之后（避免 'js-tokens' 这类库名误伤）。 */
 const KEYWORD_REGEX_CACHE = new Map<string, RegExp>()
 function segmentHasKeyword(part: string, keyword: string): boolean {
@@ -139,8 +172,7 @@ export function isDshAtomicStagingPath(p: string): boolean {
  * mode='read' 只看密钥特征（段名/后缀/关键词）——读系统目录下的普通文件（库文件、配置）属正常
  * 操作；枚举目标（/etc/passwd、/etc/shadow）已由精确段名覆盖，不需要系统根。
  */
-/** DSH 安装树豁免正则（~/.dsh 下任意 profile 目录里的 node_modules 依赖树）——高频路径，提为模块常量。 */
-const DASH_PROFILES_NODE_MODULES_RE = /\/\.dsh\/(?:[^/]+\/)*node_modules\//
+/** DSH 安装树豁免：~/.dsh 下任意 profile 目录里的 node_modules 依赖树（判定见 isSensitivePath，round-17 去正则化）。 */
 export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'mutate' = 'mutate'): boolean {
   const norm = p.replace(/\\/g, '/')
   // DSH 安装树豁免：~/.dsh/**/node_modules/** 是平台自己装的公开依赖树（任意 profile 布局——
@@ -153,7 +185,11 @@ export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'muta
   // A9 设计时只考虑了 ~/.ssh/node_modules/x（该报），没预料到 DSH 安装树是合法常态。
   // 旧正则只豁免 profiles(?:/[^/]+)?——顶层 hoisted 或 .dsh 直接放 profile（无 profiles 层）
   // 都落回 .dsh 敏感段 → DSH 重启/升级重解析插件树时刷出一批 fs-probe/fs-read 误报。
-  if (DASH_PROFILES_NODE_MODULES_RE.test(norm)) return false
+  // round-17：去嵌套量词正则（(?:[^/]+\/)* 被 R9 标 medium 且最坏二次方回溯，而 isSensitivePath
+  // 在每次 fs op 上调用）。线性等价判定：某个 /.dsh/ 段之后存在 /node_modules/ 段（含尾斜杠；
+  // rmdir node_modules 本体不带尾斜杠 → 不在豁免内，与旧正则一致）。
+  const dshStateIdx = norm.indexOf('/.dsh/')
+  if (dshStateIdx !== -1 && norm.indexOf('/node_modules/', dshStateIdx + 1) !== -1) return false
   const parts = norm.split('/')
   for (let i = 0; i < parts.length; i++) {
     const low = parts[i].toLowerCase()
@@ -184,22 +220,38 @@ export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'muta
  */
 /** DSH 会话目录前缀正则（高频路径，提为模块常量）。 */
 const DSH_SESSIONS_DIR_RE = /\/\.dsh\/sessions\//
-/** 会话日志扩展名（含分片后缀）正则。 */
-const SESSION_LOG_EXT_RE = /\.(zst|zstd|jsonl|log)(?:\.[a-z0-9]+)*(\.tmp)?$/i
+/** 会话日志扩展名（含分片后缀）集合。 */
+const SESSION_LOG_EXTS = new Set(['zst', 'zstd', 'jsonl', 'log'])
+/**
+ * 线性判定（round-17：去嵌套量词正则——(?:\.[a-z0-9]+)* 形态被 R9 标 medium）。
+ * name 已小写化；去掉可选 .tmp 尾后，从末段向前走：命中会话扩展名段 → true；
+ * 命中非纯字母数字段（路径分隔符等）→ false（其后不可能再有扩展名尾巴）。
+ * 与旧正则语义一致：任意分片后缀（.zstd.9a3）、.tmp 尾、大小写不敏感、无扩展名段不命中。
+ */
+function sessionLogTailMatch(name: string): boolean {
+  const core = name.endsWith('.tmp') ? name.slice(0, -4) : name
+  const segments = core.split('.')
+  for (let i = segments.length - 1; i >= 1; i--) {
+    const seg = segments[i]
+    if (SESSION_LOG_EXTS.has(seg)) return true
+    if (seg === '' || !/^[a-z0-9]+$/.test(seg)) return false
+  }
+  return false
+}
 export function isSessionLogFile(path: string): boolean {
   const norm = path.replace(/\\/g, '/')
   // 必须在 ~/.dsh/sessions/ 下
   if (!DSH_SESSIONS_DIR_RE.test(norm)) return false
   // 文件名以压缩/日志扩展名结尾；允许分片后缀（如 session.jsonl.zstd.9a3 / .zst.001）
-  return SESSION_LOG_EXT_RE.test(norm)
+  return sessionLogTailMatch(norm.toLowerCase())
 }
 /** 取第一个字符串参数作为目标（路径/命令）。 */
 export function firstString(args: unknown[]): string | undefined {
   for (const a of args) {
-    if (typeof a === 'string') return a
+    if (typeof a === 'string') return capStr(a)
     if (typeof a === 'object' && a !== null && 'path' in a) {
       const p = (a as { path?: unknown }).path
-      if (typeof p === 'string') return p
+      if (typeof p === 'string') return capStr(p)
     }
     // round-15 review（Buffer/URL 逃逸盲区）：Node fs API 接受 Buffer（fs.rmSync(credPath)）
     // 与 URL（unlink(new URL('file:///…/id_rsa'))）形态的路径——此前只认 string，
@@ -215,18 +267,19 @@ export function firstString(args: unknown[]): string | undefined {
  * - Buffer/Uint8Array：utf8 解码（Node fs 直接接受）
  * - URL：file:// 取文件系统路径（fileURLToPath）；非 file:// 的 URL 是网络目标（http 模块用），不归路径
  * - fd 数字等：非路径，undefined
+ * round-22：解码/字符串超长截断（见 MAX_ARG_CHARS）——观测侧不承接无限输入。
  */
 export function pathArgValue(a: unknown): string | undefined {
-  if (typeof a === 'string') return a
+  if (typeof a === 'string') return capStr(a)
   if (a instanceof Uint8Array) {
     const b = Buffer.isBuffer(a) ? a : Buffer.from(a)
-    const s = b.toString('utf8')
+    const s = b.toString('utf8', 0, Math.min(b.length, MAX_ARG_CHARS))
     return s.length > 0 ? s : undefined
   }
   if (a instanceof URL) {
     if (a.protocol === 'file:') {
       try {
-        return fileURLToPath(a)
+        return capStr(fileURLToPath(a))
       } catch {
         return undefined
       }
@@ -245,10 +298,10 @@ export function pathArgValue(a: unknown): string | undefined {
 export function allStrings(args: unknown[]): string[] {
   const out: string[] = []
   for (const a of args) {
-    if (typeof a === 'string') out.push(a)
+    if (typeof a === 'string') out.push(capStr(a))
     else if (Array.isArray(a)) out.push(...allStrings(a)) // spawn/execFile 的 argv 数组
     else if (typeof a === 'object' && a !== null && 'path' in a && typeof (a as { path?: unknown }).path === 'string') {
-      out.push((a as { path: string }).path)
+      out.push(capStr((a as { path: string }).path))
     } else {
       // round-15 review（Buffer/URL 逃逸盲区，同 firstString）：路径对象形态归一
       const asPath = pathArgValue(a)

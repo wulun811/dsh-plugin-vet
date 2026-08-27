@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 
 /** T1 哨兵是否已启动（invariant 断言用）。 */
 export let sidecarSpawned = false
@@ -37,12 +38,14 @@ export function decideRespawn(
 }
 
 /**
- * P0-6（0.2.x）：T1 哨兵平台支持判定。侧车依赖 /proc（单例认亲 + 宿主存活看护 + PID 身份校验），
- * 仅 Linux 有；其余平台显式跳过——避免"哨兵首轮 exit(0) → 意外退出 → 重拉×5"的空转与
- * sentinel-down 噪音，且使"非 Linux 无 T1"成为有意设计而非意外命中。进程内 T2 钩子不受影响。
+ * P0-6（0.2.x）/round-19：T1 哨兵平台支持判定。数据源：Linux=/proc，macOS 11+=系统
+ * CLI（ps/lsof，见 runtime-watch 采样面；单例认亲 + 宿主存活看护 + PID 身份校验均有等价
+ * 实现）；其余平台（含 Windows）显式跳过——避免"哨兵首轮 exit(0) → 意外退出 → 重拉×5"的
+ * 空转与 sentinel-down 噪音，且使"无 T1"成为有意设计而非意外命中。进程内 T2 钩子不受影响。
+ * 老版本 macOS（<11）不测试不承诺：数据源差异时采样自动降级（-1/null），不崩。
  */
 export function sidecarSupportedOn(platform: NodeJS.Platform): boolean {
-  return platform === 'linux'
+  return platform === 'linux' || platform === 'darwin'
 }
 export function envSidecarPid(): number | undefined {
   const raw = process.env[SIDECAR_PID_ENV]
@@ -63,23 +66,41 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-/** M9（0.1.16 加固）：/proc/<pid>/cmdline 是否含 vet 侧车标记（Linux）。 */
-export function pidCmdlineIsVetSidecar(pid: number): boolean {
-  try {
-    return readFileSync('/proc/' + pid + '/cmdline').includes(Buffer.from('vet-sidecar'))
-  } catch {
-    return false
+/**
+ * M9（0.1.16 加固）/round-19：进程命令行是否含 vet 侧车标记。
+ * Linux 读 /proc/<pid>/cmdline；macOS 走 `ps -ww -o args= -p <pid>`（-ww 防宽度截断；
+ * 进程已消失 → ps 非零退出 → false）。platform 参数为测试接缝（Linux CI 上 procps 同样
+ * 支持 `ps -o args=`，可跨平台验 darwin 分支的真实路径）；其余平台恒 false。
+ */
+export function pidCmdlineIsVetSidecar(pid: number, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform === 'linux') {
+    try {
+      return readFileSync('/proc/' + pid + '/cmdline').includes(Buffer.from('vet-sidecar'))
+    } catch {
+      return false
+    }
   }
+  if (platform === 'darwin') {
+    try {
+      return execFileSync('ps', ['-w', '-w', '-o', 'args=', '-p', String(pid)], {
+        encoding: 'utf8', timeout: 2000, maxBuffer: 1024 * 1024,
+      }).includes('vet-sidecar')
+    } catch {
+      return false
+    }
+  }
+  return false
 }
 
 /**
- * M9（0.1.16 加固）：安全终止侧车——先核对 cmdline 再 SIGTERM，防 OS PID 复用误杀无辜进程
+ * M9（0.1.16 加固）/round-19：安全终止侧车——先核对 cmdline 再 SIGTERM，防 OS PID 复用误杀无辜进程
  * （旧实现只看 kill(pid,0) 存活即杀：侧车已退出 + 5s 窗口内 PID 被复用时会把别的进程干掉）。
- * 非 Linux（无 /proc）回退存活探测；被杀对象身份存疑时不动手并返回 false。
+ * 身份校验在 Linux（/proc）与 macOS（ps args）都做；其余平台（无数据源）回退纯存活探测。
+ * 被杀对象身份存疑时不动手并返回 false。
  */
 export function safeKillSidecar(pid: number, signal: NodeJS.Signals = 'SIGTERM'): boolean {
   if (!pidAlive(pid)) return false
-  if (process.platform === 'linux' && !pidCmdlineIsVetSidecar(pid)) return false
+  if (sidecarSupportedOn(process.platform) && !pidCmdlineIsVetSidecar(pid)) return false
   try {
     process.kill(pid, signal)
     return true

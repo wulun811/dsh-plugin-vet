@@ -19,7 +19,9 @@ import { withVetSelfIo, pathArgValue } from './runtime-denoise.js'
 
 export type ConfirmBlockMode = 'block' | 'alarm' | 'off'
 
-/** 族 1 拦截操作面（破坏类；appendFile 等可逆写不拦）。 */
+/** 族 1 拦截操作面（破坏类；appendFile 等可逆写不拦）。
+ * open/openSync 不在此集合（读/探测语义）——其写标志形态是否算破坏由 decideBlock
+ * 内的 openWriteFlagsOf 单独判定（round-22：族 2 SA2-5 分支此前因此不可达，见该处注释）。 */
 export const BLOCK_FS_OPS = new Set([
   'unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync',
   'rename', 'renameSync', 'cp', 'cpSync', 'copyFile', 'copyFileSync',
@@ -115,7 +117,21 @@ export interface BlockDecision {
 }
 
 const OVERWRITE_OPS = new Set(['writeFile', 'writeFileSync', 'truncate', 'truncateSync', 'createWriteStream'])
+/**
+ * round-16（SA2-4）：成对路径覆盖写——cp/copyFile/rename 的 dst 侧即目标侧：
+ * `cp(src, 凭据)` / `copyFile(x, id_rsa)` / `rename(x, id_rsa)` 同样销毁凭据原文
+ * （在此前族 2 拦截面之外：cp/copyFile 不在 DESTROY_OPS/OVERWRITE_OPS，src 侧判断
+ * 只查首参，dst 侧覆盖凭据整体漏拦；rename 虽在 DESTROY_OPS 但任意参即拦太宽，
+ * 这里按「dst 精确 + 已存在」的覆盖写语义统一收口）。
+ */
+const PAIR_OVERWRITE_OPS = new Set(['cp', 'cpSync', 'copyFile', 'copyFileSync', 'rename', 'renameSync'])
 const DESTROY_OPS = new Set(['unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync', 'rename', 'renameSync'])
+/** round-16（SA2-5）：open 写标志合法形态（与 runtime-classify 同源：r/w/a/x、可带 s/+）。 */
+const OPEN_WRITE_FLAG_RE = /^(?:[rwax]|[rwa][sx]|[rwa][+]|[rwa][sx][+])$/
+/** open/openSync 实参中的写标志（只读标志 r/rs 等返回 undefined；SA2-5 与族 1 共用判定）。 */
+function openWriteFlagsOf(pathArgs: string[]): string | undefined {
+  return pathArgs.slice(1).find(f => OPEN_WRITE_FLAG_RE.test(f) && /[wax+]/.test(f))
+}
 
 /**
  * 拦截决策（在 hooks 包装器内、调用原函数前执行；失败放通：任何异常 → null）。
@@ -175,9 +191,31 @@ export class ConfirmBlockStore {
           return { family: 2, reason: `凭据本体 ${target} 被覆盖写（${opName}）——原文不可恢复` }
         }
       }
-      // 族 1：该插件已有破坏/勒索确认信号 + 破坏类操作
-      if (this.f1Blocked.has(plugin) && BLOCK_FS_OPS.has(opName)) {
-        return { family: 1, reason: `该插件（${plugin}）已被确认破坏/勒索行为，后续破坏类操作被拦截（${opName}(${target.slice(0, 80)})）` }
+      // round-16（SA2-4）：成对路径操作的目标侧覆盖凭据（dst=pathArgs[1]），已存在才拦。
+      if (PAIR_OVERWRITE_OPS.has(opName)) {
+        const dst = pathArgs[1]
+        if (dst !== undefined && isCredentialFile(dst) && safeExists(dst)) {
+          return { family: 2, reason: `凭据本体 ${dst} 被覆盖写（${opName} 目标侧）——原文不可恢复` }
+        }
+      }
+      // round-16（SA2-5）：open/openSync 写标志 = 打开即截断（writeFile 同语义，但走 fd 面：
+      // open → write → close 链此前族 2 拦截面只覆盖 writeFile/truncate，fd 面凭据破坏漏拦）。
+      if ((opName === 'open' || opName === 'openSync') && isCredentialFile(target) && safeExists(target)) {
+        const flags = openWriteFlagsOf(pathArgs)
+        if (flags !== undefined) {
+          return { family: 2, reason: `凭据本体 ${target} 以写标志打开（${opName} ${flags}）——打开即截断，原文不可恢复` }
+        }
+      }
+      // 族 1：该插件已有破坏/勒索确认信号 + 破坏类操作。
+      // round-22：open/openSync 在写标志下同样是破坏（打开即截断任意目标），族 1 一并拦截；
+      // 只读 open 不拦（读不是破坏）。此前 BLOCK_FS_OPS 未含 open → 族 2 SA2-5 分支在
+      // runtime-patch 装配中不可达（blockRelevant 判定短路），已确认破坏插件的 fd 面写
+      // 破坏同漏。
+      if (this.f1Blocked.has(plugin)) {
+        const openFlags = (opName === 'open' || opName === 'openSync') ? openWriteFlagsOf(pathArgs) : undefined
+        if (BLOCK_FS_OPS.has(opName) || openFlags !== undefined) {
+          return { family: 1, reason: `该插件（${plugin}）已被确认破坏/勒索行为，后续破坏类操作被拦截（${opName}${openFlags !== undefined ? ' ' + openFlags : ''}(${target.slice(0, 80)})）` }
+        }
       }
       return null
     } catch {

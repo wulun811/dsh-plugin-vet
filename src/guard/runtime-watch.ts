@@ -1,9 +1,13 @@
 /**
- * T1 哨兵（D22）：旁路子进程监视宿主进程 /proc——VmRSS（内存）、task children（子进程数）、
- * fd 数。只报警不动作；归因粒度 = 宿主进程全局（插件共用进程，无法到插件级，见 PLAN §14.5）。
+ * T1 哨兵（D22）：旁路子进程监视宿主进程——RSS（内存）、子进程数、fd 数。
+ * 数据源按平台分派（round-19）：Linux 读 /proc（VmRSS/task children/fd，每拍全量）；
+ * macOS 11+ 走系统自带 CLI（ps 一调采 RSS/子进程数/自身 ppid；lsof 采 fd，每 3 拍降频）。
+ * 只报警不动作；归因粒度 = 宿主进程全局（插件共用进程，无法到插件级，见 PLAN §14.5）。
  * analyzeSample 是纯函数（可单测）；sidecarMain 是子进程入口（--vet-sidecar argv 触发）。
  */
 import { readFileSync, readdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { countDarwinLsofFd } from './darwin-sysinfo.js'
 
 export interface ProcSample {
   rssKb: number
@@ -87,6 +91,77 @@ export function hostPpidChanged(expected: number): boolean {
   } catch {
     return false
   }
+}
+
+// ── round-19：macOS（darwin）采样面 ─────────────────────────────────────
+// macOS 无 /proc。数据源 = 系统自带 CLI：`ps -Axo pid=,ppid=,rss=`（RSS 单位 KB，与
+// VmRSS 同尺度）一调同得宿主 RSS、宿主子进程数（ppid 匹配）、本进程 ppid（S6 收养检测）；
+// `lsof -w -p <pid> -Fn` 数 fd（每 3 拍一次——lsof 在 mac 上开销大且可能因 stale 挂载
+// 阻塞，超时/失败一律 -1 降级，不拖垮采样节拍）。
+// 版本承诺（用户决定，round-19）：只支持现代 macOS（11+，Node 22 官方支持线本身即此地板）；
+// 更老的 macOS 不测试不承诺——输出格式差异时解析自然落空 → 采样降级 -1/null（本轮跳过、
+// 不自杀、不崩），与 Linux 受限 /proc 环境同一降级契约。
+// Linux 路径零改动。
+
+/** 平台命令执行器（可注入：单测 fake，避免 CI 依赖真实 ps/lsof）。失败/超时 → null。 */
+export type CmdRunner = (cmd: string, args: string[], timeoutMs: number) => string | null
+
+const runCapture: CmdRunner = (cmd, args, timeoutMs) => {
+  try {
+    return execFileSync(cmd, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 })
+  } catch {
+    return null
+  }
+}
+
+const PS_TIMEOUT_MS = 1500
+const LSOF_TIMEOUT_MS = 1500
+/** darwin fd 采样降频：每 3 拍跑一次 lsof，其余拍复用上值（≈6s 刷新，检出粒度换开销）。 */
+const DARWIN_FD_EVERY = 3
+
+/**
+ * 解析 `ps -Axo pid=,ppid=,rss=` 全表（纯函数）。一次调用得三项：
+ * 宿主 RSS、宿主直接子进程数（含哨兵自己——与 Linux /proc children 语义一致）、
+ * 本进程 ppid。表缺宿主行（宿主已退出/ps 失败）→ sample=null；缺 self 行 → selfPpid=null
+ * （宁缺勿误判收养——调用方不据此自杀）。
+ */
+export function parseDarwinPsTable(
+  out: string,
+  hostPid: number,
+  selfPid: number,
+): { sample: { rssKb: number; childCount: number; at: number } | null; selfPpid: number | null } {
+  let hostRssKb = -1
+  let childCount = 0
+  let selfPpid: number | null = null
+  for (const line of out.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line)
+    if (m === null) continue
+    const pid = Number(m[1])
+    if (pid === hostPid) hostRssKb = Number(m[3])
+    if (pid === selfPid) selfPpid = Number(m[2])
+    if (Number(m[2]) === hostPid) childCount++
+  }
+  if (hostRssKb === -1) return { sample: null, selfPpid }
+  return { sample: { rssKb: hostRssKb, childCount, at: Date.now() }, selfPpid }
+}
+
+/** 解析 `lsof -w -Fn` 输出（纯函数）：定义已移至 darwin-sysinfo.ts（与面板共用，防漂移）；
+ * 此处再导出保持既有 import（含测试）兼容。 */
+export { countDarwinLsofFd } from './darwin-sysinfo.js'
+
+/** 解析 `ps -Axo pid=,ppid=,command=` 找同宿主的 vet 哨兵兄弟（纯函数，D30 单例锁的 darwin 面）：
+ * ppid===宿主、命令行同时含 runtime-watch.js 与 --vet-sidecar、排除自己。
+ * -ww 防 tty 宽度截断（宿主路径 + 6 个数值参数可超默认列宽）。 */
+export function parseDarwinSiblings(out: string, hostPid: number, selfPid: number): number[] {
+  const pids: number[] = []
+  for (const line of out.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)
+    if (m === null) continue
+    const pid = Number(m[1])
+    if (pid === selfPid || Number(m[2]) !== hostPid) continue
+    if (m[3].includes('runtime-watch.js') && m[3].includes('--vet-sidecar')) pids.push(pid)
+  }
+  return pids
 }
 
 /** 一个 RSS 采样点（膨胀检测用）。 */
@@ -179,8 +254,9 @@ export function analyzeSample(prev: ProcSample | null, curr: ProcSample, cfg: Wa
  * 单例锁（D30 修漏）：同宿主（PPID）下只允许一个 vet 哨兵。
  * dsh 配置热重载（改 cordis.patch.yml 触发）会重新 apply vet 插件 → installRuntimeGuard
  * 重复执行 → 重复 spawn sidecar。旧实例的 disposer 不一定被调用（重复 apply 而非替换），
- * 导致同宿主堆积多个 sidecar。让哨兵自己认亲：启动时扫 /proc，发现同 PPID 已有
- * vet-sidecar 兄弟（自己除外）即退出——无论宿主怎么重复 apply，同宿主永远只有一个哨兵。
+ * 导致同宿主堆积多个 sidecar。让哨兵自己认亲：启动时扫 /proc（darwin：`ps` 全表，
+ * 见 parseDarwinSiblings），发现同 PPID 已有 vet-sidecar 兄弟（自己除外）即退出——
+ * 无论宿主怎么重复 apply，同宿主永远只有一个哨兵。
  */
 function siblingSidecarPids(hostPid: number): number[] {
   const out: number[] = []
@@ -217,15 +293,22 @@ function siblingSidecarPids(hostPid: number): number[] {
  * respawn×5 噪音）。kill(0) 只依赖进程表（ESRCH=宿主死；EPERM=存在但不是我们子进程，
  * 视同存活），与 /proc 可用性解耦。
  * 每轮把报警以 JSON 行写到 stdout，宿主侧按行解析。
+ * @returns 采样定时器（生产入口不使用——进程常驻；测试注入 fake run 后须 clearInterval）。
  */
-export function sidecarMain(cfg: WatchConfig): void {
+export function sidecarMain(cfg: WatchConfig, deps: { platform?: NodeJS.Platform; run?: CmdRunner } = {}): NodeJS.Timeout {
+  const platform = deps.platform ?? process.platform
+  const run = deps.run ?? runCapture
   const hostPid = process.ppid
   // round-5 review（A#13）：宿主侧管道关闭（宿主崩溃/被杀前的窗口）时 stdout 写入会
   // 触发未捕获 EPIPE —— 哨兵无任何 try/catch 包 main，未捕获错误直接崩进程（结果
   // 相同：退出），但不留明确语义。error 即退出，与宿主失联时哨兵本就没有存活意义。
   process.stdout.on('error', () => process.exit(0))
   // 单例锁：同宿主已有 vet-sidecar 兄弟 → 自己是重复 spawn 的冗余实例，直接退出
-  if (siblingSidecarPids(hostPid).length > 0) {
+  //（ps 数据源失败 → 空表 = 放行，宁可重复监视也不让 T1 熄灭——与 /proc 不可读同语义）
+  if (platform === 'darwin') {
+    const table = run('ps', ['-A', '-x', '-w', '-w', '-o', 'pid=,ppid=,command='], PS_TIMEOUT_MS)
+    if (table !== null && parseDarwinSiblings(table, hostPid, process.pid).length > 0) process.exit(0)
+  } else if (siblingSidecarPids(hostPid).length > 0) {
     process.exit(0)
   }
   const hostAlive = (): boolean => {
@@ -241,11 +324,35 @@ export function sidecarMain(cfg: WatchConfig): void {
   let samples: RssSample[] = []
   let growthMultiples = 0
   const startAt = Date.now()
+  // darwin fd 降频缓存（初值 -1 = 尚无数据；第一拍即采一次）
+  let fdCached = -1
+  let fdTick = 0
+  const readDarwinSample = (): ProcSample | null => {
+    const out = run('ps', ['-A', '-o', 'pid=,ppid=,rss='], PS_TIMEOUT_MS)
+    if (out === null) return null // 数据源不可得：本轮降级（同 Linux /proc 受限契约），不自杀
+    const snap = parseDarwinPsTable(out, hostPid, process.pid)
+    // S6 同语义：self ppid 变迁（宿主死后被 launchd 收养=1）是宿主死亡的确定证据，
+    // PID 复用下 kill(0) 会误判存活。self 行缺失（null）→ 不据此自杀。
+    if (snap.selfPpid !== null && snap.selfPpid !== hostPid) process.exit(0)
+    if (snap.sample === null) return null
+    fdTick++
+    if (fdCached === -1 || fdTick % DARWIN_FD_EVERY === 1) {
+      const l = run('lsof', ['-w', '-p', String(hostPid), '-Fn'], LSOF_TIMEOUT_MS)
+      if (l !== null) fdCached = countDarwinLsofFd(l)
+    }
+    return { ...snap.sample, fdCount: fdCached }
+  }
   const tick = (): void => {
-    // S6：宿主死亡 = 本进程 ppid 变迁（被 init 收养）——PID 复用下 kill(0) 会误判存活
-    if (!hostAlive() || hostPpidChanged(hostPid)) process.exit(0)
-    // /proc 采样失败（受限环境）只降级字段（readProcSample 内部 -1/null），不自杀
-    const curr = readProcSample(hostPid)
+    if (!hostAlive()) process.exit(0)
+    let curr: ProcSample | null
+    if (platform === 'darwin') {
+      curr = readDarwinSample()
+    } else {
+      // S6：宿主死亡 = 本进程 ppid 变迁（被 init 收养）——PID 复用下 kill(0) 会误判存活
+      if (hostPpidChanged(hostPid)) process.exit(0)
+      // /proc 采样失败（受限环境）只降级字段（readProcSample 内部 -1/null），不自杀
+      curr = readProcSample(hostPid)
+    }
     if (curr === null) return
     for (const alarm of analyzeSample(prev, curr, cfg)) {
       process.stdout.write(JSON.stringify(alarm) + '\n')
@@ -268,7 +375,7 @@ export function sidecarMain(cfg: WatchConfig): void {
   tick()
   // 不能 unref：哨兵进程唯一句柄就是定时器，unref 后事件循环清空 → 首轮后进程即退出，
   // 持续膨胀检测（需要跨多轮采样）永远无法触发（D22 实测发现）
-  setInterval(tick, cfg.intervalMs)
+  return setInterval(tick, cfg.intervalMs)
 }
 
 // 子进程入口分发：仅当以 --vet-sidecar 启动时进入哨兵模式（vitest/宿主正常 import 不受影响）。

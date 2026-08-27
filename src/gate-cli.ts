@@ -9,27 +9,10 @@
  *   2 = 扫描失败
  */
 import { runGate } from './gate.js'
-
-function parseArgs(argv: string[]): Record<string, string | boolean> {
-  const args: Record<string, string | boolean> = {}
-  for (let i = 2; i < argv.length; i++) {
-    const arg = argv[i]
-    if (arg.startsWith('--')) {
-      const key = arg.slice(2)
-      const next = argv[i + 1]
-      if (next === undefined || next.startsWith('--')) {
-        args[key] = true
-      } else {
-        args[key] = next
-        i++
-      }
-    }
-  }
-  return args
-}
+import { parseCliArgs } from './cli-args.js'
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv)
+  const args = parseCliArgs(process.argv)
   
   if (args.package === undefined || typeof args.package !== 'string') {
     console.error('Usage: vet-gate --package <path> [--mode deny] [--denyOn critical] [--timeout 30000] [--osv]')

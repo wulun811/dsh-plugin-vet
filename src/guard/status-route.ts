@@ -11,6 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFileSync, writeFileSync, renameSync, rmSync, openSync, fsyncSync, closeSync } from 'node:fs'
+import { writeTmpExclusive } from './path-utils.js'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as yaml from 'js-yaml'
@@ -318,7 +319,7 @@ function atomicWritePatch(patchPath: string, content: string, previousContent: s
   } catch {
     // 快照失败不阻断主写入
   }
-  writeFileSync(tmp, content, { mode: 0o600 })
+  writeTmpExclusive(tmp, content, 0o600)
   // fsync 需要可写句柄（'r' 只读句柄在 Windows 上 fsync 报 EPERM）；失败降级不阻断
   // 写入（fsync 是掉电/崩溃持久性保障，非正确性前提——rename 仍保证原子替换）。
   try {
@@ -365,6 +366,18 @@ function sameOrigin(req: IncomingMessage): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * round-16（SEC-6）：GET 侧同源校验——浏览器同源 fetch 的 GET/HEAD（非 cors 模式）
+ * 按 fetch 规范不携带 Origin 头 → Origin 缺失放行（盾牌面板轮询不受影响）；携带了
+ * Origin 意味着请求带有浏览器源上下文，此时必须与 Host 同源，否则 403（跨站页面
+ * cors-mode 读取盾牌状态/插件详情被拒绝）。POST 侧维持既有严格语义（缺失即拒）。
+ */
+function getOriginMismatch(req: IncomingMessage): boolean {
+  const origin = req.headers.origin
+  if (origin === undefined) return false
+  return !sameOrigin(req)
 }
 
 /**
@@ -886,10 +899,20 @@ export function registerStatusRouteOnce(
         }
         if (req.method !== 'GET' || !pathname.endsWith('/vet/status.json')) {
           if (req.method === 'GET' && pathname.endsWith('/vet/plugin')) {
+            // round-16（SEC-6）：GET /vet/plugin 同源（Origin 存在时校验）
+            if (getOriginMismatch(req)) {
+              writeJson(res, 403, { ok: false, note: '跨源请求被拒绝' })
+              return
+            }
             handlePluginDetail(req, res)
             return
           }
           writeJson(res, 404, { ok: false, note: 'not found' })
+          return
+        }
+        // round-16（SEC-6）：GET /vet/status.json 同源（Origin 存在时校验）
+        if (getOriginMismatch(req)) {
+          writeJson(res, 403, { ok: false, note: '跨源请求被拒绝' })
           return
         }
         // M5：runtimeGuard = 档位展开后的生效值（盾牌按它显示开关状态）；patchRuntimeGuard =

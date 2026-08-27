@@ -16,7 +16,8 @@
  * 失效安全：任何内部错误（存储损坏、路径失败）都静默跳过（返回 no-op 结果），不打扰插件加载。
  * @module dsh-plugin-vet/version-diff
  */
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
+import { readFileSync, renameSync, mkdirSync } from 'node:fs'
+import { writeTmpExclusive } from './path-utils.js'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -163,7 +164,7 @@ export function saveCapabilities(store: CapabilityStore): void {
       }
       const tmpPath = path + '.tmp.' + process.pid
       const serialized = JSON.stringify(store, null, 2)
-      writeFileSync(tmpPath, serialized, { mode: 0o600 })
+      writeTmpExclusive(tmpPath, serialized, 0o600)
       renameSync(tmpPath, path)
       writtenStoreHashes.set(path, sha256Of(serialized))
     } catch {
@@ -226,9 +227,15 @@ export function isSensitiveFsPath(path: string): boolean {
 }
 
 function arrayDelta(prev: string[], next: string[]): { added: string[]; removed: string[] } {
-  const p = new Set(prev)
-  const n = new Set(next)
-  return { added: next.filter(x => !p.has(x)), removed: prev.filter(x => !n.has(x)) }
+  // round-21：字段级损坏（手工编辑/篡改落盘记录把某数组字段写成标量）——对象级守卫
+  // （diffManifests 的 typeof prev==='object'）与 `?? []` 都拦不住 'abc'.filter 的
+  // TypeError，整包差分被 recordScan 的 catch 吞成永久静默（正是 H2 注释承诺消灭的
+  // 隐形失效形态）。入口 Array.isArray 归一：非数组按空集处理，差分照常产出。
+  const pa = Array.isArray(prev) ? prev : []
+  const na = Array.isArray(next) ? next : []
+  const p = new Set(pa)
+  const n = new Set(na)
+  return { added: na.filter(x => !p.has(x)), removed: pa.filter(x => !n.has(x)) }
 }
 
 const emptyDelta = (): ManifestDelta => ({

@@ -4,7 +4,8 @@
  * 防止恶意 tarball 伪造包名骗过豁免。
  */
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, lstatSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
+import { readdirSync, readFileSync, lstatSync, renameSync, mkdirSync } from 'node:fs'
+import { writeTmpExclusive } from '../guard/path-utils.js'
 
 /** M7（0.1.16 加固）：基线自写 hash 记录 + 篡改标志（进程内插件改写 baseline.json 的检测）。 */
 const writtenBaselineHashes = new Map<string, string>()
@@ -254,10 +255,10 @@ export function saveBaseline(store: BaselineStore): boolean {
         // 目录已存在
       }
 
-      // 原子写：临时文件 + rename
+      // 原子写：临时文件 + rename（round-16 SEC-5：tmp 排他 'wx'，拒绝预置符号链接盲写）
       const tmpPath = path + '.tmp.' + process.pid
       const serialized = JSON.stringify(store, null, 2)
-      writeFileSync(tmpPath, serialized, { mode: 0o600 })
+      writeTmpExclusive(tmpPath, serialized, 0o600)
       renameSync(tmpPath, path)
       writtenBaselineHashes.set(path, hashOf(serialized))
       return true

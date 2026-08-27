@@ -4,7 +4,8 @@
  * 数据：扫描插件数、警报总数、拦截次数、防御中插件数。
  * 用途：盾牌面板底部展示，让用户知道"被保护了多少次"。
  */
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs'
+import { readFileSync, renameSync, mkdirSync, existsSync } from 'node:fs'
+import { writeTmpExclusive } from './path-utils.js'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
@@ -97,7 +98,7 @@ export function saveStats(stats: VetStats): void {
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
       const tmp = p + '.tmp.' + process.pid
       stats.updatedAt = Date.now()
-      writeFileSync(tmp, JSON.stringify(stats, null, 2), { mode: 0o600 })
+      writeTmpExclusive(tmp, JSON.stringify(stats, null, 2), 0o600)
       renameSync(tmp, p)
     } catch {
       // fail-open：写失败不影响主流程

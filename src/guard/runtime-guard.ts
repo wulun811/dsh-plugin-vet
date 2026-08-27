@@ -30,7 +30,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { VetConfig } from '../config.js'
 import { VetStatus } from './status.js'
 import type { WatchAlarm } from './runtime-watch.js'
-import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, extractNetworkTarget, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, chunkBytes, isTrackedNetHost, isLoopbackHost, isControlPlanePath, hookHeartbeat, registerHookTarget, brandVetHook } from './runtime-hooks.js'
+import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, extractNetworkTarget, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, isOfficialTrusted, chunkBytes, isTrackedNetHost, isLoopbackHost, isControlPlanePath, hookHeartbeat, registerHookTarget, brandVetHook } from './runtime-hooks.js'
 import { isStackTraceTampered } from './runtime-denoise.js'
 import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../package-meta.js'
@@ -255,16 +255,16 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
     if (stopping) return
     // H2：守卫已关（off/dispose）→ 不复活哨兵（pending respawn 定时器触发时走到这里）
     if (guardDisabled) return
-    // P0-6：T1 依赖 /proc（Linux 专有）。非 Linux 显式跳过——不拉哨兵、不进 respawn 循环、
-    // 清 env 注册表；避免"首轮 exit(0) → 意外退出 → 重拉×5"的空转与 sentinel-down 噪音。
-    // T2 钩子不受影响（进程内防线照常装配）。
+    // P0-6/round-19：T1 支持 Linux（/proc）与 macOS（ps/lsof）。其余平台（含 Windows）显式
+    // 跳过——不拉哨兵、不进 respawn 循环、清 env 注册表；避免"首轮 exit(0) → 意外退出 →
+    // 重拉×5"的空转与 sentinel-down 噪音。T2 钩子不受影响（进程内防线照常装配）。
     if (!sidecarSupportedOn(process.platform)) {
       setSidecarSpawned(false)
       sidecarAlive = false
       delete process.env[SIDECAR_PID_ENV]
       if (!sidecarSkippedWarned) {
         setSidecarSkippedWarned(true)
-        ctx.logger.info('vet: T1 哨兵依赖 /proc（仅 Linux），当前平台跳过——内存/子进程/fd 监控不生效；T2 钩子与静态扫描不受影响')
+        ctx.logger.info('vet: T1 哨兵支持 Linux/macOS，当前平台跳过——内存/子进程/fd 监控不生效；T2 钩子与静态扫描不受影响')
       }
       return
     }
@@ -479,7 +479,8 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
           if (!(isRootIndexing() || isVetSelfIo())) {
             let hint: string | undefined
             try { hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
-            if (alarm !== null && (hint === undefined || !isOfficial(hint))) {
+            // round-16（SEC-1）：告警面抑制用内容信任锚（名称级会被伪名 tarball 整片绕过）
+            if (alarm !== null && (hint === undefined || !isOfficialTrusted(hint))) {
               sink({ ...alarm, pluginHint: hint })
             }
             // N3 台账：dgram 写出字节 + NET_WRITE token
@@ -496,7 +497,7 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
             // N3/N4：dgram 报文体 = 密钥外泄内容匹配 + 金丝雀匹配
             const msgText = typeof sendArgs[0] === 'string' ? sendArgs[0] : ''
             recordKeyLeak('body', msgText, hint)
-            if (canaryStore.count() > 0 && (hint === undefined || !isOfficial(hint))) {
+            if (canaryStore.count() > 0 && (hint === undefined || !isOfficialTrusted(hint))) {
               const chit = canaryStore.match(msgText)
               if (chit !== undefined) recordCanary('body', chit, hint)
             }
@@ -541,7 +542,7 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
               target: t.slice(0, 120),
             })
           }
-          if (alarm !== null && (hint === undefined || !isOfficial(hint))) {
+          if (alarm !== null && (hint === undefined || !isOfficialTrusted(hint))) {
             sink({ ...alarm, pluginHint: hint })
           }
           // round-13（Phase 3）：fetch 侧本地 API 回环观测（与 patchNetworkModule 同语义）

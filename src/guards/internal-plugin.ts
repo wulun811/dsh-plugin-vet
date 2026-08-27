@@ -9,7 +9,7 @@ import { PACKAGE_NAME } from '../package-meta.js'
 import { isVetSelfPath } from '../pkg-root.js'
 import { incrementScanned, incrementBlocked } from '../guard/stats.js'
 import { hasAuditRecord, auditRequiredMessage, setArchiveIoWarn } from '../audit/archive.js'
-import { withVetSelfIo } from '../guard/runtime-hooks.js'
+import { withVetSelfIo, markOfficialTrusted } from '../guard/runtime-hooks.js'
 import { capabilityDiff } from '../guard/capability-diff.js'
 import { recordScan as recordVersionScan, consumeCapabilitiesTamper } from '../guard/version-diff.js'
 import { recordScanSummary } from '../guard/scan-summaries.js'
@@ -155,7 +155,12 @@ function classifyOfficial(packageName: string, packageRoot: string | undefined, 
     }
     return { kind: 'exempt', reason: 'first-seen' }  // 首次见到，信任（v5 修订：砍掉白名单，与 VET 信任官方包的定位一致）
   }
-  if (result === 'match') return { kind: 'exempt', reason: 'match' }  // 内容一致，信任
+  if (result === 'match') {
+    // round-16（SEC-1）：内容哈希与历史基线一致 → 写入官方信任锚（运行时防线抑制的
+    // 唯一真值源之一；first-seen 刻意不登记——TOFU 窗口照常观测/拦截，见 runtime-attrib）
+    markOfficialTrusted(packageName)
+    return { kind: 'exempt', reason: 'match' }  // 内容一致，信任
+  }
   const ackList = config.acknowledgedPackageHashes[`${packageName}@${version}`] ?? []
   return { kind: 'mismatch', version, hash, acknowledged: ackList.includes(hash) }
 }
@@ -236,6 +241,10 @@ async function reconcileMismatch(status: VetStatus | undefined, name: string, ve
   if (v.status === 'resolved' && v.officialHash === verdict.hash) {
     const store = getBaseline()
     recordBaseline(name, verdict.version, verdict.hash, store)
+    // round-16（SEC-1）：本机字节 == 官方 registry tarball → 内容验证通过，登记官方信任锚
+    // （运行时防线抑制的真值源之一；registry-verify 自身不感知本机 hash，故信任登记在
+    // 「哈希相等」成立的本分支——resolved 但字节不一致是坐实篡改，绝不能给信任）
+    markOfficialTrusted(name)
     if (!saveBaseline(store)) {
       status?.record({
         id: 'baseline-save-fail:' + name,
@@ -317,7 +326,10 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // 校验不对称）。root 解析失败（vet 为 bundle 形态，不在 profile node_modules）→
     // 按本体豁免（保守：bundle 是 vet 自身）；解析成功则必须 realpath 命中本体才豁免，
     // 冒名包继续走完整检查与扫描（verdict 判定）。
-    if (entryName === PACKAGE_NAME && (root === undefined || isVetSelfPath(root))) return
+    // round-16（SA2-6）：root===undefined 不再豁免——「名字 + 无法解析的根」同样可以是
+    // 冒名构造（损坏 package.json / 非常规安装位置），身份无法自证时名字匹配不作数；
+    // 换为「root 可解析且 realpath 命中 vet 本体」唯一豁免形态。
+    if (entryName === PACKAGE_NAME && root !== undefined && isVetSelfPath(root)) return
     const installedVersion = root === undefined ? undefined : readInstalledVersion(root)
 
     // P-5：官方包内容哈希判定（0.1.21：report 模式 mismatch 异步对账 registry 定性）
@@ -524,7 +536,23 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       }
     }
 
-    if (root === undefined) return
+    // round-16（SA2-6）：root 解析失败（包不在任一解析基准链上/package.json 损坏）——
+    // requireAudit / 三方基线等身份无关的检查已在上方执行完毕；此处是扫描门禁尾巴：
+    // deny 模式对「无法解析根的包」必须 fail-closed（此前直接 return 静默放行——该类包
+    // 逃脱静态门禁；根无法解析正是冒名者可能的构造形态：claimed 名与实际安装位置分离）。
+    // 例外（D30 契约）：requireAudit 开启且已有健康档案 = 人工审查放行（档案是人的批准，
+    // 无根时这是唯一的信任信号；保守维持既有契约）；无档案或 requireAudit 关闭 → 拦截。
+    // vet 自身条目（非常规布局无法自证身份）不拦截——拦截会让引导承载方随 vet 一起失败，
+    // 但同样不豁免（上方身份豁免已收窄到 realpath 命中）。
+    if (root === undefined) {
+      const audited = config.requireAudit === true && hasAuditRecord(entryName, undefined)
+      if (config.mode === 'deny' && entryName !== PACKAGE_NAME && !audited) {
+        incrementBlocked()
+        void fiber.dispose()
+        throw new Error(`vet: 无法定位 ${entryName} 的包根（resolvePackageRoot 失败）——deny 模式拒绝加载（fail-closed）`)
+      }
+      return
+    }
     const files = listSourceFiles(root)
     // round-12（R17/R18 扫描面扩展）：配置面已由 listSourceFiles 根级配置名带出；
     // 指令/技能文件按 config.scanSurface.instructionFiles 追加（默认开）

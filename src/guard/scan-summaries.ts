@@ -15,7 +15,8 @@
  * 诚实边界：ruleCodes/osv 来自静态扫描报告快照；运行时观测能力不在本库（capability-diff
  * 观测集只在进程内存），详情页展示时须标注口径。
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { writeTmpExclusive } from './path-utils.js'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
@@ -41,6 +42,16 @@ interface ScanSummaryStore {
 
 const MAX_KEPT = 200
 
+/**
+ * round-16（SEC-4）：对象键劫持防护——插件名若为 __proto__/prototype/constructor，
+ * 直接作为 records 键会污染原型链/遮蔽 Object 构造（`records['__proto__'] = x` 是
+ * 原型赋值，JSON 序列化静默丢弃 → 记录丢失且对象原型被改）。统一加 '_' 前缀归一，
+ * 读 / 写 / 查询侧同一函数，两侧永远一致。
+ */
+function safeRecordKey(name: string): string {
+  return name === '__proto__' || name === 'prototype' || name === 'constructor' ? '_' + name : name
+}
+
 let summariesDirOverride: string | undefined
 
 /** C3 同款纪律：默认目录模块加载时定值（homedir() 随 $HOME 变，防运行时 env 重定向）。 */
@@ -65,9 +76,11 @@ function loadStore(): ScanSummaryStore {
       if (parsed === null || typeof parsed !== 'object' || parsed.records === null || typeof parsed.records !== 'object') {
         return { records: {} }
       }
-      // 单条最小结构校验（残缺记录丢弃，不让坏数据污染面板）
+      // round-16（SEC-4）：文件落盘键也归一（读侧与写侧同键，见 safeRecordKey）
       const records: Record<string, ScanSummary> = {}
       for (const [key, rec] of Object.entries(parsed.records)) {
+        const k = safeRecordKey(key)
+        // 单条最小结构校验（残缺记录丢弃，不让坏数据污染面板）
         if (
           rec !== null && typeof rec === 'object' &&
           typeof (rec as ScanSummary).name === 'string' &&
@@ -76,7 +89,7 @@ function loadStore(): ScanSummaryStore {
           typeof (rec as ScanSummary).staticScore === 'number' &&
           Array.isArray((rec as ScanSummary).ruleCodes)
         ) {
-          records[key] = rec as ScanSummary
+          records[k] = rec as ScanSummary
         }
       }
       return { records }
@@ -89,14 +102,24 @@ function loadStore(): ScanSummaryStore {
 
 function saveStore(store: ScanSummaryStore): void {
   withVetSelfIo(() => {
-    try {
-      const path = summariesPath()
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-      const tmpPath = path + '.tmp.' + process.pid
-      writeFileSync(tmpPath, JSON.stringify(store), { mode: 0o600 })
-      renameSync(tmpPath, path)
-    } catch {
-      // 写入失败静默跳过：摘要是增强信息，不值得为它打扰插件加载
+    // Windows：rename 目标被短暂占用（实时扫描/索引/杀软）会抛 EBUSY/EPERM——
+    // 高 IO 下偶发丢记录（LRU 边界测试可复现）。短退避重试 3 次；仍失败则
+    // 静默跳过（摘要是增强信息，不值得为它打扰插件加载）。Linux 一次成功，无行为变化。
+    const path = summariesPath()
+    const tmpPath = path + '.tmp.' + process.pid
+    let attempt = 0
+    while (attempt < 3) {
+      try {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+        writeTmpExclusive(tmpPath, JSON.stringify(store), 0o600)
+        renameSync(tmpPath, path)
+        return
+      } catch {
+        attempt++
+        if (attempt >= 3) return
+        try { rmSync(tmpPath, { force: true }) } catch { /* 残留 tmp 由下轮 writeTmpExclusive 重写 */ }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+      }
     }
   })
 }
@@ -116,14 +139,15 @@ export function recordScanSummary(summary: ScanSummary): void {
   withVetSelfIo(() => {
     try {
       const store = loadStore()
-      const prev = store.records[summary.name]
+      const key = safeRecordKey(summary.name)
+      const prev = store.records[key]
       const changed =
         prev === undefined ||
         prev.verdict !== summary.verdict ||
         prev.version !== summary.version ||
         !sameRuleCodes(prev.ruleCodes, summary.ruleCodes)
       if (!changed) return
-      store.records[summary.name] = summary
+      store.records[key] = summary
       // LRU：超出上限按 at 淘汰最旧
       const keys = Object.keys(store.records)
       if (keys.length > MAX_KEPT) {
@@ -139,7 +163,7 @@ export function recordScanSummary(summary: ScanSummary): void {
 
 /** 单包摘要（无记录返回 undefined）。 */
 export function getScanSummary(name: string): ScanSummary | undefined {
-  return loadStore().records[name]
+  return loadStore().records[safeRecordKey(name)]
 }
 
 /** 最近 limit 条（按 at 倒序）——「最近插件」列表数据源（D7：存 200、展示 20）。 */

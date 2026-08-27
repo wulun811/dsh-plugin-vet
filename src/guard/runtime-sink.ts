@@ -13,7 +13,7 @@ import { exfilLedger, detectKeyLeaks, type LedgerAlarm, type LedgerFsEvent, type
 import { canaryStore } from './canary.js'
 import { confirmBlock } from './confirm-block.js'
 import { arm as armForensics, record as recordForensics, isArmed as forensicsArmed } from './forensics.js'
-import { isOfficial } from './runtime-hooks.js'
+import { isOfficialTrusted } from './runtime-hooks.js'
 import type { HookAlarm } from './runtime-hooks.js'
 import { checkAlarmInContract } from './contract.js'
 import type { Contract } from './contract.js'
@@ -104,7 +104,9 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
     // 官方包信任（能力授权，P2-6）：官方归因的报警全部降噪——官方包是平台本体，
     // dsh 自身高频读写 ~/.dsh（会话持久化/配置/存储），.dsh 敏感段加入后若只降噪 spawn
     // 会刷屏成永久黄灯。报警面 = 第三方插件与无主操作；第三方无法伪造归因（按真实栈路径判定）。
-    if (alarm.pluginHint !== undefined && isOfficial(alarm.pluginHint)) return
+    // round-16（SEC-1）：判据改内容信任锚 isOfficialTrusted——名称级 isOfficial 会被伪名
+    // tarball（package.json name 写成 @deepseek-ai/*）整片绕过（报警/拦截/外泄/金丝雀全盲）。
+    if (alarm.pluginHint !== undefined && isOfficialTrusted(alarm.pluginHint)) return
     // N7 族 3/4 报警只对第三方归因有效（宿主/用户自己写 bashrc、npm install 等无主操作不报）
     if ((alarm.kind === 'persistence-write' || alarm.kind === 'install-write') && alarm.pluginHint === undefined) return
     // 无主会话日志删除静默（isSuppressUnattributedSessionLog）：DSH 宿主压缩/轮转会话日志
@@ -207,7 +209,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
   // 持久化路径（同 host 插件可读状态面定向剔除预埋值，摧毁 N4「出现即实锤」前提）。
   // 与 key-leak 同款纪律：id/target 只留 hashShort 指纹，message 保留可读前 16 位 + 长度。
   const recordCanary = (where: 'url' | 'body' | 'spawn', hit: string, plugin: string | undefined): void => {
-    if (plugin !== undefined && isOfficial(plugin)) return
+    if (plugin !== undefined && isOfficialTrusted(plugin)) return
     if (plugin !== undefined) exfilLedger.markSuspected(plugin)
     // P0-2 取证：金丝雀外泄 = 100% 确认恶意 → 启动详细取证模式（后续微小活动全量落盘）
     if (plugin !== undefined) armForensics(plugin)
@@ -227,7 +229,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
   }
   // 0.1.20：密钥外泄内容匹配（PEM/AWS key 格式；纯函数 detectKeyLeaks 于 exfil-ledger）
   const recordKeyLeak = (where: 'url' | 'body', text: string, plugin: string | undefined): void => {
-    if (plugin !== undefined && isOfficial(plugin)) return
+    if (plugin !== undefined && isOfficialTrusted(plugin)) return
     const leaks = detectKeyLeaks(text)
     if (leaks.length === 0) return
     
@@ -274,7 +276,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
     }
   }
   const ledgerFsObserver = (evt: LedgerFsEvent): void => {
-    if (evt.plugin !== undefined && isOfficial(evt.plugin)) return
+    if (evt.plugin !== undefined && isOfficialTrusted(evt.plugin)) return
     // P0-2 取证：已武装插件的每次 fs/子进程操作全量落盘（操作形状 + 目标，不落会话内容）
     if (forensicsArmed(evt.plugin)) {
       recordForensics(evt.plugin, { module: evt.module, op: evt.op, target: evt.target, paths: evt.paths, sensitive: evt.sensitive })
@@ -287,7 +289,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
     emitLedger(evt.plugin, exfilLedger.observeFs(evt))
   }
   const ledgerNetObserver = (evt: LedgerNetEvent): void => {
-    if (evt.plugin !== undefined && isOfficial(evt.plugin)) return
+    if (evt.plugin !== undefined && isOfficialTrusted(evt.plugin)) return
     // P0-2 取证：已武装插件的网络出口全量落盘
     if (forensicsArmed(evt.plugin)) {
       recordForensics(evt.plugin, { module: evt.module, op: evt.op, target: evt.hostname })

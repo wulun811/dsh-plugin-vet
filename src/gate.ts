@@ -49,14 +49,13 @@ export async function runGate(request: GateRequest): Promise<GateResult> {
     })
   }
   const mode = request.mode ?? 'report'
-  const denyOn = request.denyOn ?? 'critical'
   // round-15 review（A#15 同款 fail-closed 对齐）：扫描器协议漂移出现未知 verdict 时
   // RANK[verdict] 为 undefined——`undefined >= RANK[denyOn]` 恒 false，deny 判定静默
   // 失效（fail-open）且无任何日志。未知 verdict = 扫描结果不可信 → deny 模式按拦截处理
   // （与 tool-execute/internal-plugin 的 M9 可判定性纪律一致），report 模式保持原样返回。
   const verdictKnown = verdict in RANK
-  const blocked = mode === 'deny' && (verdictKnown ? RANK[verdict] >= RANK[denyOn] : true)
-  
+  const blocked = decideDenyBlock(mode, request.denyOn, verdict, verdictKnown)
+
   return {
     verdict,
     staticScore,
@@ -66,4 +65,15 @@ export async function runGate(request: GateRequest): Promise<GateResult> {
     findings,
     blocked,
   }
+}
+
+/**
+ * deny 门禁判定（round-22 拆出为可测纯函数）。
+ * fail-closed 两点：未知 verdict（扫描结果不可信 → deny 必拦）；非法 denyOn（未类型化
+ * 调用方传入时 RANK[denyOn] 为 undefined——`x >= undefined` 恒 false 会让 deny 对任何
+ * 判定都静默失效）→ 归位最严档位 critical（至少按默认策略拦，绝不比默认更松）。
+ */
+export function decideDenyBlock(mode: string | undefined, denyOn: string | undefined, verdict: string, verdictKnown: boolean): boolean {
+  const denyRank = RANK[denyOn ?? 'critical'] ?? RANK.critical
+  return (mode ?? 'report') === 'deny' && (verdictKnown ? RANK[verdict] >= denyRank : true)
 }

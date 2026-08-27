@@ -149,6 +149,20 @@ function trimWindow<T extends { at: number }>(arr: T[], now: number, windowMs: n
   while (arr.length > 0 && arr[0].at < cutoff) arr.shift()
 }
 
+/** readTimes 修剪触发阈值（键数超过才考虑扫描，热路径零开销）。 */
+export const READ_TIMES_PRUNE_THRESHOLD = 256
+
+/** 是否该对 readTimes 做全表惰性修剪（round-21，纯函数便于单测）。
+ * 旧逻辑 `size > 256` 每次读事件无条件全扫：被观测面正是恶意主场景（凭据狩猎 = 窗口内
+ * 扫几万条不同路径），窗口未过时键不删、size 不降 → 之后**每次读都付 O(size) 扫描**，
+ * 观测自身退化为 O(n²) 且可被被观测者放大成对宿主的 DoS。加时间闸：每 windowMs 至多
+ * 扫一次——窗口内键数上限即被观测者读事件速率上限×窗口，内存有界（每键 ~50B），
+ * 而修剪频率与窗口语义匹配（窗口外的键反正不参与判定，留着只是晚删）。 */
+export function shouldPruneReadTimes(size: number, now: number, lastPruneAt: number, minGapMs: number): boolean {
+  if (size <= READ_TIMES_PRUNE_THRESHOLD) return false
+  return now - lastPruneAt >= minGapMs
+}
+
 /** 窗口数组计数上限（round-16 review S2）：窗口内事件爆发（如 10s 内 100 万次 unlink）
  * 会让 deletes/writeEvents 等数组无界增长——内存 O(n) 且每次检查的线性扫描/reduce
  * 变成 O(n²)。阈值最高只有 20 量级，截断到 2048 不影响任何签名判定；只丢最旧样本。
@@ -183,6 +197,8 @@ interface LedgerRow {
   renames: { at: number; from: string; to: string }[]
   writeEvents: { at: number; bytes: number; path: string }[]
   readTimes: Map<string, number>
+  /** readTimes 上次全表修剪时刻（round-21 时间闸；初始 0 = 首次越阈即扫）。 */
+  lastReadPruneAt: number
   inPlace: { at: number; path: string }[]
   suspected: boolean
   lastSeen: number
@@ -204,6 +220,7 @@ function newRow(now: number): LedgerRow {
     renames: [],
     writeEvents: [],
     readTimes: new Map(),
+    lastReadPruneAt: 0,
     inPlace: [],
     suspected: false,
     lastSeen: now,
@@ -365,7 +382,10 @@ export class ExfilLedger {
         // writeEvents 都在 push 时 trimWindow；readTimes 只靠 24h TTL 整行淘汰）——
         // 插件遍历大量不同敏感路径时 Map 键线性累积。按窗口惰性修剪（保窗口内判定
         // 所需），写到 256 键以上才触发扫描，兼顾热路径零开销。
-        if (row.readTimes.size > 256) {
+        // round-21 review：补时间闸（每 windowMs 至多一扫）——无闸时"窗口内扫大量
+        // 不同路径"这一恶意主场景会让 size 恒 >256，每次读都付全表扫描 → O(n²)。
+        if (shouldPruneReadTimes(row.readTimes.size, now, row.lastReadPruneAt, this.windowMs)) {
+          row.lastReadPruneAt = now
           for (const [p, at] of row.readTimes) {
             if (now - at > this.windowMs) row.readTimes.delete(p)
           }

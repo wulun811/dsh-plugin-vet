@@ -161,8 +161,30 @@ export class VetStatus {
       if (matchGroup(this.alarms[i])) this.alarms.splice(i, 1)
     }
     this.alarms.unshift({ ...alarm, count: Math.max(1, alarm.count ?? 1) })
-    if (this.alarms.length > this.alarmMax) this.alarms.length = this.alarmMax
+    if (this.alarms.length > this.alarmMax) this.trimToMax()
     return 'new'
+  }
+
+  /**
+   * round-16（SA2-3）：环形缓冲裁剪保护红色报警——风暴期从尾部（最旧）裁剪时跳过 red：
+   * 红色（破坏/外泄等高置信信号）不被黄色/信息噪声挤出缓冲（此前 `length = alarmMax` 直裁
+   * 尾部，黄色风暴可把唯一的红色挤出——盾牌级别与告警列表同时失明于最严重信号）。
+   * 全红时退让最旧一条（否则缓冲永不收容新报警，record 进入活锁）。
+   */
+  private trimToMax(): void {
+    while (this.alarms.length > this.alarmMax) {
+      const last = this.alarms.length - 1
+      if (this.alarms[last].severity !== 'red') {
+        this.alarms.pop()
+        continue
+      }
+      let idx = -1
+      for (let i = last; i >= 0; i--) {
+        if (this.alarms[i].severity !== 'red') { idx = i; break }
+      }
+      if (idx === -1) idx = last
+      this.alarms.splice(idx, 1)
+    }
   }
 
   /** 记录一次扫描回显（suspicious 会把盾牌抬到 yellow）。 */
