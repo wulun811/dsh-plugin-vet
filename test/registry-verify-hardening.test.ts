@@ -1,12 +1,38 @@
 import { describe, expect, it, vi } from 'vitest'
 import { execFile } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { gzipSync } from 'node:zlib'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { hashPackTarball, verifyAgainstRegistry } from '../lib/guards/registry-verify.js'
 
 const execFileAsync = promisify(execFile)
+
+/** 手工构造含指定成员名的 ustar tarball（gzip）——macOS BSD tar 无 GNU --transform，
+ * 跨平台同一构造；GNU/BSD tar -tvzf 均按字面列出成员名。 */
+function makeMemberTgz(memberName: string, content: string): Buffer {
+  const name = Buffer.from(memberName, 'utf8')
+  const data = Buffer.from(content, 'utf8')
+  const header = Buffer.alloc(512)
+  name.copy(header, 0, 0, Math.min(name.length, 100))
+  header.write('0000644\0', 100, 'ascii')
+  header.write('0000000\0', 108, 'ascii')
+  header.write('0000000\0', 116, 'ascii')
+  header.write(data.length.toString(8).padStart(11, '0') + '\0', 124, 'ascii')
+  header.write('00000000000\0', 136, 'ascii')
+  header.fill(' ', 148, 156) // chksum 占位（空格）
+  header.write('0', 156, 'ascii') // 普通文件
+  header.write('ustar\0', 257, 'ascii')
+  header.write('00', 263, 'ascii')
+  let sum = 0
+  for (let i = 0; i < 512; i++) sum += header[i]
+  header.write(sum.toString(8).padStart(6, '0'), 148, 'ascii')
+  header[154] = 0
+  header[155] = 0x20
+  const pad = data.length % 512 === 0 ? 0 : 512 - (data.length % 512)
+  return gzipSync(Buffer.concat([header, data, Buffer.alloc(pad), Buffer.alloc(1024)]))
+}
 
 /** 三轮审查回归：registry 对账解包与 tarball 来源加固。 */
 describe('registry-verify 加固（三轮审查）', () => {
@@ -27,21 +53,14 @@ describe('registry-verify 加固（三轮审查）', () => {
   })
 
   it.skipIf(process.platform === 'win32')("含 '../' 成员的恶意 tarball 被拒且不落盘到临时目录之外", async () => {
-    const stage = mkdtempSync(join(tmpdir(), 'vet-evil-stage-'))
-    const payloadDir = mkdtempSync(join(tmpdir(), 'vet-evil-payload-'))
-    writeFileSync(join(payloadDir, 'marker.txt'), 'traversal')
     try {
-      // GNU tar --transform 给所有成员名加 ../../ 前缀 → 构造字面 '../' 成员
-      await execFileAsync('tar', [
-        '-czf', join(stage, 'evil.tgz'), '-C', payloadDir,
-        '--transform', 's|^|../../|', 'marker.txt',
-      ])
-      const buf = await import('node:fs').then(fs => fs.readFileSync(join(stage, 'evil.tgz')))
+      // 手工构造字面 '../' 成员（../../marker.txt）——GNU --transform 是 Linux 专属，
+      // macOS BSD tar 不支持；ustar 手工构造跨平台同一语义。
+      const buf = makeMemberTgz('../../marker.txt', 'traversal')
       const hash = await hashPackTarball(buf)
       expect(hash).toBeNull()
     } finally {
-      rmSync(stage, { recursive: true, force: true })
-      rmSync(payloadDir, { recursive: true, force: true })
+      // 无临时目录需要清理（手工构造，未落盘）
     }
   })
 

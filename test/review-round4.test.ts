@@ -84,7 +84,10 @@ describe('round-4：成对路径操作的蜜罐/完整性目标侧判定（M5）
   it('cp/rename 目标侧命中完整性金丝雀 → red integrity（读源侧不报）', () => {
     const marker = join(dir, 'vet-integrity-1')
     writeFileSync(marker, 'x')
-    const cfg = { ...CFG, integrityRoots: [marker] }
+    // sensitiveRoots 去 /var：macOS tmpdir=/var/folders/** 落在系统根下，marker 会被
+    // fs-write 误伤（测试假设 tmpdir 不在敏感根——Linux /tmp 成立，macOS /var 不成立）。
+    // integrity 判定独立于 sensitiveRoots，语义不受影响。
+    const cfg = { ...CFG, integrityRoots: [marker], sensitiveRoots: ['/etc', '/usr', '/boot', '/bin', '/sbin'] }
     const cp = classifyOp({ module: 'fs', op: 'cpSync', args: ['/tmp/x', marker] }, cfg)
     expect(cp?.kind).toBe('integrity')
     expect(cp?.severity).toBe('red')

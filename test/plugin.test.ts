@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -72,8 +72,9 @@ describe('resolvePackageRoot（符号链接/非 vet 安装目录解析）', () =
     try {
       // 不传 baseDir（vet realpath 解析）→ 找不到
       expect(resolvePackageRoot('@vet-test/remote')).toBeUndefined()
-      // 传 profile 目录 → 找到
-      expect(resolvePackageRoot('@vet-test/remote', profile)).toBe(join(profile, 'node_modules', '@vet-test', 'remote'))
+      // 传 profile 目录 → 找到（resolvePackageRoot 经 createRequire realpath——macOS
+      // /var → /private/var 符号链接，期望值同样 realpath 归一）
+      expect(resolvePackageRoot('@vet-test/remote', profile)).toBe(realpathSync(join(profile, 'node_modules', '@vet-test', 'remote')))
     } finally {
       rmSync(profile, { recursive: true, force: true })
     }
@@ -85,7 +86,7 @@ describe('resolvePackageRoot（符号链接/非 vet 安装目录解析）', () =
     mkdirSync(pkgDir, { recursive: true })
     writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@vet-test/fileurl', version: '1.0.0', main: 'index.js' }))
     try {
-      expect(resolvePackageRoot('@vet-test/fileurl', 'file://' + profile)).toBe(join(profile, 'node_modules', '@vet-test', 'fileurl'))
+      expect(resolvePackageRoot('@vet-test/fileurl', 'file://' + profile)).toBe(realpathSync(join(profile, 'node_modules', '@vet-test', 'fileurl')))
     } finally {
       rmSync(profile, { recursive: true, force: true })
     }
