@@ -7,6 +7,42 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Added
 
+- **Alarm-fatigue rebuild for C2 coverage alerts (0.3.3, user-side 0.3.2 evaluation)**:
+  official packages (content-baseline trust anchor, first-seen/match) no longer raise yellow
+  `esm-guard-coverage` alarms — their ESM-named-builtin T2 blind spot is an accepted
+  architectural fact, so it is now emitted as an **info observation** aggregated into a single
+  cross-package row (`×N` count, mergeKey `scan:esm-guard-coverage:official`), excluded from
+  `alarmCount` and shield level, while remaining visible in the alarm timeline / detail page /
+  nutrition label (detection and retention layers stay untouched; N6 upgrade-diff and the T1
+  sentinel keep covering change scenarios). Third-party packages keep the yellow alarm (that
+  boundary **is** the audit value for them).
+- **Persistent stateful dedup for coverage alerts (P3)**: new `~/.dsh/vet/known-boundaries.json`
+  records `(kind, pkg, version, capabilitiesHash)` — the same boundary is not re-reported for
+  unchanged version+capabilities across restarts (kills the "restart always replays the same
+  batch" fatigue), while a capability-diff change (the only informative scenario, same change
+  source as N6) re-raises. Fail-open: unreadable/unwritable store degrades to "re-report"
+  (never silent). In-session `Map` now keys on the capability hash so capability changes can
+  re-report even when the store cannot persist.
+- **P7 fs-probe denoise**: unattributed (host-frame) lstat/stat/access probes of
+  `~/.dsh/sessions/**` transient artifacts (`*.tmp` etc.) — DSH's own session-store housekeeping
+  — no longer raise yellow `fs-probe`; plugin-attributed touches, write/delete operations,
+  honeypots and integrity canaries still alarm.
+- **P6 boot summary**: one debounced log line per startup scan wave summarizing C2 boundary
+  observations (official = info-aggregated, third-party = yellow count), making the
+  "14 official packages sharing one architectural boundary" fact explicit.
+- **Suite 0.3.3**: `known-boundaries` store cases (auto-revoke on version/capability change,
+  cross-process persistence, corrupt-record fail-open, read-only store), official-anchor C2
+  info-aggregation wiring, third-party P3 dedup wiring (no replay / re-alarm on capability
+  diff), mismatch-unconfirmed official names staying yellow, P7 denoise wiring + boundaries,
+  and info-not-counted-in-`alarmCount` status cases → **75 files / 1113 tests**.
+
+### Changed
+
+- **`alarmCount` semantics narrowed to "actionable risk" (0.3.3)**: info-severity observations
+  stay in the alarm list (logged section, dismissible) but no longer count into `alarmCount`
+  or the shield level — the panel number now means "things you can and should act on" instead
+  of mixing in permanently unresolvable architecture facts.
+
 - **Intro panel copy census (round-23)**: hardcoded product claims replaced with observed
   numbers — 20 rule classes (R1–R20) / 144 regex-level detection forms (AST census of
   `scanner-bin/rules`) / 42 live alarm types (all `src/guard` kinds minus 9 internal

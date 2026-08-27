@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { patchModule, DEFAULT_HOOK_CONFIG } from '../lib/guard/runtime-hooks.js'
-import { isDshWebTempArtifact, isDshAtomicStagingPath } from '../lib/guard/runtime-denoise.js'
+import { isDshWebTempArtifact, isDshAtomicStagingPath, isDshRuntimeTempPath } from '../lib/guard/runtime-denoise.js'
 import type { HookAlarm, HookConfig } from '../lib/guard/runtime-hooks.js'
 
 /**
@@ -157,6 +157,83 @@ describe('DSH 原子写暂存目录无归因豁免（六轮用户反馈：settin
     const disp = patchModule(mod, 'fs', cfg, a => sink.push(a), () => new Map())
     try {
       mod.rmdirSync(USER_STAGING)
+      expect(sink.some(a => a.kind === 'integrity' && a.severity === 'red')).toBe(true)
+    } finally { disp() }
+  })
+})
+
+/**
+ * 0.3.3（P7，用户警报疲劳反馈）：DSH 宿主会话存储写临时文件（~/.dsh/sessions 下的
+ * *.tmp 等，随用随清）——lstat/stat 探针成对出现，栈里只有宿主帧 → 无归因 → 每次
+ * 会话轮转刷 yellow fs-probe（实测：~/.dsh/sessions 下临时件被 lstat）。
+ * 修复：仅对侦察类（fs-probe）+ 无归因 + 未篡改降噪；写/删同类路径不走此豁免
+ * （会话日志轮换已有 isSessionLogFile 独立语义）；插件归因照报。
+ */
+describe('DSH sessions 运行时临时件无归因侦察豁免（P7）', () => {
+  it('匹配器：sessions/ 下临时后缀命中；本体/凭据/其他目录不命中', () => {
+    expect(isDshRuntimeTempPath('/home/u/.dsh/sessions/sess-abc.tmp')).toBe(true)
+    expect(isDshRuntimeTempPath('/home/u/.dsh/profiles/web/node_modules/x/.dsh/sessions/y.tmp')).toBe(true)
+    // 会话日志本体（轮换分片）不在豁免内——写/删语义不受影响
+    expect(isDshRuntimeTempPath('/home/u/.dsh/sessions/s.jsonl.zstd.9a3')).toBe(false)
+    // 凭据面/tmp 全局临时件不命中
+    expect(isDshRuntimeTempPath('/home/u/.ssh/tmp/scan.tmp')).toBe(false)
+    expect(isDshRuntimeTempPath('/tmp/x.tmp')).toBe(false)
+    // 非 sessions 的 .dsh 临时件不命中（settings 原子写已有 isDshAtomicStagingPath 专属判定）
+    expect(isDshRuntimeTempPath('/home/u/.dsh/settings.yaml.tmp')).toBe(false)
+  })
+
+  it('无归因 lstat/stat/access sessions 临时件 → 不再报 fs-probe（用户实测场景）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK', statSync: () => 'OK', accessSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map())
+    try {
+      mod.lstatSync('/home/u/.dsh/sessions/sess-abc.tmp')
+      mod.statSync('/home/u/.dsh/sessions/sess-def.tmp')
+      mod.accessSync('/home/u/.dsh/sessions/sess-ghi.tmp')
+      expect(sink).toEqual([])
+    } finally { disp() }
+  })
+
+  it('边界：sessions 本体（非临时后缀）无归因侦察照报（豁免不外溢）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map())
+    try {
+      mod.lstatSync('/home/u/.dsh/sessions/session.jsonl')
+      expect(sink.some(a => a.kind === 'fs-probe')).toBe(true)
+    } finally { disp() }
+  })
+
+  it('边界：删除/写入 sessions 临时件不走侦察豁免（写删仍照报）', () => {
+    const mod: Record<string, unknown> = { unlinkSync: () => 'OK', writeFileSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map())
+    try {
+      // 该路径本身不在敏感判定面（临时后缀）→ 无报警是正常的；造一个敏感形态验证写删照报：
+      mod.unlinkSync('/home/u/.dsh/sessions/x.secret.tmp')
+      expect(sink.some(a => a.kind === 'fs-destroy' && a.severity === 'red')).toBe(true)
+    } finally { disp() }
+  })
+
+  it('边界：插件归因碰 sessions 临时件 → 照报（碰宿主状态=信号）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const here = import.meta.dirname
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map([[here, '@evil/plugin']]))
+    try {
+      mod.lstatSync('/home/u/.dsh/sessions/sess-abc.tmp')
+      expect(sink.some(a => a.kind === 'fs-probe' && a.pluginHint === '@evil/plugin')).toBe(true)
+    } finally { disp() }
+  })
+
+  it('边界：完整性金丝雀优先级高于豁免', () => {
+    const canary = '/home/u/.dsh/sessions/vet-integrity-1.tmp'
+    const cfg = { ...DEFAULT_HOOK_CONFIG, integrityRoots: [canary] } as HookConfig
+    const mod: Record<string, unknown> = { rmSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const disp = patchModule(mod, 'fs', cfg, a => sink.push(a), () => new Map())
+    try {
+      mod.rmSync(canary)
       expect(sink.some(a => a.kind === 'integrity' && a.severity === 'red')).toBe(true)
     } finally { disp() }
   })

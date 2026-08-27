@@ -73,4 +73,40 @@ describe('VetStatus 合并去重（事件风暴降噪）', () => {
     expect(s.snapshot().alarms[0].severity).toBe('red')
     expect(s.snapshot().alarms[0].count).toBe(2)
   })
+
+  it('0.3.3 P1 双层通道：info 观察不进 alarmCount、不抬 level，但保留在列表', () => {
+    const s = new VetStatus()
+    s.record({
+      id: 'esm-guard-coverage:@deepseek-ai/a',
+      severity: 'info',
+      source: 'scan',
+      kind: 'esm-guard-coverage',
+      message: '官方包信息观察',
+      target: '@deepseek-ai/a',
+      pluginHint: '@deepseek-ai/a',
+      mergeKey: 'scan:esm-guard-coverage:official',
+      at: Date.now(),
+    })
+    s.record({
+      id: 'esm-guard-coverage:@deepseek-ai/b',
+      severity: 'info',
+      source: 'scan',
+      kind: 'esm-guard-coverage',
+      message: '官方包信息观察',
+      target: '@deepseek-ai/b',
+      pluginHint: '@deepseek-ai/b',
+      mergeKey: 'scan:esm-guard-coverage:official',
+      at: Date.now(),
+    })
+    const snap = s.snapshot()
+    expect(snap.alarmCount).toBe(0) // 信息观察不计入可行动风险数
+    expect(snap.level).toBe('green') // 不抬盾牌
+    expect(snap.alarms.length).toBe(1) // 列表保留（折叠一条）
+    expect(snap.alarms[0].count).toBe(2)
+    expect(snap.alarms[0].severity).toBe('info')
+    // 叠加真黄色：alarmCount 只计黄色
+    s.record({ id: 'x:1', severity: 'yellow', source: 't2', kind: 'fs-write', message: 'm', target: '/a', at: Date.now() })
+    expect(s.snapshot().alarmCount).toBe(1)
+    expect(s.snapshot().alarms.length).toBe(2)
+  })
 })
