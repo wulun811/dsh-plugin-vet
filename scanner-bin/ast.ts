@@ -70,6 +70,11 @@ export function stringyValue(node: ts.Node, sf: ts.SourceFile): StringyValue | u
     return { text: left.text + right.text, exact: false }
   }
   if (ts.isIdentifier(node)) {
+    // round-16：词法遮蔽——形参/局部声明遮蔽同名模块级 const 时必须放弃求值
+    // （此前 `const url='/etc/passwd'` + `function f(url){…}` 会把形参解析成模块级
+    // 常量 → R11 敏感路径误报；isShadowed 只在 R2/R3/R4 直用，stringyValue 的共同
+    // 消费者（R11/R20/capability）此前全部暴露）。
+    if (isShadowedForStringy(node.text, node)) return undefined
     const init = initializerMap(sf).get(node.text)
     if (init === undefined) return undefined
     return stringyValue(init, sf)
@@ -109,6 +114,8 @@ export function numberyValue(node: ts.Node, sf: ts.SourceFile): number | undefin
     }
   }
   if (ts.isIdentifier(node)) {
+    // round-16：与 stringyValue 同款遮蔽防护（numberyValue 的标识符解析同样吃形参遮蔽）
+    if (isShadowedForStringy(node.text, node)) return undefined
     const init = initializerMap(sf).get(node.text)
     if (init === undefined) return undefined
     return numberyValue(init, sf)
@@ -151,6 +158,32 @@ export function isShadowed(name: string, id: ts.Identifier): boolean {
       const body = (cur as ts.FunctionLikeDeclaration).body
       if (body !== undefined && ts.isBlock(body) && declaresInBlock(body, name)) return true
     } else if (ts.isBlock(cur) || ts.isSourceFile(cur) || ts.isModuleBlock(cur)) {
+      if (declaresInBlock(cur, name)) return true
+    } else if (ts.isCatchClause(cur)) {
+      if (cur.variableDeclaration !== undefined && cur.variableDeclaration.name.getText() === name) {
+        return true
+      }
+    }
+    cur = cur.parent
+  }
+  return false
+}
+
+/**
+ * stringyValue/numberyValue 用的严格遮蔽判定（round-16）：与 {@link isShadowed}
+ * 的区别是**不**把 SourceFile/ModuleBlock 的同名声明当遮蔽——模块级顶层引用自己
+ * 的 const 是 stringy 求值的合法主路径（`const url='/etc'` + 顶层 `f(url)`），
+ * 判遮蔽会毁掉全部顶层常量解析。只认：函数参数、函数体块声明、任意块声明、
+ * catch 子句变量（形参遮蔽误报的实证场景全部落在这些层）。
+ */
+export function isShadowedForStringy(name: string, id: ts.Identifier): boolean {
+  let cur: ts.Node | undefined = id.parent
+  while (cur !== undefined) {
+    if (ts.isFunctionLike(cur)) {
+      if (cur.parameters.some(p => p.name.getText() === name)) return true
+      const body = (cur as ts.FunctionLikeDeclaration).body
+      if (body !== undefined && ts.isBlock(body) && declaresInBlock(body, name)) return true
+    } else if (ts.isBlock(cur)) {
       if (declaresInBlock(cur, name)) return true
     } else if (ts.isCatchClause(cur)) {
       if (cur.variableDeclaration !== undefined && cur.variableDeclaration.name.getText() === name) {

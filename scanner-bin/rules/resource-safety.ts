@@ -1,6 +1,7 @@
 import ts from 'typescript'
 import type { Finding, RuleContext } from '../protocol.js'
 import { walk, numberyValue, stringyValue, lineOf } from '../ast.js'
+import { moduleBindings } from '../capability.js'
 
 /**
  * R9 resource safety . Signals, capped at high (14.1:
@@ -212,15 +213,36 @@ function exitSignals(body: ts.Node): ExitSignals {
   return sig
 }
 
-/** Collect spawn-ish call/new nodes in a body tree (skipping nested functions). */
-function collectSpawns(body: ts.Node, out: ts.Node[]): void {
+/** Collect spawn-ish call/new nodes in a body tree (skipping nested functions).
+ * round-16：绑定门控——只计「确实来自 child_process / worker_threads 的调用」：
+ * 此前任意同名本地函数/对象方法（while(true){ spawn(n) } 粒子生成函数、obj.spawn()）
+ * 都进 fork-bomb 计数 → high FP（capability 层 0.1.21 已修同款问题，R9 未同步）。
+ * 标识符形态要求名字在绑定集（cpRefs/workerRefs）；属性形态递归校验根（与 R20 isCpBase 同口径）。 */
+function collectSpawns(body: ts.Node, out: ts.Node[], cpRefs: Set<string>, workerRefs: Set<string>): void {
+  const cpKnown = (base: ts.Expression): boolean => {
+    if (ts.isIdentifier(base)) return cpRefs.has(base.text)
+    if (ts.isCallExpression(base)) {
+      const c = base.expression
+      if (ts.isIdentifier(c) && c.text === 'require' && base.arguments.length > 0) {
+        const spec = stringyValue(base.arguments[0], base.getSourceFile())
+        return spec !== undefined && spec.text.replace(/^node:/, '') === 'child_process'
+      }
+    }
+    if (ts.isPropertyAccessExpression(base)) return cpKnown(base.expression)
+    return false
+  }
   const visit = (n: ts.Node): void => {
     if (ts.isFunctionLike(n)) return
     if (ts.isCallExpression(n)) {
       const callee = n.expression
-      if (ts.isIdentifier(callee) && SPAWN_CALLS.has(callee.text)) out.push(n)
-      else if (ts.isPropertyAccessExpression(callee) && SPAWN_CALLS.has(callee.name.text)) out.push(n)
-    } else if (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && SPAWN_NEWS.has(n.expression.text)) {
+      if (ts.isIdentifier(callee)) {
+        if (SPAWN_CALLS.has(callee.text) && cpRefs.has(callee.text)) out.push(n)
+      } else if (ts.isPropertyAccessExpression(callee)) {
+        if (SPAWN_CALLS.has(callee.name.text) && cpKnown(callee.expression)) out.push(n)
+      }
+    } else if (ts.isNewExpression(n)
+      && ts.isIdentifier(n.expression) && SPAWN_NEWS.has(n.expression.text)
+      && workerRefs.has(n.expression.text)) {
       out.push(n)
     }
     ts.forEachChild(n, visit)
@@ -520,6 +542,8 @@ function checkLoopBodyPatterns(sf: ts.SourceFile, found: Finding[]): void {
 
 export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
   const found: Finding[] = []
+  // round-16：fork-bomb / Worker 计数绑定集（moduleBindings 已含解构/别名/promisify/内嵌形态）
+  const { cpRefs, workerRefs } = moduleBindings(sf)
   walk(sf, n => {
     if (ts.isCallExpression(n)) checkArrayAlloc(n, sf, found)
     if (ts.isNewExpression(n)) checkArrayAlloc(n, sf, found)
@@ -554,7 +578,7 @@ export function run(sf: ts.SourceFile, _ctx: RuleContext): Finding[] {
         line: lineOf(sf, loop),
       })
       const spawns: ts.Node[] = []
-      collectSpawns(body, spawns)
+      collectSpawns(body, spawns, cpRefs, workerRefs)
       for (const s of spawns) {
         found.push({
           rule: 'R9',

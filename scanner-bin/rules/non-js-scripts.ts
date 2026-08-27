@@ -12,13 +12,15 @@ import type { Finding } from '../protocol.js'
  * 的 install 钩子降级同构。
  */
 const DOWNLOAD_EXEC: { re: RegExp; desc: string; sev?: 'high' | 'medium' }[] = [
-  { re: /curl[^\n|]*\|\s*(ba|z)?sh\b/, desc: 'curl|sh 远程代码执行' },
-  { re: /wget[^\n|]*\|\s*(ba|z)?sh\b/, desc: 'wget|sh 远程代码执行' },
+  // round-16：curl/wget/|sh 三式补 /i——round-8.1 声称"大小写不敏感"但这三式漏了 /i
+  // （Windows cmd 大小写不敏感，Setup.SH 内 CURL|SH 此前整体绕过）。
+  { re: /curl[^\n|]*\|\s*(ba|z)?sh\b/i, desc: 'curl|sh 远程代码执行' },
+  { re: /wget[^\n|]*\|\s*(ba|z)?sh\b/i, desc: 'wget|sh 远程代码执行' },
   { re: /(iwr|Invoke-WebRequest|DownloadString)[^\n]*\|/i, desc: 'PowerShell 下载管道' },
   { re: /powershell[^\r\n]{0,120}-enc(odedcommand)?\b/i, desc: '编码 PowerShell（隐藏载荷）' },
   { re: /\b(IEX|Invoke-Expression)\b/i, desc: 'PowerShell Invoke-Expression' },
   { re: /\b(certutil|bitsadmin|mshta|regsvr32|scrobj|rundll32)\b/i, desc: '系统下载/执行原语' },
-  { re: /curl[^\n]*-o\s+\S+/, desc: 'curl 下载落盘', sev: 'medium' },
+  { re: /curl[^\n]*-o\s+\S+/i, desc: 'curl 下载落盘', sev: 'medium' },
   // round-9（0.1.16 加固）：解释器 -c/-e 内联脚本中的网络下载+执行原语
   { re: /\bpython[0-9]?\s+-[cC]\b[^\n]{0,220}\b(urllib|requests|urlopen|urlretrieve|exec)\b/i, desc: 'Python -c 网络/执行脚本' },
   { re: /\bruby\s+-[eE]\b[^\n]{0,160}\b(Net::HTTP|open-uri|system|exec)\b/i, desc: 'Ruby -e 网络/执行脚本' },

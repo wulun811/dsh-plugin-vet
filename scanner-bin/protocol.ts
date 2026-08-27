@@ -90,7 +90,14 @@ export interface CapabilityManifest {
 }
 
 export interface ScanReport {
-  engine: 'static-v16'
+  /** 随 ENGINE_VERSION 递增（round-15，0.3.2 起 static-v17——R20 新增 + capability 提取行为变化；
+   * round-16，0.3.3 起 static-v18——R20/R11/R9 绑定与语料门控、N2 解码扩容、大小写/扩展名面；
+   * round-17 起 static-v19——R16 幽灵依赖改子路径前缀解析（父包已声明的子路径导入不再误报）；
+   * round-22 起 static-v20——R1/R2 逃逸正则扩形态（括号/前缀元素访问）+ R1 别名遮蔽修复（误判
+   * critical 面收窄）、R3 前缀元素访问与解构成员形态补漏（critical 面扩大）、R7 sk-proj-/github_pat_
+   * 补漏、R2 顶级 require 判定收紧到真·模块顶层、capability require() 空参崩溃修复 + node: 前缀
+   * 能力归一（hasNetwork/hasExec 不再漏记）。 */
+  engine: 'static-v20'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -114,13 +121,35 @@ export interface ScanResponse {
  * 均受 request.surface 门控；surface 并入缓存 key。
  * round-13（R19）：新增 R19 typosquat 观测（包名/依赖 vs 官方核心名编辑距离 ≤1 或同形，info 永不进 verdict）。
  * round-14（异常流对抗回归）：R18 匹配前剥离不可见字符（ZWSP 等打断规避）、R19 比较前 NFKC 归一
- * （全角同形规避）——规则行为变化，引擎版本递增使旧缓存失效。 */
-export const ENGINE_VERSION = 'static-v16' as const
+ * （全角同形规避）——规则行为变化，引擎版本递增使旧缓存失效。
+ * round-15（0.3.2）：新增 R20 exec/spawn 族实参下载即执行（JS 内嵌 curl|sh 等形态，组合证据
+ * high/medium，N2 解码并入；generic/测试文件降 info）——新增规则 + capability 提取行为变化，
+ * 引擎版本递增使旧缓存失效。
+ * round-16（0.3.3）：R20 绑定口径升级（解构别名/promisify/对象内嵌/属性链）+ N2 增 Array.join
+ * 与 Buffer.from 拼接递归 + curl/wget/|sh 大小写不敏感 + 动态片段占位；R11 补 require('fs')
+ * 直调与解构绑定 + N2 语料加 fs 足迹门控；R9 fork-bomb 加 child_process/worker_threads 绑定
+ * 门控；stringyValue/numberyValue 补词法遮蔽防护；AST 面新增无扩展名/大写扩展名入口
+ * （extOf 统一小写 + package.json bin/scripts 引用 + node shebang）——规则行为大改，
+ * 引擎版本递增使旧缓存失效。
+ * round-17（0.3.3）：R16 幽灵依赖改子路径前缀解析（declared.some(d => i === d || i.startsWith(d + '/'))）
+ * ——父包已声明的 react/jsx-runtime 类子路径导入不再误报；父包未声明的子路径（ghost-pkg/sub）
+ * 照旧判幽灵。规则行为变化，引擎版本递增使旧缓存失效。
+ * round-22（0.3.4）：① capability require() 无实参崩溃修复（整扫描 ok:false）+ node: 前缀
+ * 能力归一（hasNetwork/hasExec 此前漏记 → N1 误报隐藏能力）；② R1/R2 逃逸正则扩形态
+ * （return (process) 括号包裹、globalThis['process'] 前缀元素访问——此前零命中）且 R1/R2
+ * 从双副本改为单源导入；③ R1 别名解析补遮蔽（形参遮蔽 const c = x.constructor 的 critical
+ * 误判）；④ R3 补 globalThis['process'].exit 元素访问形态（此前零命中）与解构成员形态
+ * （const { exit } = process; exit(1) 此前只报 info）；⑤ R7 补 sk-proj- 与 github_pat_
+ * 现行密钥格式（'-' 打散旧字符类整族漏报）；⑥ R2 顶级 require 判定收紧到真·模块顶层
+ * （函数体 const require 此前被误当顶级降噪漏报）。规则行为变化，引擎版本递增使旧缓存失效。 */
+export const ENGINE_VERSION = 'static-v20' as const
 
-/** The rules of static-v16. R8 is a meta finding emitted by the engine (scan timeout skip); R16 is a
- * project-scope dep-consistency audit (emitted by the engine, not a per-file AST rule);
- * R17/R18/R19 are surface-gated text/config rules (emitted by the engine, not per-file AST rules). */
-export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19'] as const
+/** The rules of static-v20. R8 is a meta finding emitted by the engine (scan timeout skip);
+ * R17/R18/R19 are surface-gated text/config rules (emitted by the engine, not per-file AST rules);
+ * R20 is a per-file AST rule (exec/spawn-family argument download-and-exec, registry-driven);
+ * OSV / OSV-T are engine-emitted data-source findings (OSV advisory board / transitive upstream-radar)
+ * — 列入 RULE_IDS 供白名单式消费方完整枚举（round-16：此前只枚举 AST 规则，OSV 两码会静默丢失）。 */
+export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19', 'R20', 'OSV', 'OSV-T'] as const
 
 /** Shared context handed to every rule. */
 export interface RuleContext {
@@ -136,7 +165,7 @@ export interface RuleContext {
    * （如 test/ scripts/ 目录识别，将 process 访问降为能力触达面 info）。code 模式为 undefined。 */
   filePath?: string
   /** N2：本文件静态可求值的解码字面量（base64/hex/charCode/常量拼接/模板串），
-   * 引擎在规则执行前产出，R13/R7/R11 并入匹配语料（规则判定逻辑不变，只是"看得更清楚"）。 */
+   * 引擎在规则执行前产出，R13/R7/R11/R20 并入匹配语料（规则判定逻辑不变，只是"看得更清楚"）。 */
   decodedLiterals?: DecodedLiteral[]
 }
 

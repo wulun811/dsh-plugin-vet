@@ -4,8 +4,10 @@ import type { Finding } from '../protocol.js'
  * R10 supply chain : package.json manifest scan.
  * install hooks (preinstall/install/postinstall/uninstall) are real
  * arbitrary-code execution at install time -> high. The dependency manifest
- * is advisory info for the LLM audit round (known-vulnerability matching is
- * deferred: data source selection pending, D15).
+ * is advisory info for the LLM audit round; known-vulnerability matching
+ * lives in engine.ts checkOsv (OSV exact-version query for the plugin itself
+ * + direct deps, opt-in osvCheck) and the optional transitive-tree scan
+ * (transitiveDeps -> upstream-radar CLI).
  */
 // round-9（0.1.16 加固）：prepare 在本地 npm install（无参）/publish/git 依赖时执行——真实任意代码执行面
 const HOOKS = ['preinstall', 'install', 'postinstall', 'prepare', 'uninstall', 'preuninstall']

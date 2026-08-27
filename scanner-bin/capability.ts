@@ -6,6 +6,7 @@
  * @module dsh-plugin-vet/scanner-capability
  */
 import ts from "typescript"
+import { posix } from "node:path"
 import { walk, stringyValue } from "./ast.js"
 import type { CapabilityManifest } from "./protocol.js"
 
@@ -108,61 +109,193 @@ function isFsModule(spec: string): boolean {
 function isCpModule(spec: string): boolean {
   return spec.replace(/^node:/, "") === "child_process"
 }
+function isWorkerModule(spec: string): boolean {
+  return spec.replace(/^node:/, "") === "worker_threads"
+}
+function isPathModule(spec: string): boolean {
+  return spec.replace(/^node:/, "") === "path"
+}
 
 /**
- * 预扫描模块绑定：把 import/require 绑定到 fs / child_process 的标识符收集起来
- * （含解构绑定），使 fs.readFileSync / require("fs").readFileSync / 解构后的 readFileSync(path)
- * 三种形态都能提取路径/命令实参。宽松：宁可多列。
+ * 预扫描模块绑定：把 import/require 绑定到 fs / child_process / path / worker_threads 的
+ * 标识符收集起来（含解构绑定、别名转发、promisify 包装、对象字面量内嵌 require），使
+ * fs.readFileSync / require("fs").readFileSync / 解构后的 readFileSync(path) 三种形态都能
+ * 提取路径/命令实参。宽松：宁可多列。
+ * round-16：二次绑定——`const { exec } = cp`（解构已绑定引用）、`const e2 = exec`（别名）、
+ * `util.promisify(cp.exec)` / `promisify(exec)`（包装）、`const a = { b: { cp: require('child_process') } }`
+ * （对象字面量内嵌 cp 值，属性链 a.b.cp.spawn 的根判定）此前全部漏绑（R20 实证盲区）。
+ * 导出供 R20（rules/shell-exec）与 R9（resource-safety）复用同一绑定口径。
  */
-function moduleBindings(sf: ts.SourceFile): { fsRefs: Set<string>; cpRefs: Set<string> } {
+export function moduleBindings(sf: ts.SourceFile): { fsRefs: Set<string>; cpRefs: Set<string>; pathRefs: Set<string>; workerRefs: Set<string>; execAliasRefs: Set<string> } {
   const fsRefs = new Set<string>()
   const cpRefs = new Set<string>()
-  const bind = (name: string, isFs: boolean): void => {
+  const pathRefs = new Set<string>()
+  const workerRefs = new Set<string>()
+  // round-16：exec/spawn 族调用的「别名集」——promisify(exec)/别名转发后的调用名不在
+  // EXEC_OPS 字面集合里（execAsync 等），R20 的 isExecCall 靠它识别真实执行位。
+  const execAliasRefs = new Set<string>()
+  const bind = (name: string, kind: 'fs' | 'cp' | 'path' | 'worker'): void => {
     if (name === "" || name === "require") return
-    if (isFs) fsRefs.add(name)
-    else cpRefs.add(name)
+    if (kind === 'fs') fsRefs.add(name)
+    else if (kind === 'cp') cpRefs.add(name)
+    else if (kind === 'path') pathRefs.add(name)
+    else workerRefs.add(name)
+  }
+  const kindOf = (spec: string): 'fs' | 'cp' | 'path' | 'worker' | undefined => {
+    if (isFsModule(spec)) return 'fs'
+    if (isCpModule(spec)) return 'cp'
+    if (isPathModule(spec)) return 'path'
+    if (isWorkerModule(spec)) return 'worker'
+    return undefined
+  }
+  const kindOfBound = (name: string): 'fs' | 'cp' | 'path' | 'worker' | undefined => {
+    if (fsRefs.has(name)) return 'fs'
+    if (cpRefs.has(name)) return 'cp'
+    if (pathRefs.has(name)) return 'path'
+    if (workerRefs.has(name)) return 'worker'
+    return undefined
   }
   walk(sf, n => {
     if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier)) {
-      const spec = n.moduleSpecifier.text
-      const isFs = isFsModule(spec)
-      const isCp = isCpModule(spec)
-      if (!isFs && !isCp) return
+      const kind = kindOf(n.moduleSpecifier.text)
+      if (kind === undefined) return
       const clause = n.importClause
       if (clause === undefined) return
-      if (clause.name !== undefined) bind(clause.name.text, isFs)
+      if (clause.name !== undefined) bind(clause.name.text, kind)
       if (clause.namedBindings !== undefined) {
-        if (ts.isNamespaceImport(clause.namedBindings)) bind(clause.namedBindings.name.text, isFs)
+        if (ts.isNamespaceImport(clause.namedBindings)) bind(clause.namedBindings.name.text, kind)
         else if (ts.isNamedImports(clause.namedBindings)) {
-          for (const el of clause.namedBindings.elements) bind(el.name.text, isFs)
+          for (const el of clause.namedBindings.elements) bind(el.name.text, kind)
         }
       }
     }
     if (ts.isVariableDeclaration(n) && n.initializer !== undefined && ts.isCallExpression(n.initializer)) {
       const callee = n.initializer.expression
       if (!(ts.isIdentifier(callee) && callee.text === "require")) return
+      // round-22（整扫描崩溃修复）：require() 无实参是合法语法（运行期才抛错）——
+      // literalText(undefined) 在 isStringLiteral 内读 .kind 抛 TypeError，moduleBindings
+      // 被 R9/R11/R20 与 extractCapabilities 共用 → 单个此类文件在 files 模式让整个
+      // 多文件扫描 ok:false（全部文件结果丢失）。与下方 require 调用分支同款
+      // `arguments.length > 0` 守卫。
+      if (n.initializer.arguments.length === 0) return
       const spec = literalText(n.initializer.arguments[0])
       if (spec === undefined) return
-      const isFs = isFsModule(spec)
-      const isCp = isCpModule(spec)
-      if (!isFs && !isCp) return
+      const kind = kindOf(spec)
+      if (kind === undefined) return
       const nm = n.name
       if (ts.isIdentifier(nm)) {
-        bind(nm.text, isFs)
+        bind(nm.text, kind)
       } else if (ts.isObjectBindingPattern(nm)) {
         for (const el of nm.elements) {
-          if (ts.isIdentifier(el.name)) bind(el.name.text, isFs)
+          if (ts.isIdentifier(el.name)) bind(el.name.text, kind)
         }
       }
     }
   })
-  return { fsRefs, cpRefs }
+  // ── round-16 二次绑定（中转形态）──────────────────────────────────────
+  /** 表达式值是否为 child_process 本体（require 直调 / 已绑 cp 标识符 / 内嵌对象字面量）。 */
+  const holdsCp = (expr: ts.Expression): boolean => {
+    if (ts.isIdentifier(expr)) return cpRefs.has(expr.text)
+    if (ts.isCallExpression(expr)) {
+      const c = expr.expression
+      if (ts.isIdentifier(c) && c.text === "require" && expr.arguments.length > 0) {
+        const spec = literalText(expr.arguments[0])
+        return spec !== undefined && isCpModule(spec)
+      }
+      return false
+    }
+    if (ts.isPropertyAccessExpression(expr)) return holdsCp(expr.expression)
+    if (ts.isObjectLiteralExpression(expr)) {
+      return expr.properties.some(p => ts.isPropertyAssignment(p) && holdsCp(p.initializer))
+    }
+    return false
+  }
+  // 第二次遍历：依赖首次遍历产出的绑定集合（walk 复用，收集 VariableDeclaration 中转形态）
+  walk(sf, n => {
+    if (!ts.isVariableDeclaration(n)) return
+    const nm = n.name
+    const init = n.initializer
+    if (init === undefined) return
+    if (ts.isObjectBindingPattern(nm) && ts.isIdentifier(init)) {
+      // const { exec } = cp
+      const kind = kindOfBound(init.text)
+      if (kind === undefined) return
+      for (const el of nm.elements) {
+        if (ts.isIdentifier(el.name)) bind(el.name.text, kind)
+      }
+      return
+    }
+    if (!ts.isIdentifier(nm)) return
+    if (ts.isIdentifier(init)) {
+      // const exec2 = exec —— 别名转发；exec 族别名同时进 execAliasRefs（R20 执行位识别）
+      const kind = kindOfBound(init.text)
+      if (kind !== undefined) bind(nm.text, kind)
+      if (cpRefs.has(init.text) && (EXEC_IDENTS.has(init.text) || execAliasRefs.has(init.text))) {
+        execAliasRefs.add(nm.text)
+      }
+      return
+    }
+    if (ts.isCallExpression(init)) {
+      const callee = init.expression
+      const isPromisify = (ts.isIdentifier(callee) && callee.text === "promisify")
+        || (ts.isPropertyAccessExpression(callee) && callee.name.text === "promisify")
+      if (isPromisify && init.arguments.length >= 1) {
+        const arg = init.arguments[0]
+        // util.promisify(require('child_process').exec) / promisify(cp.exec) / promisify(exec)
+        const isExecOp = (e: ts.Expression): boolean =>
+          (ts.isIdentifier(e) && (EXEC_IDENTS.has(e.text) || execAliasRefs.has(e.text)) && cpRefs.has(e.text))
+          || (ts.isPropertyAccessExpression(e) && EXEC_IDENTS.has(e.name.text) && holdsCp(e.expression))
+        if (isExecOp(arg)) {
+          bind(nm.text, 'cp')
+          execAliasRefs.add(nm.text)
+          return
+        }
+        if (ts.isIdentifier(arg) && cpRefs.has(arg.text)) {
+          bind(nm.text, 'cp')
+          return
+        }
+      }
+    }
+    if (ts.isObjectLiteralExpression(init) && holdsCp(init)) {
+      // const a = { b: { cp: require('child_process') } } —— a.b.cp.spawn 的根判定
+      bind(nm.text, 'cp')
+    }
+  })
+  return { fsRefs, cpRefs, pathRefs, workerRefs, execAliasRefs }
 }
 
-/** 单文件能力提取（宽松、确定性）。 */
+/** R20 配套（round-15）：path.join/path.resolve 实参 → 路径面入 fsPaths（声明侧事实）。
+ * 两层收集：
+ *  1. 每个静态可求值的字面量实参单独过 looksLikePath（路径前缀或敏感段）——动态前缀不阻塞：
+ *     path.join(os.homedir(), '.ssh', 'id_rsa') 收 '.ssh'/'id_rsa'（此前 fsPaths=[]，演练实测盲区）；
+ *  2. 全部实参静态可求值 → posix.join 合成整路径（'./'、'../'、重复斜杠归一，与运行时 join 语义一致）。
+ * 动态实参绝不猜测；「宁可多列（宽松）」；仍非 verdict 面（营养标签/N6 差分/N1 隐能力判定用）。 */
+function collectPathJoin(args: readonly ts.Expression[], sf: ts.SourceFile, out: CapabilityManifest): void {
+  if (args.length < 2) return
+  const parts: string[] = []
+  let allLiteral = true
+  for (const a of args) {
+    const sv = stringyValue(a, sf)
+    if (sv === undefined) {
+      allLiteral = false
+      continue
+    }
+    parts.push(sv.text)
+    if (looksLikePath(sv.text)) PUSH_UNIQ(out.fsPaths, sv.text, FS_CAP)
+  }
+  if (allLiteral) {
+    const joined = posix.join(...parts)
+    // round-16：合成结果同样过 looksLikePath（前缀或敏感段）——`path.join('a','b')`
+    // 这类通用字符串拼接此前无条件入 fsPaths（N1 标签假阳性，方向与动态前缀漏收相反）。
+    if (joined !== '' && joined.length <= 512 && looksLikePath(joined)) PUSH_UNIQ(out.fsPaths, joined, FS_CAP)
+  }
+}
+
+/**
+ * 单文件能力提取（宽松、确定性）。 */
 export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
   const out: CapabilityManifest = { hosts: [], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false, esmNamedBuiltins: false }
-  const { fsRefs, cpRefs } = moduleBindings(sf)
+  const { fsRefs, cpRefs, pathRefs } = moduleBindings(sf)
   const isFsBase = (base: ts.Expression): boolean => {
     if (ts.isIdentifier(base)) return base.text === "fs" || fsRefs.has(base.text)
     if (ts.isCallExpression(base)) {
@@ -185,20 +318,35 @@ export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
     }
     return false
   }
+  const isPathBase = (base: ts.Expression, pathRefs: Set<string>): boolean => {
+    if (ts.isIdentifier(base)) return pathRefs.has(base.text)
+    if (ts.isCallExpression(base)) {
+      const callee = base.expression
+      if (ts.isIdentifier(callee) && callee.text === "require" && base.arguments.length > 0) {
+        const spec = literalText(base.arguments[0])
+        return spec !== undefined && isPathModule(spec)
+      }
+    }
+    return false
+  }
   walk(sf, n => {
     const text = literalText(n)
     if (text !== undefined) {
-      const re = new RegExp(URL_HOST_RE.source, "gi")
-      let m: RegExpExecArray | null
-      while ((m = re.exec(text)) !== null) {
-        let host = m[1].toLowerCase().replace(TRIM_TAIL_RE, "")
-        const cut = host.search(/[/?#]/)
-        if (cut !== -1) host = host.slice(0, cut)
-        if (!looksLikeHost(host)) continue
-        PUSH_UNIQ(out.hosts, host, HOST_CAP)
-      }
-      for (const w of commandWords(text)) {
-        PUSH_UNIQ(out.spawnCmds, w, CMD_CAP)
+      // round-16（SEC-7）：超长字面量的 URL 正则扫描有二次型回溯面（长串无命中时反复回退）
+      // ——16KB 以上跳过 host/命令词提取（隔离子进程内、有 60s 宿主兜底，但该扫描无信息增益）。
+      if (text.length <= 16 * 1024) {
+        const re = new RegExp(URL_HOST_RE.source, "gi")
+        let m: RegExpExecArray | null
+        while ((m = re.exec(text)) !== null) {
+          let host = m[1].toLowerCase().replace(TRIM_TAIL_RE, "")
+          const cut = host.search(/[/?#]/)
+          if (cut !== -1) host = host.slice(0, cut)
+          if (!looksLikeHost(host)) continue
+          PUSH_UNIQ(out.hosts, host, HOST_CAP)
+        }
+        for (const w of commandWords(text)) {
+          PUSH_UNIQ(out.spawnCmds, w, CMD_CAP)
+        }
       }
       // 0.1.21 降噪：裸字面量的 fsPath 提取收紧为「路径前缀开头且无空白且非相对模块引用」，
       // 并跳过模板拼接片段——注释样文本（// ...）、报错文案、import 规格符不再入清单。
@@ -227,8 +375,13 @@ export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
         if (spec !== undefined) {
           const pkg = packageName(spec)
           if (pkg !== undefined) PUSH_UNIQ(out.imports, pkg, IMPORT_CAP)
-          if (NETWORK_MODULES.has(spec)) out.hasNetwork = true
-          if (EXEC_MODULES.has(spec)) out.hasExec = true
+          // round-22：node: 前缀归一（与 moduleBindings/R11/R20 同口径）——require('node:http')
+          // 此前 NETWORK_MODULES.has('node:http') 恒 false → hasNetwork 漏记 → N1 差分
+          // 把合法 node: 形态的运行时网络误判成「隐藏能力」。imports 仍排除 node: 内建
+          // （packageName 语义：第三方依赖清单），不冲突。
+          const bare = spec.replace(/^node:/, '')
+          if (NETWORK_MODULES.has(bare)) out.hasNetwork = true
+          if (EXEC_MODULES.has(bare)) out.hasExec = true
           if (looksLikePath(spec)) PUSH_UNIQ(out.fsPaths, spec, FS_CAP)
         }
       }
@@ -239,6 +392,10 @@ export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
         // 0.1.21 降噪：裸 spawn/exec/fork 标识符仅在文件确实引用 child_process 时计为执行能力
         // （bundle 内自带同名辅助函数不再误报“执行”、进而误触 upgrade-cold 双高提示）
         if (EXEC_IDENTS.has(callee.text) && cpRefs.size > 0) out.hasExec = true
+        // round-15：path.join/path.resolve 全字面量实参 → 合成路径（拼接路径静态盲区修复）
+        if (pathRefs.has(callee.text) && (callee.text === 'join' || callee.text === 'resolve')) {
+          collectPathJoin(n.arguments, sf, out)
+        }
         if (fsRefs.has(callee.text) && FS_OPS.has(callee.text)) {
           const arg = n.arguments[0]
           if (arg !== undefined) {
@@ -259,6 +416,10 @@ export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
         if (ts.isIdentifier(base) && NETWORK_MODULES.has(base.text)) out.hasNetwork = true
         if (callee.name.text === "fetch" && ts.isIdentifier(base) && base.text === "globalThis") out.hasNetwork = true
         if (isCpBase(base) && PROC_OPS.has(callee.name.text)) out.hasExec = true
+        // round-15：path.join/path.resolve（含 require('path').join / cp 同构的 path 绑定形态）
+        if (isPathBase(base, pathRefs) && (callee.name.text === 'join' || callee.name.text === 'resolve')) {
+          collectPathJoin(n.arguments, sf, out)
+        }
       }
       if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
         const base = callee.expression

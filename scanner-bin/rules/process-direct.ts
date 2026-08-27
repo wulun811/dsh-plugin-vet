@@ -1,6 +1,6 @@
 import ts from 'typescript'
 import type { Finding, RuleContext, Severity } from '../protocol.js'
-import { walk, isShadowed, lineOf } from '../ast.js'
+import { walk, isShadowed, isShadowedForStringy, lineOf } from '../ast.js'
 
 const CRITICAL_MEMBERS = new Set(['getBuiltinModule', 'mainModule', 'module', 'exit', 'reallyExit'])
 /** round-5（实测评估）：信号处理器内的 process.exit 是优雅退出（MCP server 等常驻插件
@@ -88,8 +88,48 @@ export function isTestOrCiFile(fileName: string): boolean {
   return /\.(test|spec|e2e)\./i.test(base) || /(^|[^a-z0-9])coverage\./i.test(base) || /^(vitest|jest)\./i.test(base)
 }
 
+/**
+ * round-22：`const { exit, pid } = process` 解构绑定 → { 使用名: process 成员名 }。
+ * 解构成员调用（exit(1) / getBuiltinModule('fs')）与 process.exit 同一条逃逸通道，
+ * 旧遍历在调用点只见匿名标识符 → 全部落「裸 process 引用」info。
+ */
+function destructuredProcessMembers(sf: ts.SourceFile): Map<string, string> {
+  const out = new Map<string, string>()
+  walk(sf, n => {
+    if (!ts.isVariableDeclaration(n)) return
+    if (!ts.isObjectBindingPattern(n.name)) return
+    const init = n.initializer
+    if (init === undefined) return
+    const isProcessInit = (ts.isIdentifier(init) && init.text === 'process')
+      || (ts.isPropertyAccessExpression(init) && init.name.text === 'process'
+        && ts.isIdentifier(init.expression)
+        && (init.expression.text === 'globalThis' || init.expression.text === 'global' || init.expression.text === 'window'))
+    if (!isProcessInit) return
+    for (const el of n.name.elements) {
+      if (!ts.isIdentifier(el.name)) continue
+      if (el.propertyName !== undefined && ts.isIdentifier(el.propertyName)) out.set(el.name.text, el.propertyName.text)
+      else out.set(el.name.text, el.name.text)
+    }
+  })
+  return out
+}
+
 export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const found: Finding[] = []
+  const cliEntryOf = (): boolean => ctx.cliFiles !== undefined && ctx.cliFiles.has(sf.fileName)
+  /** 形态降级（与主遍历同口径；抽取共用避免新形态漏降级）。 */
+  const degrade = (severity: Severity, message: string): { severity: Severity; message: string } => {
+    if (severity === 'info') return { severity, message }
+    const testOrCi = isTestOrCiFile(ctx.filePath ?? sf.fileName)
+    if (ctx.request.targetKind === 'generic' || cliEntryOf() || ctx.appShape === true || testOrCi) {
+      const why = testOrCi ? '测试/CI 文件'
+        : ctx.request.targetKind === 'generic' ? '非 DSH 插件包'
+        : cliEntryOf() ? 'CLI/bin 入口'
+        : '应用型包（bin 入口，process 即产品功能）'
+      return { severity: 'info', message: '能力触达面（' + why + '）：' + message }
+    }
+    return { severity, message }
+  }
   walk(sf, n => {
     if (!ts.isIdentifier(n) || n.text !== 'process') return
     if (isShadowed('process', n)) return
@@ -198,5 +238,83 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
       line: lineOf(sf, n),
     })
   })
+
+  // round-22：globalThis['process'] 元素访问形态——'process' 是字符串字面量不是
+  // 标识符，主遍历对它零命中（连 info 都没有，与 globalThis.process 的检测面不对称）。
+  // 成员分级与属性访问同口径（exit 等 critical / 只读 info / 其余 high）。
+  walk(sf, n => {
+    if (!ts.isElementAccessExpression(n)) return
+    const base = n.expression
+    if (!(ts.isIdentifier(base) && (base.text === 'globalThis' || base.text === 'global' || base.text === 'window'))) return
+    const key = n.argumentExpression
+    if (key === undefined || !(ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)) || key.text !== 'process') return
+    const gp = n.parent
+    let member: string | undefined
+    let evidence = n.getText(sf)
+    if (gp !== undefined && ts.isPropertyAccessExpression(gp) && gp.expression === n) {
+      member = gp.name.text
+      evidence = gp.getText(sf)
+    } else if (gp !== undefined && ts.isElementAccessExpression(gp) && gp.expression === n) {
+      const k2 = gp.argumentExpression
+      if (k2 !== undefined && (ts.isStringLiteral(k2) || ts.isNoSubstitutionTemplateLiteral(k2))) member = k2.text
+      evidence = gp.getText(sf)
+    }
+    let severity: Severity = 'info'
+    let message = '裸 process 引用（' + base.text + "['process']，无成员访问）"
+    if (member !== undefined) {
+      if (CRITICAL_MEMBERS.has(member)) {
+        severity = 'critical'
+        message = '直接访问 ' + base.text + "['process']." + member + '（Node 能力逃逸通道）'
+      } else if (READONLY_MEMBERS.has(member)) {
+        severity = 'info'
+        message = '只读 process 成员（能力触达面）：' + base.text + "['process']." + member
+      } else {
+        severity = 'high'
+        message = '直接访问 ' + base.text + "['process']." + member
+      }
+    }
+    if (severity === 'critical' && ctx.runtime === 'sandbox') severity = 'high'
+    const d = degrade(severity, message)
+    found.push({
+      rule: 'R3',
+      severity: d.severity,
+      confidence: 'certain',
+      message: d.message,
+      evidence: evidence.slice(0, 300),
+      line: lineOf(sf, n),
+    })
+  })
+
+  // round-22：`const { exit } = process; exit(1)` 解构成员形态——调用点是匿名标识符，
+  // 与 process.exit 同一条逃逸通道，按解构成员分级（与属性访问同口径）。
+  const destructured = destructuredProcessMembers(sf)
+  for (const [name, member] of destructured) {
+    walk(sf, n => {
+      if (!ts.isIdentifier(n) || n.text !== name) return
+      if (n.parent !== undefined && ts.isBindingElement(n.parent)) return // 声明位本身（解构名）
+      if (isShadowedForStringy(name, n)) return
+      // 成员使用即访问（exit() 调用 / 裸引用都算）；与属性形态同分级：
+      // 只读成员 info（能力触达面），critical 成员 critical，其余 high（含副作用成员）。
+      let severity: Severity = 'high'
+      let message = 'process 解构成员访问：' + member
+      if (CRITICAL_MEMBERS.has(member)) {
+        severity = 'critical'
+        message = 'process 解构成员调用/访问：' + member + '（Node 能力逃逸通道）'
+      } else if (READONLY_MEMBERS.has(member)) {
+        severity = 'info'
+        message = '只读 process 成员（能力触达面，解构）：' + member
+      }
+      if (severity === 'critical' && ctx.runtime === 'sandbox') severity = 'high'
+      const d = degrade(severity, message)
+      found.push({
+        rule: 'R3',
+        severity: d.severity,
+        confidence: 'certain',
+        message: d.message,
+        evidence: n.getText(sf),
+        line: lineOf(sf, n),
+      })
+    })
+  }
   return found
 }

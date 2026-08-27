@@ -3,10 +3,14 @@ import type { Finding, RuleContext } from '../protocol.js'
 import { walk, lineOf } from '../ast.js'
 
 const KEY_PATTERNS: { re: RegExp; desc: string }[] = [
-  { re: /sk-[A-Za-z0-9]{16,}/, desc: 'sk- API key（OpenAI/DeepSeek 系）' },
+  // round-22：sk-proj- (OpenAI 现行项目密钥 = sk-proj-<base64url>，'-' 会打散旧字符类
+  // [A-Za-z0-9]{16,} 导致整个家族漏报) + 允许 base64url 连字符/下划线；sk- 普通形态不变
+  { re: /sk-(?:proj-)?[A-Za-z0-9_-]{16,}/, desc: 'sk- API key（OpenAI/DeepSeek 系）' },
   { re: /AKIA[0-9A-Z]{16}/, desc: 'AWS access key' },
   { re: /AIza[0-9A-Za-z_-]{20,}/, desc: 'GCP API key' },
   { re: /gh[pousr]_[A-Za-z0-9]{20,}/, desc: 'GitHub token' },
+  // round-22：github_pat_ 细粒度令牌（现行 GitHub fine-grained PAT 前缀）同族补漏
+  { re: /github_pat_[A-Za-z0-9_]{20,}/, desc: 'GitHub fine-grained PAT' },
   { re: /xox[baprs]-/, desc: 'Slack token' },
   { re: /\b(DEEPSEEK_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY)\s*=\s*\S+/, desc: '环境变量密钥赋值' },
   { re: /api\.(deepseek|openai|anthropic)\.com\/[^\s'"]*\?[^'"]*key=/, desc: 'URL 内嵌 API key' },
@@ -36,6 +40,9 @@ function overlapsPlaceholder(start: number, end: number, spans: [number, number]
  */
 /** 对一段文本跑 KEY_PATTERNS（AST 字面量与 N2 解码语料共用判定逻辑）。 */
 function scanText(text: string, decoded = false): Finding[] {
+  // round-16（SEC-7）：URL 内嵌 key 模式的 `[^\s'"]*` 链在超长无命中串上有二次型回溯面——
+  // 64KB 以上跳过（密钥不存在于 64KB 长的自然文本里；隔离子进程内本来有 60s 宿主兜底）。
+  if (text.length > 64 * 1024) return []
   const out: Finding[] = []
   const spans = placeholderSpans(text)
   for (const p of KEY_PATTERNS) {

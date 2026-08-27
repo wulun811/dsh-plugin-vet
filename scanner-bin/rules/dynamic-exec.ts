@@ -2,10 +2,10 @@ import ts from 'typescript'
 import type { Finding, RuleContext, Severity, Confidence } from '../protocol.js'
 import { walk, stringyValue, lineOf, isShadowed } from '../ast.js'
 import { tryDecodeLiteral } from '../decode.js'
+// 逃逸字符串特征与 R1 单源共用（round-22：两侧正则必须一致——KEEP IN SYNC 由
+// 导入关系保证，禁止在此再定义副本）。
+import { ESCAPE_RE } from './constructor-chain.js'
 
-// F2：globalThis/global/window 前缀 + 括号访问都算逃逸特征（return globalThis.process /
-// process['exit'] 此前漏报）
-const ESCAPE_RE = /return\s+\w*(?:globalThis|global|window)?\.?\s*process\b|this\.constructor|process(?:\[|\()/
 const VM_EXEC = new Set(['runInContext', 'runInNewContext'])
 
 /** 剥掉外层括号（round-7，P1）：new (Function)('...') / (eval)('x') 此前被当普通表达式漏检。 */
@@ -209,10 +209,18 @@ function isFactoryParamRequire(call: ts.CallExpression): boolean {
   return false
 }
 
-/** 顶级 `const x = require('y')`（声明初始化即该调用）——仅 code 场景用于降噪。 */
+/** 顶级 `const x = require('y')`（声明初始化即该调用）——仅 code 场景用于降噪。
+ * round-22（mislabeled 修复）：此前只查「声明形状」不查「模块作用域」——函数体内的
+ * VariableStatement 同样满足形状，函数级 const require 被误当顶级降噪，code 场景的
+ * 逃逸尝试 medium 整段静默丢失。收紧为：声明语句必须是 SourceFile/ModuleBlock 的直接
+ * 子级（真·模块顶层）。 */
 function isTopLevelConstRequire(call: ts.CallExpression): boolean {
   const parent = call.parent
   if (parent === undefined || !ts.isVariableDeclaration(parent) || parent.initializer !== call) return false
   const decl = parent.parent
-  return decl !== undefined && ts.isVariableDeclarationList(decl) && decl.parent !== undefined && ts.isVariableStatement(decl.parent)
+  if (decl === undefined || !ts.isVariableDeclarationList(decl)) return false
+  const stmt = decl.parent
+  if (stmt === undefined || !ts.isVariableStatement(stmt)) return false
+  const outer = stmt.parent
+  return outer !== undefined && (ts.isSourceFile(outer) || ts.isModuleBlock(outer))
 }

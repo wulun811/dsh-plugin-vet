@@ -92,14 +92,51 @@ export function tryDecodeLiteral(node: ts.Expression, sf: ts.SourceFile, depth =
     return { text, method: "base64" }
   }
 
+  // Array.join 常量组装（round-16）：['curl',' -s x',' | sh'].join('') / join(' ')
+  // ——同款拆串混淆此前 static 层全盲（R13/R7/R11/R20 语料缺位；与 atob 递归不对称）。
+  if (ts.isPropertyAccessExpression(callee) && callee.name.text === "join"
+    && ts.isArrayLiteralExpression(callee.expression) && node.arguments.length <= 1) {
+    const elems: string[] = []
+    for (const el of callee.expression.elements) {
+      const s = stringyValue(el, sf)
+      if (s === undefined) return undefined
+      elems.push(s.text)
+    }
+    if (elems.length === 0) return undefined
+    let sep = ','
+    if (node.arguments.length === 1) {
+      const s = stringyValue(node.arguments[0], sf)
+      if (s === undefined) return undefined
+      sep = s.text
+    }
+    const text = elems.join(sep)
+    if (text.length === 0 || text.length > MAX_DECODED_BYTES) return undefined
+    return { text, method: "concat" }
+  }
+
   // Buffer.from(str, "hex"|"base64"|"base64url")
   if (isBufferFromCall(node) && node.arguments.length >= 1) {
     const arg = node.arguments[0]
-    const inner = literalString(arg, sf)
+    // round-16：拼接/标识符实参此前漏解（literalString 只认纯字面量）——atob 分支有递归，
+    // Buffer.from 分支没有，同一拆串手法两种载体一个查一个不查；现在对齐递归。
+    let inner = literalString(arg, sf)
+    if (inner === undefined) {
+      const nested = tryDecodeLiteral(arg, sf, depth + 1)
+      if (nested !== undefined) inner = nested.text
+      else {
+        // 标识符实参（const h = "2f..."; Buffer.from(h, "hex")）——stringyValue 兜底；
+        // 纯字面量标识符的 tryDecodeLiteral 首分支只放行非 exact 串，这里补 exact 形态。
+        const sv2 = stringyValue(arg, sf)
+        if (sv2 !== undefined && sv2.text.length <= MAX_DECODED_BYTES) inner = sv2.text
+      }
+    }
     const enc = node.arguments[1] !== undefined && ts.isStringLiteral(node.arguments[1]) ? node.arguments[1].text : ""
     if (inner === undefined || inner.length > MAX_DECODED_BYTES) return undefined
     if (enc === "hex" || enc === "base64" || enc === "base64url") {
-      const text = enc === "hex" ? decodeHex(inner) : decodeB64(inner)
+      // 递归产物同样做字符集门（与 atob 分支同款，防"恰好合法"噪声）
+      if (enc === "hex" && !/^[0-9a-fA-F]+$/.test(inner)) return undefined
+      if (enc !== "hex" && !/^[A-Za-z0-9+/=_\-]+$/.test(inner.trim())) return undefined
+      const text = enc === "hex" ? decodeHex(inner) : decodeB64(inner.trim())
       if (text !== undefined) return { text, method: enc === "hex" ? "hex" : "base64" }
     }
     if (enc === "" || enc === "utf8" || enc === "latin1" || enc === "ascii") {

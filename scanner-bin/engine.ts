@@ -3,7 +3,7 @@
  * content-hash cache. Pure logic — the stdio wrapper is index.ts.
  * @module dsh-plugin-vet/scanner-engine
  */
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { basename, dirname, join, sep } from 'node:path'
 import { createRequire, builtinModules } from 'node:module'
 import { parseSource } from './ast.js'
@@ -34,10 +34,35 @@ export const NODE_BUILTINS = new Set(builtinModules.map(m => m.split('/')[0]))
  * 直接产出 R8-scan-skipped info（规则扫不到≠干净，但绝不让大文件把引擎内存打爆）。 */
 const PRE_FILE_SIZE_LIMIT = 8 * 1024 * 1024
 
-/** Extension of a path (without dot), or undefined when none. */
+/** Extension of a path (without dot, lowercased), or undefined when none.
+ * round-16：统一小写——`.SH`/`.CMD`/`.MD` 等大小写变体此前绕过 R14/R18 与源码面
+ * （大小写不敏感文件系统/显式 `bash Setup.SH` 是真实形态；isInstructionFile 等内部
+ * 判定早已按大小写不敏感写）。 */
 function extOf(file: string): string | undefined {
   const dot = file.lastIndexOf('.')
-  return dot === -1 ? undefined : file.slice(dot + 1)
+  return dot === -1 ? undefined : file.slice(dot + 1).toLowerCase()
+}
+
+/** 无扩展名文件是否按 JS 解析（round-16）：package.json bin/scripts 引用的入口，或
+ * 内容首行是 node shebang（`#!/usr/bin/env node`）；二进制/无特征文件跳过（防误解析）。 */
+function isExtensionlessJs(file: string, referenced: Set<string> | undefined): boolean {
+  if (referenced !== undefined && referenced.has(basename(file))) return true
+  try {
+    const fd = openSync(file, 'r')
+    try {
+      const buf = Buffer.alloc(512)
+      const n = readSync(fd, buf, 0, 512, 0)
+      const head = buf.subarray(0, Math.max(0, n))
+      if (n <= 0) return false
+      if (head.includes(0)) return false // 二进制文件
+      const first = head.toString('utf8').split('\n', 1)[0] ?? ''
+      return first.startsWith('#!') && /\bnode(?:js)?\b/i.test(first)
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    return false
+  }
 }
 
 /** Read a file as UTF-8, returning '' when unreadable. */
@@ -158,7 +183,9 @@ function depsFindings(ghost: string[], zombie: string[]): Finding[] {
 /**
  * 从 package.json 内容解析包形态（round-7，P4）：bin 声明（字符串或对象）→ 应用型包
  * （appShape，R3 按能力触达面降级）；bin 值对应文件 → CLI 入口（cliFiles，R2/R3/R9 按
- * 通用代码判定）。engine 只见文件 basename，bin 路径统一归一为 basename 匹配。
+ * 通用代码判定）。round-16：scripts 命令里出现的路径 token 也入 cliFiles（postinstall
+ * `node scripts/install` 等——无扩展名入口的常见宿主，engine 按 basename 匹配它们）。
+ * engine 只见文件 basename，bin/scripts 路径统一归一为 basename 匹配。
  */
 function packageShape(content: string): { cliFiles: Set<string>; appShape: boolean } {
   const cliFiles = new Set<string>()
@@ -177,6 +204,18 @@ function packageShape(content: string): { cliFiles: Set<string>; appShape: boole
     for (const e of entries) {
       const name = basename(e.replace(/^\.\//, ''))
       if (name !== '' && name !== '.') cliFiles.add(name)
+    }
+    const scripts = pkg.scripts
+    if (typeof scripts === 'object' && scripts !== null) {
+      for (const v of Object.values(scripts)) {
+        if (typeof v !== 'string' || v === '') continue
+        // 取命令中首个"像路径"的 token（node scripts/install、node --no-warnings bin/start …）
+        const tok = v.trim().split(/\s+/).find(t => t.includes('/') || t.includes('\\'))
+        if (tok !== undefined) {
+          const name = basename(tok.replace(/^\.\//, '').replace(/\\/g, '/'))
+          if (name !== '' && name !== '.') cliFiles.add(name)
+        }
+      }
     }
   } catch {
     // 坏 package.json：无形态证据（保守不降级）
@@ -336,6 +375,7 @@ function scanFiles(request: ScanRequest): ScanResponse {
     const ext = extOf(file)
     // R14: non-JS script files (shell/PowerShell/batch) get a deterministic
     // text scan for download-and-exec primitives — the AST rules do not see them.
+    // （round-16：extOf 已统一小写，Setup.SH/evil.CMD 同样命中）
     if (ext !== undefined && NON_JS_SCRIPT_EXT.has(ext)) {
       if (request.rules?.['R14'] !== false) {
         // round-15 review：R14 分支此前无 8MB 预检（AST/R17/R18 都有）——多 GB 的
@@ -381,7 +421,12 @@ function scanFiles(request: ScanRequest): ScanResponse {
       }
       continue
     }
-    if (ext === undefined || !SCANNABLE_EXT.has(ext)) continue
+    if (ext === undefined || !SCANNABLE_EXT.has(ext)) {
+      // round-16：无扩展名文件——npm 标准形态（bin 入口、postinstall 脚本）此前整段隐形
+      // （连 R8 提示都没有）。按 JS 解析需形态证据：package.json bin/scripts 引用或 node
+      // shebang；其余无扩展名文件（二进制、无特征文本）照旧跳过（不误解析）。
+      if (ext !== undefined || !isExtensionlessJs(file, shape?.cliFiles)) continue
+    }
     // 大文件预检（技术债偿还）：readFileSync 前先 stat，超限即 R8-skip（不整读、不 OOM）
     // round-16 review（D3）：非常规文件同判跳过（见 sizeWithinBudget 注释——/dev/zero 等
     // 无限流/fifo 不能进 readOrDefault）
@@ -423,7 +468,11 @@ function scanFiles(request: ScanRequest): ScanResponse {
     const declaredSet = depsInfo.declared
     const ghost = capabilities.imports
       // 内建排除按首段：import { x } from 'fs/promises' → 首段 'fs' 在内建集合内
-      .filter(i => !i.startsWith('@deepseek-ai/') && !NODE_BUILTINS.has(i.split('/')[0]) && !declaredSet.includes(i))
+      // round-17（子路径前缀解析）：react/jsx-runtime 这类子路径导入，父包 react 已声明即视为已声明
+      // （此前只做精确匹配 → 对所有 React 客户端插件误报幽灵依赖）；父包未声明的子路径
+      // （ghost-pkg/sub）照旧判幽灵。规则行为变化 ⇒ ENGINE_VERSION 递增使旧缓存失效。
+      .filter(i => !i.startsWith('@deepseek-ai/') && !NODE_BUILTINS.has(i.split('/')[0])
+        && !declaredSet.some(d => i === d || i.startsWith(d + '/')))
       .slice(0, R16_DEP_CAP)
     const installed = depsInfo.installed
     const zombie = installed === null
