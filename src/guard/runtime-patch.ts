@@ -7,7 +7,7 @@ import type { HookModule, HookConfig, HookAlarm } from './runtime-ops.js'
 import type { LedgerFsEvent, LedgerNetEvent } from './exfil-ledger.js'
 import { confirmBlock, BLOCK_FS_OPS, type BlockDecision } from './confirm-block.js'
 import { incrementBlocked } from './stats.js'
-import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact, isDshAtomicStagingPath } from './runtime-denoise.js'
+import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact, isDshAtomicStagingPath, isDshRuntimeTempPath } from './runtime-denoise.js'
 import { classifyOp } from './runtime-classify.js'
 import { classifyNetworkOp, extractNetworkTarget, isTrackedNetHost, isLoopbackHost, isControlPlanePath, NET_OPS } from './runtime-net.js'
 import { fsOpBytes, attachWriteCounter, attachCanaryScanner, attachReadCounter } from './runtime-count.js'
@@ -84,11 +84,16 @@ export function patchModule(
       // (`.<name>.<pid>.<uuid>.tmpdir`，~/.dsh 任意深度，settings.yaml 保存实测路径)同判。
       // 仅在「无归因 + 归因链未被篡改」时按宿主自身豁免；插件归因的同类操作照报
       // （碰宿主状态=信号），蜜罐/完整性金丝雀类不受此豁免。
+      // 0.3.3（P7）：~/.dsh/sessions/** 下宿主会话存储的临时产物（*.tmp 随用随清）——
+      // 只对侦察类（fs-probe）降噪：lstat/stat 探针无害；写/删同类路径（会话日志轮换
+      // 等）不走此豁免，维持既有 fs-write/fs-destroy 语义（isSessionLogFile 已独立
+      // 处理无主会话日志删除）。
       const opTarget = firstString(args) ?? '';
       if (
         alarm !== null && hint === undefined && !stackTampered &&
         alarm.kind !== 'honeypot' && alarm.kind !== 'integrity' &&
-        (isDshWebTempArtifact(opTarget) || isDshAtomicStagingPath(opTarget))
+        (isDshWebTempArtifact(opTarget) || isDshAtomicStagingPath(opTarget)
+          || (alarm.kind === 'fs-probe' && isDshRuntimeTempPath(opTarget)))
       ) {
         alarm = null
       }

@@ -215,6 +215,11 @@ export class VetStatus {
       active.some(a => a.severity === 'red') ? 'red'
       : (active.some(a => a.severity === 'yellow') || (lastScan !== undefined && lastScan.verdict !== 'clean')) ? 'yellow'
       : 'green'
-    return { level, alarmCount: active.length, alarms: active.map(stripMergeKey), dismissed: dismissed.map(stripMergeKey), lastScan }
+    // 0.3.3（P1 双层通道，用户警报疲劳反馈）：alarmCount 只计「可行动风险」（yellow/red）——
+    // info 观察（官方包 C2 边界等 capability/coverage 类）不参与警报计价与 level，但保留在
+    // alarms 列表（面板 logged 区可见、可 dismiss、可恢复），避免「警报数」被无法消解的
+    // 架构事实污染（15 条黄 = 同一 C2 边界 × 14 官方包，而非 15 处风险）。
+    const actionable = active.filter(a => a.severity !== 'info')
+    return { level, alarmCount: actionable.length, alarms: active.map(stripMergeKey), dismissed: dismissed.map(stripMergeKey), lastScan }
   }
 }

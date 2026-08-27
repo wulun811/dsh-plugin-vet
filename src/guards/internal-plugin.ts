@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { ScanResponse } from '../scanner/protocol.js'
@@ -13,6 +14,7 @@ import { withVetSelfIo, markOfficialTrusted } from '../guard/runtime-hooks.js'
 import { capabilityDiff } from '../guard/capability-diff.js'
 import { recordScan as recordVersionScan, consumeCapabilitiesTamper } from '../guard/version-diff.js'
 import { recordScanSummary } from '../guard/scan-summaries.js'
+import { isKnownBoundary, markKnownBoundary } from '../guard/known-boundaries.js'
 import type { VetStatus } from '../guard/status.js'
 import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline, consumeBaselineTamper } from './content-baseline.js'
 import { verifyAgainstRegistry } from './registry-verify.js'
@@ -277,10 +279,20 @@ async function reconcileMismatch(status: VetStatus | undefined, name: string, ve
 }
 
 /**
- * 0.1.20：esm-guard-coverage session 级去重——同一插件只报一次。
+ * C2 边界提示的会话级去重（0.1.20 引入，0.3.3 升级）：
  * ESM 具名导入的 T2 不覆盖是架构性限制（C2 边界），反复提醒只会造成警报疲劳。
+ * 0.3.3（P3 持久化状态化去重）：主去重层移到 known-boundaries 落盘（(kind, pkg,
+ * version, capabilitiesHash) 版本不变不重报）；本 Map 保留两层兜底语义——
+ * - known 落盘失败时（此时 isKnownBoundary 恒 false）防会话内同能力刷屏；
+ * - 记录值 = 上次已报的 capabilitiesHash：能力差分变化时（hash 不同）允许重报，
+ *   与 N6 差分同一变化源（「版本/能力未变不重报，变化才重启」在两级去重下都成立）。
  */
-const esmGuardReported = new Set<string>()
+const esmGuardReported = new Map<string, string>()
+
+/** 能力清单的确定性指纹（P3 变化源）：结构化序列化 + sha256。CLI 工具/测试可复用。 */
+export function hashCapabilities(capabilities: unknown): string {
+  return createHash('sha256').update(JSON.stringify(capabilities ?? null)).digest('hex')
+}
 
 /**
  * round-5 review（A#14）：重复 apply 防叠——DSH 配置热重载对同一 ctx 重复 apply 时
@@ -296,6 +308,23 @@ let prevPluginListenerOff: (() => void) | undefined
  */
 export function installInternalPluginGuard(ctx: Context, config: VetConfig, status?: VetStatus): void {
   prevPluginListenerOff?.()
+  // P6（0.3.3）：启动扫描 C2 边界汇总——官方包边界观察按 info 聚合一条 + 三方包黄色
+  // 警报的计数，防抖输出一行话（避免每包一条刷屏、也让「14 官方包同一 C2 边界」的
+  // 合并认知可见：不是 14 处风险，是 1 处架构边界 × 14 包）。
+  const bootBoundary = { official: 0, third: 0 }
+  let boundarySummaryTimer: ReturnType<typeof setTimeout> | undefined
+  const scheduleBoundarySummary = (): void => {
+    if (boundarySummaryTimer !== undefined) clearTimeout(boundarySummaryTimer)
+    boundarySummaryTimer = setTimeout(() => {
+      boundarySummaryTimer = undefined
+      const { official, third } = bootBoundary
+      if (official + third === 0) return
+      ctx.logger.info(
+        `vet: 启动扫描 C2 边界汇总——官方包 ${official} 个（info 观察，面板折叠为一条；详情见插件页/营养标签），第三方包 ${third} 个（黄色警报：版本/能力差分变化才重报）`,
+      )
+    }, 800)
+    boundarySummaryTimer.unref?.()
+  }
   // S9：档案目录不可读告警接线（一次性，注入即可）
   setArchiveIoWarn((msg) => {
     try {
@@ -503,24 +532,56 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       }
       // C2（0.1.16 加固）：插件使用内建模块的 ESM 具名导入 → T2 钩子对该绑定不生效（Node 快照互操作），
       // 运行时防线仅剩 T1 哨兵——显式提示边界，不静默
-      // 0.1.20：session 级去重——同一插件只报一次（架构性限制，反复提醒=警报疲劳）
+      // 0.1.20：session 级去重（架构性限制反复提醒 = 警报疲劳）；0.3.2 用户侧实测（14 官方包 +
+      // 1 fs-probe 黄色警报重启必复现、不可消解）→ 0.3.3 呈现层重构（P1/P2/P3）：
+      // - 官方包（内容信任锚 first-seen/match）：coverage 类观察降为 info——官方锚语义 =
+      //   接受其架构事实，呈现层不再把「已知边界」当风险从报（round-16 官方豁免的呈现级联
+      //   兑现；检测/留档层未关闭：插件详情页、营养标签持续可见，N6 升级差分照常重报）；
+      //   mergeKey 跨包折叠为一条聚合（count 累计），不计 alarmCount、不参与 level；
+      // - 三方包（含 mismatch 未确认的官方名——未验证即不享信任呈现）：维持 yellow（这条
+      //   边界正是三方审计价值所在），升级为持久化状态化去重（P3）：(kind, pkg, version,
+      //   capabilitiesHash) 落盘，版本/能力未变不重报；能力差分变化（唯一有信息量场景）重报。
       if (res.report.capabilities?.esmNamedBuiltins === true && config.runtimeGuard === 'watch') {
         const alertId = 'esm-guard-coverage:' + entryName
-        // round-15 review（持久化忽略可恢复修复）：去掉持久化忽略前置短路（照常 record，
-        // 由 VetStatus 折叠）；session 级去重（esmGuardReported）保留——架构性限制每个会话
-        // 仍只报一次，避免警报疲劳。
-        if (!esmGuardReported.has(entryName)) {
-          esmGuardReported.add(entryName)
+        // 走到 finish 的官方豁免只可能是 first-seen/match（cordis/allowlist/config-off 已提前 return；
+        // mismatch 未确认不给信任呈现）
+        const officialTrusted = official.kind === 'exempt'
+        if (officialTrusted) {
           status?.record({
             id: alertId,
-            severity: 'yellow',
+            severity: 'info',
             source: 'scan',
             kind: 'esm-guard-coverage',
-            message: entryName + ' 使用内建模块 ESM 具名导入（fs/child_process/网络）——T2 运行时钩子对该绑定不生效（Node 互操作快照，C2 边界），运行时防线仅剩 T1 哨兵与审计协议',
+            message: `官方包 ${entryName} 使用内建模块 ESM 具名导入（fs/child_process/网络）——内容信任锚内的已知架构边界（C2：T2 钩子对该绑定不生效，Node 互操作快照；运行时防线仅剩 T1 哨兵与审计协议）。此为观察提示非风险报警；详情见插件详情页与营养标签`,
             target: entryName,
             pluginHint: entryName,
+            mergeKey: 'scan:esm-guard-coverage:official',
             at: Date.now(),
           })
+          bootBoundary.official += 1
+          scheduleBoundarySummary()
+        } else {
+          // 三方包：P3 持久化去重（版本/能力差分未变 → 不重报；known 落盘失败时 session Map 兜底）
+          const v = installedVersion ?? 'unknown'
+          const capHash = hashCapabilities(res.report.capabilities)
+          if (!isKnownBoundary('esm-guard-coverage', entryName, v, capHash)) {
+            markKnownBoundary('esm-guard-coverage', entryName, v, capHash)
+            if (esmGuardReported.get(entryName) !== capHash) {
+              esmGuardReported.set(entryName, capHash)
+              status?.record({
+                id: alertId,
+                severity: 'yellow',
+                source: 'scan',
+                kind: 'esm-guard-coverage',
+                message: entryName + ' 使用内建模块 ESM 具名导入（fs/child_process/网络）——T2 运行时钩子对该绑定不生效（Node 互操作快照，C2 边界），运行时防线仅剩 T1 哨兵与审计协议',
+                target: entryName,
+                pluginHint: entryName,
+                at: Date.now(),
+              })
+              bootBoundary.third += 1
+              scheduleBoundarySummary()
+            }
+          }
         }
       }
       // round-15 review（A#15 对齐）：unknown verdict 的 deny 判定——verdict 来自扫描器协议，

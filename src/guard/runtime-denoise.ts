@@ -167,6 +167,20 @@ export function isDshAtomicStagingPath(p: string): boolean {
   return norm.split('/').some(seg => ATOMIC_STAGING_SEGMENT_RE.test(seg))
 }
 /**
+ * 0.3.3（P7，用户警报疲劳反馈）：DSH 自身运行时临时产物——宿主会话存储向
+ * ~/.dsh/sessions 写临时文件（会话缓冲 *.tmp 等）并随用随清，lstat/stat 探针
+ * 成对出现；栈里只有宿主帧 → 无归因 → 每次会话轮转都刷 yellow fs-probe（实测：
+ * ~/.dsh/sessions 下的 *.tmp 被 lstat）。判定纯名字/目录形状（复用 TRANSIENT_TEMP_SUFFIX）。
+ * 刻意收窄到 sessions/ 下的临时后缀：真实凭据面（.credentials.yaml 专属临时件）、
+ * 完整性金丝雀、蜜罐、会话日志本体不在此列（写/删仍照报——调用方只对侦察类降噪）。
+ */
+export function isDshRuntimeTempPath(p: string): boolean {
+  const norm = p.replace(/\\/g, '/')
+  if (!DSH_SESSIONS_DIR_RE.test(norm)) return false
+  const last = norm.slice(norm.lastIndexOf('/') + 1)
+  return last !== '' && TRANSIENT_TEMP_SUFFIX.test(last)
+}
+/**
  * 归一化路径并判断是否敏感。
  * mode='mutate'（写/删）额外计入系统根前缀（/etc /usr /var …：写删系统文件=篡改/破坏）；
  * mode='read' 只看密钥特征（段名/后缀/关键词）——读系统目录下的普通文件（库文件、配置）属正常
