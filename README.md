@@ -9,6 +9,8 @@ English | [中文](README.zh.md)
 
 [🔗 dsh.so plugin submission & security-report pages run vet-led scanning — view](https://www.dsh.so/zh/security-report/)
 
+> 🌐 **Landing site:** [https://wulun811.github.io/dsh-plugin-vet/](https://wulun811.github.io/dsh-plugin-vet/) — features, architecture, live dashboard numbers, trust boundaries and known limitations (bilingual, dark mode). Source in [`site/`](site/).
+
 > **Audit before install, guard at runtime.** Run every DSH plugin through dsh-plugin-vet before mounting it:
 > static rules produce a verdict (deterministic, unforgeable), the agent investigates sensitive points and
 > quality issues following the `vet-audit-protocol` skill (no one can substitute for that), and a final
