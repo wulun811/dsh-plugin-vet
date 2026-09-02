@@ -50,6 +50,12 @@ export interface HookAlarm {
   pluginHint?: string
   /** 目标是否为会话日志文件（用于归因分层文案：无归因 + 会话日志 → 轮换提示）。 */
   sessionLog?: boolean
+  /**
+   * 0.3.5（P8）：官方名归因的 DSH 协议形状家务探针（~/.dsh 下 <file>.lock 锁兄弟 / 会话日志
+   * 分片）。由包装器按「名称级 isOfficial + 仅 fs-probe + 协议形状」打标，sink 收到后降为
+   * info 聚合观察（不静默、不黄警），不对内容/写删面生效。
+   */
+  officialHousekeeping?: boolean
 }
 
 export interface HookOp {

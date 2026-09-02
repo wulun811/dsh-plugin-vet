@@ -7,7 +7,7 @@ import type { HookModule, HookConfig, HookAlarm } from './runtime-ops.js'
 import type { LedgerFsEvent, LedgerNetEvent } from './exfil-ledger.js'
 import { confirmBlock, BLOCK_FS_OPS, type BlockDecision } from './confirm-block.js'
 import { incrementBlocked } from './stats.js'
-import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact, isDshAtomicStagingPath, isDshRuntimeTempPath } from './runtime-denoise.js'
+import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact, isDshAtomicStagingPath, isDshRuntimeTempPath, isDshLockSiblingProbe, isSessionLogFile } from './runtime-denoise.js'
 import { classifyOp } from './runtime-classify.js'
 import { classifyNetworkOp, extractNetworkTarget, isTrackedNetHost, isLoopbackHost, isControlPlanePath, NET_OPS } from './runtime-net.js'
 import { fsOpBytes, attachWriteCounter, attachCanaryScanner, attachReadCounter } from './runtime-count.js'
@@ -89,13 +89,37 @@ export function patchModule(
       // 等）不走此豁免，维持既有 fs-write/fs-destroy 语义（isSessionLogFile 已独立
       // 处理无主会话日志删除）。
       const opTarget = firstString(args) ?? '';
+      // 0.3.5（P8，用户警报疲劳第七轮反馈）：无归因宿主家务再扩充两处——
+      // ① ~/.dsh 下原子写协议锁兄弟（<file>.lock，withFileLock 陈旧锁 lstat，实测
+      //    lstat(~/.dsh/.credentials.yaml.lock) 每次保存凭据刷一条无主 yellow）；
+      // ② ~/.dsh/sessions 会话日志形状本体（0.1.19 只静默了无主删除侧，侦察侧补上——
+      //    isSessionLogFile 形状 = 宿主会话存储自己的轮换探针；读内容仍是 fs-read 照报）。
+      // 均仅限侦察类（fs-probe）：lstat/stat 探针无害；写/删同类路径不走此豁免。
       if (
         alarm !== null && hint === undefined && !stackTampered &&
         alarm.kind !== 'honeypot' && alarm.kind !== 'integrity' &&
         (isDshWebTempArtifact(opTarget) || isDshAtomicStagingPath(opTarget)
-          || (alarm.kind === 'fs-probe' && isDshRuntimeTempPath(opTarget)))
+          || (alarm.kind === 'fs-probe' && (isDshRuntimeTempPath(opTarget) || isDshLockSiblingProbe(opTarget) || isSessionLogFile(opTarget))))
       ) {
         alarm = null
+      }
+      // 0.3.5（P8）：官方名归因的协议形状家务探针（Tier B，不再静默而是降级标记）。
+      // 会话存储本尊（@deepseek-ai/dsh-session-persistence-jsonl）轮换时 lstat 自己的
+      // session.jsonl.zstd.xxx 分片、@deepseek-ai/dsh-settings-file 帧内跑 atomic-write 锁
+      // 探测——栈里有插件帧，上方「无归因」豁免结构上够不到；而 sink 的官方全域抑制要求
+      // 内容信任锚（SEC-1 isOfficialTrusted），首见验证/离线期锚内无名字 → 刷 yellow。
+      // 此处按 SEC-1 保留的「名称级去噪」走廊处理：仅 fs-probe 一类（侦察）+ 仅两个协议形状
+      // （~/.dsh 下 <file>.lock 锁兄弟 / ~/.dsh/sessions 会话日志形状）打标降级——由 sink
+      // 降为 info 聚合观察（可见、可忽略、不计 alarmCount），不静默、不黄警；伪名 tarball
+      // 最多让这两个形状的存在性探针降级为 info（内容仅 PID/元数据），触碰凭据本体、
+      // 会话内容（fs-read）、写入/删除、蜜罐/金丝雀全部照报（不触及那些判定面）。
+      let officialHousekeeping = false
+      if (
+        alarm !== null && hint !== undefined && !stackTampered &&
+        alarm.kind === 'fs-probe' && isOfficial(hint) &&
+        (isDshLockSiblingProbe(opTarget) || isSessionLogFile(opTarget))
+      ) {
+        officialHousekeeping = true
       }
       // N7 确认拦截：判定（族 1/2）在调用原函数之前执行——拦截 = 抛错（fail-open：异常 → 放行）
       // C4：归因被篡改时用哨兵身份（不匹配任何已知插件）参与族 2 凭据本体判定——
@@ -158,7 +182,7 @@ export function patchModule(
           observe(evt)
         }
       }
-      if (alarm !== null) sink({ ...alarm, pluginHint: hint })
+      if (alarm !== null) sink({ ...alarm, pluginHint: hint, ...(officialHousekeeping ? { officialHousekeeping: true } : {}) })
       return result
     }
       mod[opName] = wrapped

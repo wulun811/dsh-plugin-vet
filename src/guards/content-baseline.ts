@@ -20,6 +20,13 @@ export interface BaselineRecord {
   version: string
   hash: string
   recordedAt: number
+  /**
+   * 0.3.5（M2 审查加固）：registry 首见校验不一致标记——verifyFirstSeenOfficial/reconcileMismatch
+   * 曾发现「本机字节 ≠ 官方 registry」时置位并落盘。match 路径（本地基线自证）据此不授予内容
+   * 信任锚并持续黄牌（黄不粘滞的修复：首见的一次性黄牌 + 二次加载 match 自证入锚 = 伪造包
+   * 第二载即获运行时全域静默）。acknowledged-package-hashes 登记或字节更新为官方后清除/豁免。
+   */
+  suspected?: boolean
 }
 
 /** 基线存储：key = `${packageName}@${version}`，支持多版本共存。 */
@@ -200,6 +207,27 @@ export function recordBaseline(
 ): void {
   const key = `${name}@${version}`
   store.records[key] = { name, version, hash, recordedAt: Date.now() }
+}
+
+/**
+ * 0.3.5（M2 审查加固）：设置/清除基线的 registry 疑标（suspected）。
+ * 置位：首见 registry 校验不一致 / 对账坐实本机 ≠ 官方；清除：本机字节 == 官方 registry。
+ * 返回是否成功落盘（fail-open：落盘失败仅本次会话生效，下次加载回退未标记——黄牌重来一次）。
+ */
+export function setRecordSuspected(name: string, version: string, suspected: boolean): boolean {
+  const store = getBaseline()
+  const key = `${name}@${version}`
+  const record = store.records[key]
+  if (record === undefined) return true // 记录不存在（并发窗口）：无可标记，视同成功
+  record.suspected = suspected
+  const saved = saveBaseline(store)
+  if (saved) refreshBaseline()
+  return saved
+}
+
+/** 基线记录的 registry 疑标（不存在记录 = 未标记）。 */
+export function isRecordSuspected(name: string, version: string): boolean {
+  return getBaseline().records[`${name}@${version}`]?.suspected === true
 }
 
 /**

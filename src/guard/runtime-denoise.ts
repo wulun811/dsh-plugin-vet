@@ -181,6 +181,21 @@ export function isDshRuntimeTempPath(p: string): boolean {
   return last !== '' && TRANSIENT_TEMP_SUFFIX.test(last)
 }
 /**
+ * 0.3.5（P8，用户警报疲劳第七轮反馈）：DSH 原子写协议锁的侦察探针豁免判定——
+ * @deepseek-ai/dsh-atomic-write 的 withFileLock 在凭据/配置保存路径上对 <file>.lock 做
+ * lstat（存在性/陈旧锁探测）：宿主帧执行时无归因（实测 lstat(~/.dsh/.credentials.yaml.lock)
+ * 每次保存凭据刷一条无主 yellow fs-probe），官方设置插件帧内执行时归因到 @deepseek-ai/
+ * dsh-settings-file。写/删侧早有 isLockSiblingPath 豁免（协议随写随删），侦察侧补齐：
+ * 判定 = ~/.dsh 下 + 末段 .lock。锁文件内容仅 PID——探测它没有可窃取信息量；凭据/配置
+ * 本体与其临时件形态的读/写/删照旧报警。收窄到 .dsh：~/.ssh 等其余敏感面的 .lock
+ * 形状无协议豁免依据，照报。
+ */
+export function isDshLockSiblingProbe(p: string): boolean {
+  const norm = p.replace(/\\/g, '/')
+  if (!DSH_STATE_DIR_RE.test(norm)) return false
+  return isLockSiblingPath(norm)
+}
+/**
  * 归一化路径并判断是否敏感。
  * mode='mutate'（写/删）额外计入系统根前缀（/etc /usr /var …：写删系统文件=篡改/破坏）；
  * mode='read' 只看密钥特征（段名/后缀/关键词）——读系统目录下的普通文件（库文件、配置）属正常

@@ -107,6 +107,24 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
     // round-16（SEC-1）：判据改内容信任锚 isOfficialTrusted——名称级 isOfficial 会被伪名
     // tarball（package.json name 写成 @deepseek-ai/*）整片绕过（报警/拦截/外泄/金丝雀全盲）。
     if (alarm.pluginHint !== undefined && isOfficialTrusted(alarm.pluginHint)) return
+    // 0.3.5（P8）：官方名归因的协议形状家务探针（包装器按「名称级 isOfficial + 仅 fs-probe +
+    // 协议形状」打标，见 runtime-patch）→ 降为 info 聚合观察：可见、可忽略、不计 alarmCount/
+    // level，但不再刷黄警。锚内真官方（上方早退）与第三方归因（未打标）不受影响；只兜
+    // 首见验证/离线窗口——这一层是「名称级去噪走廊」，不触碰读/写/删/金丝雀等判定面。
+    if (alarm.officialHousekeeping === true && alarm.pluginHint !== undefined && alarm.target !== undefined) {
+      status.record({
+        id: 't2:official-housekeeping:' + alarm.kind + ':' + alarm.pluginHint,
+        severity: 'info',
+        source: 't2',
+        kind: alarm.kind,
+        message: alarm.message + '（官方归因的 DSH 家务探针，info 观察——非风险报警）',
+        target: alarm.target,
+        pluginHint: alarm.pluginHint,
+        mergeKey: 't2:official-housekeeping-probe',
+        at: Date.now(),
+      })
+      return
+    }
     // N7 族 3/4 报警只对第三方归因有效（宿主/用户自己写 bashrc、npm install 等无主操作不报）
     if ((alarm.kind === 'persistence-write' || alarm.kind === 'install-write') && alarm.pluginHint === undefined) return
     // 无主会话日志删除静默（isSuppressUnattributedSessionLog）：DSH 宿主压缩/轮转会话日志

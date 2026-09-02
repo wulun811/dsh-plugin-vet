@@ -22,7 +22,7 @@ export type { HookHeartbeatResult } from './runtime-heartbeat.js'
 export {
   setRootIndexing, isRootIndexing, isVetSelfIo, withVetSelfIo, isStackTraceTampered,
   isLockSiblingPath, isTransientTempPath, isSensitivePath, isSessionLogFile,
-  isIntegrityPath, isHoneypotPath, isDshRuntimeTempPath,
+  isIntegrityPath, isHoneypotPath, isDshRuntimeTempPath, isDshLockSiblingProbe,
 } from './runtime-denoise.js'
 
 export { classifyOp } from './runtime-classify.js'

@@ -16,8 +16,9 @@ import { recordScan as recordVersionScan, consumeCapabilitiesTamper } from '../g
 import { recordScanSummary } from '../guard/scan-summaries.js'
 import { isKnownBoundary, markKnownBoundary } from '../guard/known-boundaries.js'
 import type { VetStatus } from '../guard/status.js'
-import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline, consumeBaselineTamper } from './content-baseline.js'
+import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline, consumeBaselineTamper, setRecordSuspected, isRecordSuspected } from './content-baseline.js'
 import { verifyAgainstRegistry } from './registry-verify.js'
+import { isOfficialPackageName, refreshOfficialCatalogFromRegistry } from './official-catalog.js'
 
 /** typert loader 为 Fiber 附加的 entry 元数据（loader.ts:412 同款访问）。 */
 type VetFiber = Fiber & { entry?: { options?: { name?: string } } }
@@ -109,9 +110,12 @@ function extractPackageName(packageName: string): string {
 /** P-5 判定结果：官方包是否豁免；mismatch 携带上下文供 report 模式 registry 对账。
  * round-16 review（决策 1）：exempt 细分原因——first-seen/match 只豁免 deny 升级、
  * 仍跑静态扫描（TOFU 窗口修复）；allowlist/cordis builtin/内容基线关闭（用户显式选择）
- * 才完全跳过。 */
+ * 才完全跳过。
+ * 0.3.5（M2）：first-seen/match 增带 hash/version——首见入锚验证（verifyFirstSeenOfficial）
+ * 复用 classify 已算好的哈希，避免二次 computePackageHash（预算 10s/1000 文件）。 */
 type OfficialVerdict =
-  | { kind: 'exempt'; reason: 'cordis' | 'allowlist' | 'config-off' | 'first-seen' | 'match' }
+  | { kind: 'exempt'; reason: 'cordis' | 'allowlist' | 'config-off' }
+  | { kind: 'exempt'; reason: 'first-seen' | 'match'; hash?: string; version?: string }
   | { kind: 'not-official' }
   | { kind: 'mismatch'; version: string; hash: string; acknowledged: boolean }
 
@@ -120,9 +124,12 @@ type OfficialVerdict =
  * - first-seen 自动信任并记录基线（v5 方案）→ 但仍跑扫描（决策 1，deny 升级豁免）；
  * - match 豁免 → 同样仍跑扫描（内容与记录一致，扫描结果留档/差分）；
  * - mismatch 且 hash 在 acknowledged-package-hashes 登记 → 豁免 + 一次性 yellow（透明不静默）；
- * - 其余 mismatch 不豁免：deny 同步记红（零网络 fail-closed）；report 由调用方异步对账 registry 后定性。
- */
-function classifyOfficial(packageName: string, packageRoot: string | undefined, config: VetConfig, status?: VetStatus): OfficialVerdict {
+ * - 其余 mismatch 不豁免：report 由调用方异步对账 registry 后定性（0.3.5：统一黄牌观察——
+ *   用户决策「哈希对不上也只是黄，别红了——误报比漏报更消耗信任」；deny 模式零网络记黄）。
+ * 0.3.5（M2，官方全集判据）：新增 inCatalog——官方目录（official-catalog）成员判定。
+ * 目录外（@deepseek-ai/* 但官方全集没有的名字 = "多出来的那个"）不写信任锚（即使本地基线
+ * match），黄牌观察由调用方在 observer 里补发；目录内 match 才入锚。 */
+function classifyOfficial(packageName: string, packageRoot: string | undefined, config: VetConfig, status?: VetStatus, inCatalog = true): OfficialVerdict {
   // cordis builtin 命名空间（cordis:group 等框架内置分组入口，非可安装的第三方插件）——不扫描不审计
   if (packageName.startsWith('cordis:')) return { kind: 'exempt', reason: 'cordis' }
   if (config.allowlist.includes(packageName)) return { kind: 'exempt', reason: 'allowlist' }
@@ -155,23 +162,62 @@ function classifyOfficial(packageName: string, packageRoot: string | undefined, 
         at: Date.now(),
       })
     }
-    return { kind: 'exempt', reason: 'first-seen' }  // 首次见到，信任（v5 修订：砍掉白名单，与 VET 信任官方包的定位一致）
+    // 首次见到：携带 hash/version 供调用方做首见入锚验证（verifyFirstSeenOfficial——
+    // 目录内 + registry 字节一致 → 本进程即入内容信任锚，TOFU 窗口合上；不再强制等第二次 match）
+    return { kind: 'exempt', reason: 'first-seen', hash, version }
   }
   if (result === 'match') {
     // round-16（SEC-1）：内容哈希与历史基线一致 → 写入官方信任锚（运行时防线抑制的
-    // 唯一真值源之一；first-seen 刻意不登记——TOFU 窗口照常观测/拦截，见 runtime-attrib）
-    markOfficialTrusted(packageName)
-    return { kind: 'exempt', reason: 'match' }  // 内容一致，信任
+    // 真值源之一；first-seen 由 0.3.5 的 verifyFirstSeenOfficial 异步补锚）。
+    // 0.3.5（M2）：目录外（冒充/官方新包）不给锚——名字不在官方全集，本地自证基线不作数。
+    // 0.3.5（审查加固）：首见 registry 校验不一致的疑标（suspected）持久化后，本地自证
+    // match 不再自动入锚——「哈希对不上只是黄」的黄必须粘滞，否则伪造包第二载即获运行时
+    // 全域静默（首见黄牌一次性 + match 自证入锚 = 洞）。已登记 hash 的补丁 = 用户声明负责，
+    // 照常入锚并黄牌提示；未登记 → 不入锚 + 每次会话黄牌，直到 ack 或字节更新为官方。
+    if (inCatalog && isRecordSuspected(packageName, version)) {
+      const ackList = config.acknowledgedPackageHashes[`${packageName}@${version}`] ?? []
+      if (ackList.includes(hash)) {
+        markOfficialTrusted(packageName)
+        status?.record({
+          id: `baseline-patch-ack:${packageName}`,
+          severity: 'yellow',
+          source: 'scan',
+          kind: 'baseline-patch-ack',
+          message: `官方包 ${packageName}@${version} 内容与官方 registry 不一致但已在 acknowledged-package-hashes 登记补丁（hash ${hash.slice(0, 12)}…）——内容信任锚按用户声明授予，请确保补丁来源可信`,
+          target: packageName,
+          pluginHint: packageName,
+          at: Date.now(),
+        })
+      } else {
+        status?.record({
+          id: `official-match-suspected:${packageName}`,
+          severity: 'yellow',
+          source: 'scan',
+          kind: 'official-match-suspected',
+          message: `官方包 ${packageName}@${version} 首见 registry 校验不一致（本机字节 ≠ 官方 tarball），本地基线自证 match 不授予内容信任锚——如为本机合法补丁请在 acknowledged-package-hashes 登记 hash ${hash.slice(0, 12)}…；如为冒充/篡改请更新为官方字节后清除疑标`,
+          target: packageName,
+          pluginHint: packageName,
+          at: Date.now(),
+        })
+      }
+      return { kind: 'exempt', reason: 'match', hash, version }
+    }
+    if (inCatalog) markOfficialTrusted(packageName)
+    return { kind: 'exempt', reason: 'match', hash, version }  // 内容一致，信任
   }
   const ackList = config.acknowledgedPackageHashes[`${packageName}@${version}`] ?? []
   return { kind: 'mismatch', version, hash, acknowledged: ackList.includes(hash) }
 }
 
-/** mismatch 红警（deny 同步路径 / report 对账失败路径共用）。 */
-function recordMismatchAlarm(status: VetStatus | undefined, name: string, version: string, hash: string, why: string): void {
+/**
+ * mismatch 告警（deny 同步路径 / report 对账失败路径共用）。
+ * 0.3.5（用户决策）：官方侧一律黄牌（不红）——哈希对不上先按「可能误报」对待，误报比漏报更
+ * 消耗信任；第三方 P7 安装后基线（变更检测，高置信供应链信号）仍传 'red'。
+ */
+function recordMismatchAlarm(status: VetStatus | undefined, name: string, version: string, hash: string, why: string, severity: 'red' | 'yellow' = 'red'): void {
   status?.record({
     id: `baseline-mismatch:${name}`,
-    severity: 'red',
+    severity,
     source: 'scan',
     kind: 'baseline-mismatch',
     message: `官方包 ${name}@${version} 内容哈希与基线不一致（${why}）。若为本机合法修改（如 LAN 补丁），在配置 acknowledged-package-hashes 登记 hash ${hash.slice(0, 12)}…；否则疑似供应链篡改`,
@@ -235,8 +281,9 @@ export function checkThirdPartyBaseline(packageName: string, packageRoot: string
 /**
  * report 模式 registry 对账（0.1.21）：npm 同版本发布内容不可变 = 内容真值。
  * - 本机字节 == registry → 基线陈旧（记录早于官方发布/来自开发通道），刷新基线 + yellow；
- * - 本机字节 != registry → 非官方修改坐实，红警升级措辞；
- * - 对账不可用 → 维持红警（fail-closed），提示可登记补丁。
+ * - 本机字节 != registry → 非官方修改（0.3.5：黄牌观察，不再红——用户决策「哈希对不上
+ *   也只是黄，别红了」；误报比漏报更消耗信任）；
+ * - 对账不可用 → 黄牌（fail-open，提示可登记补丁；不再红——对账不可用 ≠ 篡改坐实）。
  */
 async function reconcileMismatch(status: VetStatus | undefined, name: string, verdict: Extract<OfficialVerdict, { kind: 'mismatch' }>): Promise<void> {
   const v = await verifyAgainstRegistry(name, verdict.version)
@@ -247,6 +294,8 @@ async function reconcileMismatch(status: VetStatus | undefined, name: string, ve
     // （运行时防线抑制的真值源之一；registry-verify 自身不感知本机 hash，故信任登记在
     // 「哈希相等」成立的本分支——resolved 但字节不一致是坐实篡改，绝不能给信任）
     markOfficialTrusted(name)
+    // 0.3.5（审查加固）：字节已与官方一致 → 清除疑标（若此前置位）
+    setRecordSuspected(name, verdict.version, false)
     if (!saveBaseline(store)) {
       status?.record({
         id: 'baseline-save-fail:' + name,
@@ -272,9 +321,83 @@ async function reconcileMismatch(status: VetStatus | undefined, name: string, ve
     return
   }
   if (v.status === 'resolved') {
-    recordMismatchAlarm(status, name, verdict.version, verdict.hash, '与官方 registry 字节也不一致')
+    recordMismatchAlarm(status, name, verdict.version, verdict.hash, '与官方 registry 字节也不一致', 'yellow')
+    // 0.3.5（审查加固）：registry 坐实本机 ≠ 官方 → 置疑标（后续 match 自证不再入锚）
+    setRecordSuspected(name, verdict.version, true)
   } else {
-    recordMismatchAlarm(status, name, verdict.version, verdict.hash, `registry 对账不可用：${v.detail ?? 'unknown'}`)
+    recordMismatchAlarm(status, name, verdict.version, verdict.hash, `registry 对账不可用：${v.detail ?? 'unknown'}`, 'yellow')
+  }
+}
+
+/**
+ * 0.3.5（M2 首见入锚验证）：目录内官方包 first-seen 时异步对账官方 registry——
+ * 本机字节 == 官方 tarball → **首见即入内容信任锚**（TOFU 窗口合上，官方家务不再等
+ * 第二次加载 match 才静默）；不一致 → 黄牌观察 + 基线疑标（suspected，持久——match
+ * 自证不再入锚，见 classifyOfficial）；对账不可用（离线/网络失败）→ 静默维持
+ * first-seen 观察（运行时 Tier B info 地板兜噪，不打扰；疑标不置位）。
+ * 仅 report 模式调用（P2-7：deny 同步路径零网络）。classifyOfficial 首次见到时已把
+ * 哈希记入基线并随 verdict 返回 hash/version（见 OfficialVerdict），此处复用不重复计算。
+ */
+async function verifyFirstSeenOfficial(
+  status: VetStatus | undefined,
+  name: string,
+  version: string,
+  localHash: string,
+): Promise<void> {
+  await withVerifySlot(async () => {
+    const v = await verifyAgainstRegistry(name, version)
+    if (v.status !== 'resolved') return // 离线/不可用：维持观察（fail-open，绝不误伤）
+    if (v.officialHash !== localHash) {
+      status?.record({
+        id: `official-verify-mismatch:${name}`,
+        severity: 'yellow',
+        source: 'scan',
+        kind: 'official-verify-mismatch',
+        message: `官方包 ${name}@${version} 首见内容与官方 registry 不一致——疑为官方包被修改或本机补丁；黄牌观察不拦截，可在 acknowledged-package-hashes 登记补丁或联系核对`,
+        target: name,
+        pluginHint: name,
+        at: Date.now(),
+      })
+      // 审查加固：疑标持久化——下次加载的本地基线自证 match 不再自动授予内容信任锚
+      // （黄必须粘滞，否则伪造包第二载即获运行时全域静默）；落盘失败 fail-open（下次加载
+      // 重新首见校验路径，黄牌重来一次，安全方向不损失）。
+      setRecordSuspected(name, version, true)
+      return
+    }
+    // 本机字节 == 官方 registry：内容验证通过 → 登记信任锚（无需等第二次 match）；
+    // 疑标在位时顺带清除（字节已更新为官方）。
+    markOfficialTrusted(name)
+    setRecordSuspected(name, version, false)
+    status?.record({
+      id: `official-verified:${name}`,
+      severity: 'info',
+      source: 'scan',
+      kind: 'official-verified',
+      message: `官方包 ${name}@${version} 首见验证通过（本机字节与官方 registry 一致）——已纳入内容信任锚`,
+      target: name,
+      pluginHint: name,
+      at: Date.now(),
+    })
+  })
+}
+
+/**
+ * 0.3.5（审查加固）：首见 registry 验证的并发限流——全新 profile 首批官方包逐包 verify
+ * （2 fetch + tar 解包），无界并发会在启动期造成网络/CPU 突发；小池限 4，超限排队。
+ */
+const VERIFY_MAX_CONCURRENCY = 4
+let verifyActive = 0
+const verifyWaiters: Array<() => void> = []
+async function withVerifySlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (verifyActive >= VERIFY_MAX_CONCURRENCY) {
+    await new Promise<void>((resolve) => { verifyWaiters.push(resolve) })
+  }
+  verifyActive += 1
+  try {
+    return await fn()
+  } finally {
+    verifyActive -= 1
+    verifyWaiters.shift()?.()
   }
 }
 
@@ -365,11 +488,73 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // round-16 review（决策 1）：first-seen/match 不再完全跳过——静态扫描是唯一能识别
     // 伪造官方名的确定性检查（自生哈希基线首见即记录，挡不住伪装 tarball）；只豁免
     // deny 升级。allowlist/cordis builtin/config-off（用户显式选择关闭）仍完全跳过。
-    const official = classifyOfficial(entryName, root, config, status)
+    // 0.3.5（M2，官方全集判据）：目录成员判定——名字在官方全集（seed ∪ registry 覆盖层）里
+    // 才算可信官方名候选；目录外多出来的 @deepseek-ai/* = 冒充官方，或官方新包尚未纳入目录。
+    // 集外的一律不入内容信任锚（即使本地基线自证 match）；给出黄牌观察 + 有界 registry 核对。
+    const inCatalog = entryName.startsWith('@deepseek-ai/') && isOfficialPackageName(entryName)
+    const official = classifyOfficial(entryName, root, config, status, inCatalog)
+    // 集外官方名：黄牌观察（不拦、不入锚、不静默）——「多出来的那个」。捕获时惰性触发一次
+    // 有界 registry scope 核对（不在启动出网；deny 模式零网络 P2-7）；核对后确认真官方 →
+    // 纳入目录覆盖层并补一次首见验证（锚定与 info 提示）。
+    // allowlist/config-off（用户显式选择）不触发——用户已表态，不再叠加黄牌噪音。
+    const optOutByUser = official.kind === 'exempt'
+      && (official.reason === 'allowlist' || official.reason === 'config-off' || official.reason === 'cordis')
+    if (entryName.startsWith('@deepseek-ai/') && !inCatalog && !optOutByUser) {
+      // 0.3.5（审查修正）：deny 模式零网络（P2-7 同步路径）不触发 registry 核对——文案按
+      // 模式分流，不再对 deny 用户声称「已触发核对」。
+      const reconcileNote = config.mode === 'deny'
+        ? 'deny 模式零网络不自动核对（可切 report 模式核对确认）'
+        : '将自动核对并入目录'
+      status?.record({
+        id: 'official-not-in-catalog:' + entryName,
+        severity: 'yellow',
+        source: 'scan',
+        kind: 'official-not-in-catalog',
+        message: `官方目录外的 @deepseek-ai 包名（${entryName}）——要么是官方新包尚未纳入目录（${reconcileNote}），要么是冒充官方名的包（不拦截，仅黄牌观察）`,
+        target: entryName,
+        pluginHint: entryName,
+        at: Date.now(),
+      })
+      if (config.mode !== 'deny') {
+        void refreshOfficialCatalogFromRegistry().then((merged) => {
+          if (!merged.has(entryName)) return
+          // 核对后已纳入目录：补首见验证（哈希一致 → 本进程入锚）或 info 提示
+          if (official.kind === 'exempt' && (official.reason === 'first-seen' || official.reason === 'match')
+            && official.hash !== undefined && official.version !== undefined) {
+            void verifyFirstSeenOfficial(status, entryName, official.version, official.hash)
+          } else {
+            status?.record({
+              id: 'official-catalog-merged:' + entryName,
+              severity: 'info',
+              source: 'scan',
+              kind: 'official-catalog-merged',
+              message: `官方包 ${entryName} 已通过 registry 核对确认并在官方目录中登记（覆盖层）——此前 official-not-in-catalog 黄牌可忽略`,
+              target: entryName,
+              pluginHint: entryName,
+              at: Date.now(),
+            })
+          }
+        }).catch(() => {
+          // 核对网络异常：静默——维持黄牌观察（fail-open，不误伤）
+        })
+      }
+    }
+    // 首见入锚验证（M2）：目录内官方包 first-seen → report 模式异步对账 registry，字节一致
+    // 即入锚——TOFU 窗口合上；离线/失败静默回退（Tier B info 地板兜噪）。mismatch 走下方既有
+    // acknowledge/对账路径（已降黄）。
+    if (inCatalog && official.kind === 'exempt' && official.reason === 'first-seen'
+      && config.mode !== 'deny' && official.hash !== undefined && official.version !== undefined && official.version !== 'unknown') {
+      void verifyFirstSeenOfficial(status, entryName, official.version, official.hash).catch(() => {
+        // 对账异常静默（不影响加载主流程）
+      })
+    }
     if (official.kind === 'exempt') {
       if (official.reason === 'cordis' || official.reason === 'allowlist' || official.reason === 'config-off') return
       // reason ∈ first-seen/match：继续走下方扫描路径（deny 升级豁免，扫失败也不拦截）
     }
+    // 0.3.5（M2）注：集外官方名（冒充/未核对）不额外新增拦截——deny 升级豁免沿用 round-16
+    // 语义（first-seen/match 豁免 deny 升级），用户口径「本来就不拦」：冒充由「不入内容信任锚
+    // + 黄牌观察 + 静态扫描」暴露，不靠运行时拦截。
     const officialDenyExempt = official.kind === 'exempt'
     if (official.kind === 'mismatch') {
       if (official.acknowledged) {
@@ -390,14 +575,14 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
         return
       }
       if (config.mode === 'deny') {
-        // deny：同步记红 fail-closed（不做网络对账——同步路径零网络，P2-7 同款约束）
-        recordMismatchAlarm(status, entryName, official.version, official.hash, 'deny 模式不做网络对账')
+        // deny：同步记黄（不做网络对账——同步路径零网络，P2-7 同款约束；0.3.5 降黄不红）
+        recordMismatchAlarm(status, entryName, official.version, official.hash, 'deny 模式不做网络对账', 'yellow')
       } else {
         // report：异步对账官方 registry 再定性（红 / 基线刷新黄）；独立于扫描路径，
         // 即使后续 files 为空提前返回也不会丢警报
         void reconcileMismatch(status, entryName, official).catch((error: unknown) => {
           ctx.logger.error(`vet: registry 对账失败 ${entryName}: ${String(error)}`)
-          recordMismatchAlarm(status, entryName, official.version, official.hash, 'registry 对账异常')
+          recordMismatchAlarm(status, entryName, official.version, official.hash, 'registry 对账异常', 'yellow')
         })
       }
     }
