@@ -9,6 +9,7 @@ import { computePackageHash, refreshBaseline, setBaselineDirForTest } from '../l
 import { setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
 import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
+import { setCatalogAutoRefresh } from '../lib/guards/official-catalog.js'
 import { VetStatus } from '../lib/guard/status.js'
 import type { VetConfig } from '../lib/config.js'
 
@@ -105,11 +106,15 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     setBaselineDirForTest(join(sandbox, 'baseline'))
     setCapabilitiesDirForTest(join(sandbox, 'caps'))
     setSummariesDirForTest(join(sandbox, 'summaries'))
+    // 0.3.5（M2）：夹具名 @deepseek-ai/vet-fixture 不在官方目录 → 观察路径会触发 registry
+    // 自动核对；测试环境禁止真实出网，统一关闭（生产默认开，need 时才核对）。
+    setCatalogAutoRefresh(false)
   })
   afterAll(() => {
     setBaselineDirForTest(undefined)
     setCapabilitiesDirForTest(undefined)
     setSummariesDirForTest(undefined)
+    setCatalogAutoRefresh(true)
     rmSync(OFFICIAL_PKG, { recursive: true, force: true })
     if (sandbox !== undefined) rmSync(sandbox, { recursive: true, force: true })
     vi.unstubAllGlobals()
@@ -130,7 +135,7 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     expect(kinds).not.toContain('baseline-mismatch')
   })
 
-  it('deny 模式未登记 → 同步红警（零网络），消息含登记指引', async () => {
+  it('deny 模式未登记 → 黄牌（零网络；0.3.5 降黄不红——用户决策「哈希对不上也只是黄」），消息含登记指引', async () => {
     makePkg()
     preloadStaleBaseline()
     const status = new VetStatus()
@@ -138,7 +143,7 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     installInternalPluginGuard(ctx as never, cfg({ mode: 'deny' }), status)
     ctx.handlers.get('internal/plugin')![0]({ uid: 'f2', entry: { options: { name: NAME } } })
     const red = status.snapshot().alarms.find(a => a.kind === 'baseline-mismatch')
-    expect(red?.severity).toBe('red')
+    expect(red?.severity).toBe('yellow')
     expect(red?.message).toContain('acknowledged-package-hashes')
   })
 
@@ -163,7 +168,7 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     expect(kinds).not.toContain('baseline-mismatch')
   })
 
-  it('report 模式：本机字节 != registry → 红警坐实（措辞含 registry 不一致）', async () => {
+  it('report 模式：本机字节 != registry → 黄牌观察（0.3.5 降黄不红；措辞含 registry 不一致）', async () => {
     makePkg()
     const officialSnapshot = await makeTgz()   // registry 快照：不含随后的本机改动
     writeFileSync(join(OFFICIAL_PKG, 'extra.js'), '// local modification\n')
@@ -182,7 +187,7 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     ctx.handlers.get('internal/plugin')![0]({ uid: 'f4', entry: { options: { name: NAME } } })
     expect(await waitFor(status, 'baseline-mismatch')).toBe(true)
     const red = status.snapshot().alarms.find(a => a.kind === 'baseline-mismatch')
-    expect(red?.severity).toBe('red')
+    expect(red?.severity).toBe('yellow')
     expect(red?.message).toContain('官方 registry')
   })
 })

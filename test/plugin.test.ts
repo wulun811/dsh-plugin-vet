@@ -18,6 +18,7 @@ import { setArchiveDirForTest, hasAuditRecord, setArchiveIoWarn } from '../lib/a
 import { setBaselineDirForTest } from '../lib/guards/content-baseline.js'
 import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
 import { setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
+import { setCatalogAutoRefresh } from '../lib/guards/official-catalog.js'
 import type { VetConfig } from '../lib/config.js'
 import { explainScore, renderScorecard } from '../lib/report/render.js'
 
@@ -337,6 +338,7 @@ describe('internal/plugin guard', () => {
   })
 
   it('S10：官方包基线落盘失败 → yellow baseline-save-fail（不再静默）', async () => {
+    setCatalogAutoRefresh(false)
     const profile = mkdtempSync(join(tmpdir(), 'vet-official2-'))
     const bdir = mkdtempSync(join(tmpdir(), 'vet-blfile-'))
     const blocker = join(bdir, 'not-a-dir')
@@ -356,6 +358,7 @@ describe('internal/plugin guard', () => {
       const kinds = status.snapshot().alarms.map(a => a.kind)
       expect(kinds).toContain('baseline-save-fail')
     } finally {
+      setCatalogAutoRefresh(true)
       setBaselineDirForTest(undefined)
       rmSync(profile, { recursive: true, force: true })
       rmSync(bdir, { recursive: true, force: true })
@@ -503,6 +506,7 @@ describe('internal/plugin guard', () => {
   })
 
   it('round-17：官方包（first-seen/match）不进 requireAudit 门槛——不报 audit-required（回归：官方包告警风暴）', async () => {
+    setCatalogAutoRefresh(false)
     const profile = mkdtempSync(join(tmpdir(), 'vet-official3-'))
     const bdir = mkdtempSync(join(tmpdir(), 'vet-bl3-'))
     const pkg = join(profile, 'node_modules', '@deepseek-ai', 'ok-official')
@@ -533,6 +537,7 @@ describe('internal/plugin guard', () => {
       expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
       expect(status.snapshot().alarms.map(a => a.kind)).toContain('audit-required')
     } finally {
+      setCatalogAutoRefresh(true)
       setBaselineDirForTest(undefined)
       setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
       setSummariesDirForTest(undefined)

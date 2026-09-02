@@ -8,6 +8,7 @@ import { isSensitiveFsPath, saveCapabilities, loadCapabilities, consumeCapabilit
 import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
 import { saveBaseline, loadBaseline, consumeBaselineTamper, setBaselineDirForTest } from '../lib/guards/content-baseline.js'
 import { setKnownBoundariesDirForTest } from '../lib/guard/known-boundaries.js'
+import { setOfficialCatalogDirForTest, setCatalogAutoRefresh, refreshOfficialCatalogFromRegistry } from '../lib/guards/official-catalog.js'
 import { pidCmdlineIsVetSidecar, safeKillSidecar } from '../lib/guard/runtime-guard.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { VetStatus } from '../lib/guard/status.js'
@@ -210,18 +211,31 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
   describe('0.3.3 官方信任锚级联 + 三方持久化去重（P1/P2/P3，警报疲劳反馈）', () => {
     // 官方包 first-seen 判定需写基线 → 隔离 baseline 与 known-boundaries 目录
     let sandbox: string
-    beforeEach(() => {
+    beforeEach(async () => {
       sandbox = mkdtempSync(join(tmpdir(), 'vet-c2-iso-'))
       setCapabilitiesDirForTest(join(sandbox, 'caps'))
       setSummariesDirForTest(join(sandbox, 'summaries'))
       setBaselineDirForTest(join(sandbox, 'baseline'))
       setKnownBoundariesDirForTest(join(sandbox, 'known'))
+      // 0.3.5（M2）：夹具官方名（official-esm-a/b）不在种子目录 → 先以注入 fetch 并入覆盖层
+      // 视为目录内官方；随后关闭自动核对并 stub 全局出网（首见验证走 verifyAgainstRegistry，
+      // 测试环境禁止真实 fetch）。
+      setOfficialCatalogDirForTest(join(sandbox, 'ocat'))
+      await refreshOfficialCatalogFromRegistry(async () => {
+        const body = JSON.stringify({ objects: ['@deepseek-ai/official-esm-a', '@deepseek-ai/official-esm-b'].map(n => ({ package: { name: n } })) })
+        return new Response(body, { status: 200, headers: { 'content-length': String(body.length) } })
+      })
+      setCatalogAutoRefresh(false)
+      vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('test: no network') }))
     })
     afterEach(() => {
       setCapabilitiesDirForTest(undefined)
       setSummariesDirForTest(undefined)
       setBaselineDirForTest(undefined)
       setKnownBoundariesDirForTest(undefined)
+      setOfficialCatalogDirForTest(undefined)
+      setCatalogAutoRefresh(true)
+      vi.unstubAllGlobals()
       rmSync(sandbox, { recursive: true, force: true })
     })
     const CFG = {

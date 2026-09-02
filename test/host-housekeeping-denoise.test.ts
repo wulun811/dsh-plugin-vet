@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { patchModule, DEFAULT_HOOK_CONFIG } from '../lib/guard/runtime-hooks.js'
-import { isDshWebTempArtifact, isDshAtomicStagingPath, isDshRuntimeTempPath } from '../lib/guard/runtime-denoise.js'
+import { isDshWebTempArtifact, isDshAtomicStagingPath, isDshRuntimeTempPath, isDshLockSiblingProbe } from '../lib/guard/runtime-denoise.js'
 import type { HookAlarm, HookConfig } from '../lib/guard/runtime-hooks.js'
+import { VetStatus } from '../lib/guard/status.js'
+import { createT2Sink } from '../lib/guard/runtime-sink.js'
 
 /**
  * 五轮用户反馈回归：DSH web 状态目录的原子写临时产物（`.shortcut-bar.json.<pid>.<uuid>.tmpdir`）
@@ -194,12 +196,14 @@ describe('DSH sessions 运行时临时件无归因侦察豁免（P7）', () => {
     } finally { disp() }
   })
 
-  it('边界：sessions 本体（非临时后缀）无归因侦察照报（豁免不外溢）', () => {
+  it('边界：sessions 非日志形状（非本体探针）无归因侦察照报（豁免不外溢）', () => {
     const mod: Record<string, unknown> = { lstatSync: () => 'OK' }
     const sink: HookAlarm[] = []
     const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map())
     try {
-      mod.lstatSync('/home/u/.dsh/sessions/session.jsonl')
+      // 会话目录本体探针（非会话日志文件形状）——isSessionLogFile 不命中 → 照报；
+      // 0.3.5 后会话日志文件形状（session.jsonl / 分片）的无归因 lstat 已是宿主家务静默
+      mod.lstatSync('/home/u/.dsh/sessions')
       expect(sink.some(a => a.kind === 'fs-probe')).toBe(true)
     } finally { disp() }
   })
@@ -236,5 +240,144 @@ describe('DSH sessions 运行时临时件无归因侦察豁免（P7）', () => {
       mod.rmSync(canary)
       expect(sink.some(a => a.kind === 'integrity' && a.severity === 'red')).toBe(true)
     } finally { disp() }
+  })
+})
+
+/**
+ * 0.3.5（P8，用户机实测三条警报回归）：信任模型反转为官方全集判据后，官方真身的家务
+ * 探针不再逐条黄警：
+ * ① lstat(~/.dsh/.credentials.yaml.lock) 无归因（withFileLock 陈旧锁探测，宿主帧）→ 静默；
+ * ② lstat(~/.dsh/sessions/…/session.jsonl.zstd.554ba1) 归因 @deepseek-ai/dsh-session-persistence-jsonl
+ *   （会话存储本尊的轮换探针，无归因豁免结构上够不到）→ info 聚合观察（非黄警、非静默）；
+ * ③ lstat(~/.dsh/settings.yaml.lock) 归因 @deepseek-ai/dsh-settings-file（atomic-write 在其帧内
+ *   执行，首见/离线期未入内容信任锚）→ info 聚合观察。
+ * 边界：第三方归因碰锁/碰会话分片照报；官方名碰凭据本体/配置本体照报（形状钉死）；
+ * 官方名写删与蜜罐/金丝雀不受本豁免影响。
+ */
+describe('DSH 锁兄弟与官方会话家务探针（P8，0.3.5 用户警报疲劳⑥）', () => {
+  it('匹配器：~/.dsh 下 <file>.lock 命中；.dsh 外/.lock 外不命中', () => {
+    expect(isDshLockSiblingProbe('/home/u/.dsh/.credentials.yaml.lock')).toBe(true)
+    expect(isDshLockSiblingProbe('/home/u/.dsh/settings.yaml.lock')).toBe(true)
+    expect(isDshLockSiblingProbe('/home/u/.dsh/profiles/web/.x.lock')).toBe(true)
+    // .dsh 外的锁兄弟无协议豁免依据 → 不命中（照报）
+    expect(isDshLockSiblingProbe('/home/u/.ssh/id_rsa.lock')).toBe(false)
+    expect(isDshLockSiblingProbe('/home/u/project/x.lock')).toBe(false)
+    // 锁本体（非 .lock 后缀）不命中
+    expect(isDshLockSiblingProbe('/home/u/.dsh/.credentials.yaml')).toBe(false)
+  })
+
+  it('①无归因 lstat 凭据锁兄弟 → 静默（用户机实测路径）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK', statSync: () => 'OK', accessSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map())
+    try {
+      mod.lstatSync('/home/chenzheng/.dsh/.credentials.yaml.lock')
+      mod.statSync('/home/chenzheng/.dsh/.credentials.yaml.lock')
+      mod.accessSync('/home/chenzheng/.dsh/.credentials.yaml.lock')
+      expect(sink).toEqual([])
+    } finally { disp() }
+  })
+
+  it('无归因 lstat 会话日志文件形状 → 静默（0.1.19 只修删除侧，侦察侧补齐）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map())
+    try {
+      mod.lstatSync('/home/chenzheng/.dsh/sessions/--mnt-data-1jiaru--/session-267e2cad/session.jsonl.zstd.554ba1')
+      expect(sink).toEqual([])
+    } finally { disp() }
+  })
+
+  it('③官方名归因 lstat settings 锁兄弟 → 打标 officialHousekeeping（sink 再降 info）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const here = import.meta.dirname
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map([[here, '@deepseek-ai/dsh-settings-file']]))
+    try {
+      mod.lstatSync('/home/chenzheng/.dsh/settings.yaml.lock')
+      const hit = sink.find(a => a.pluginHint === '@deepseek-ai/dsh-settings-file')
+      expect(hit).toBeDefined()
+      expect(hit?.kind).toBe('fs-probe')
+      expect(hit?.officialHousekeeping).toBe(true)
+    } finally { disp() }
+  })
+
+  it('②官方名归因 lstat 会话日志分片 → 打标 officialHousekeeping（用户机实测路径）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const here = import.meta.dirname
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map([[here, '@deepseek-ai/dsh-session-persistence-jsonl']]))
+    try {
+      mod.lstatSync('/home/chenzheng/.dsh/sessions/--mnt-data-1jiaru--/session-267e2cad-6770-4496-96e4-caca6429b58a/session.jsonl.zstd.554ba1')
+      const hit = sink.find(a => a.pluginHint === '@deepseek-ai/dsh-session-persistence-jsonl')
+      expect(hit).toBeDefined()
+      expect(hit?.kind).toBe('fs-probe')
+      expect(hit?.officialHousekeeping).toBe(true)
+    } finally { disp() }
+  })
+
+  it('边界：第三方归因 lstat .dsh 锁兄弟 → 照报（无 officialHousekeeping 标记，yellow）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const here = import.meta.dirname
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map([[here, '@evil/plugin']]))
+    try {
+      mod.lstatSync('/home/u/.dsh/.credentials.yaml.lock')
+      const hit = sink.find(a => a.kind === 'fs-probe')
+      expect(hit?.pluginHint).toBe('@evil/plugin')
+      expect(hit?.officialHousekeeping).not.toBe(true)
+    } finally { disp() }
+  })
+
+  it('边界：第三方归因 lstat 会话日志分片 → 照报（无标记）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const here = import.meta.dirname
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map([[here, '@evil/plugin']]))
+    try {
+      mod.lstatSync('/home/u/.dsh/sessions/x/session.jsonl.zstd.554ba1')
+      const hit = sink.find(a => a.kind === 'fs-probe')
+      expect(hit?.pluginHint).toBe('@evil/plugin')
+      expect(hit?.officialHousekeeping).not.toBe(true)
+    } finally { disp() }
+  })
+
+  it('边界：官方名 lstat 凭据本体/配置本体 → 照报（形状钉死，不吃 Tier B）', () => {
+    const mod: Record<string, unknown> = { lstatSync: () => 'OK' }
+    const sink: HookAlarm[] = []
+    const here = import.meta.dirname
+    const disp = patchModule(mod, 'fs', DEFAULT_HOOK_CONFIG, a => sink.push(a), () => new Map([[here, '@deepseek-ai/dsh-settings-file']]))
+    try {
+      mod.lstatSync('/home/u/.dsh/.credentials.yaml')
+      mod.lstatSync('/home/u/.dsh/settings.yaml')
+      expect(sink.filter(a => a.kind === 'fs-probe').length).toBe(2)
+      expect(sink.some(a => a.officialHousekeeping === true)).toBe(false)
+    } finally { disp() }
+  })
+})
+
+/** P8 sink 层：officialHousekeeping 标记 → info 聚合观察（可见、不计 alarmCount/level）。 */
+describe('P8 sink：官方家务探针降 info 聚合（0.3.5）', () => {
+  it('info 记录、跨包合并为一条、alarmCount 计 0、level 不抬', () => {
+    const status = new VetStatus()
+    const { sink } = createT2Sink(status)
+    sink({ severity: 'yellow', kind: 'fs-probe', message: '探测 settings.yaml.lock', target: '/home/u/.dsh/settings.yaml.lock', pluginHint: '@deepseek-ai/dsh-settings-file', officialHousekeeping: true })
+    sink({ severity: 'yellow', kind: 'fs-probe', message: '探测 session 分片', target: '/home/u/.dsh/sessions/x/s.jsonl.zstd.1', pluginHint: '@deepseek-ai/dsh-session-persistence-jsonl', officialHousekeeping: true })
+    const snap = status.snapshot()
+    const infos = snap.alarms.filter(a => a.kind === 'fs-probe')
+    // 两条同 mergeKey → 聚合为一条 info
+    expect(infos.length).toBe(1)
+    expect(infos[0].severity).toBe('info')
+    expect(snap.alarmCount).toBe(0)
+    expect(snap.level).toBe('green')
+  })
+
+  it('未打标的官方名 fs-probe 照常 yellow（不是所有官方名都降级）', () => {
+    const status = new VetStatus()
+    const { sink } = createT2Sink(status)
+    sink({ severity: 'yellow', kind: 'fs-probe', message: '探测 .credentials.yaml', target: '/home/u/.dsh/.credentials.yaml', pluginHint: '@deepseek-ai/dsh-settings-file' })
+    const snap = status.snapshot()
+    expect(snap.alarms.some(a => a.kind === 'fs-probe' && a.severity === 'yellow')).toBe(true)
+    expect(snap.alarmCount).toBe(1)
   })
 })
