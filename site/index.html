@@ -218,11 +218,11 @@ code{font-family:var(--mono)}
 
 <section class="stats">
   <div class="container stats-inner">
-    <div class="stat"><b id="sTests">1095</b><span data-i18n="stats.tests">tests · 1095 passed</span></div>
-    <div class="stat"><b id="sCov">89.5%</b><span data-i18n="stats.cov">line coverage</span></div>
+    <div class="stat"><b id="sTests">1102</b><span data-i18n="stats.tests">tests · 1102 passed</span></div>
+    <div class="stat"><b id="sCov">88.7%</b><span data-i18n="stats.cov">line coverage</span></div>
     <div class="stat"><b id="sRules">20</b><span data-i18n="stats.rules">static rules R1–R20</span></div>
-    <div class="stat"><b id="sMatrix">39</b><span data-i18n="stats.matrix">adversarial samples</span></div>
-    <div class="stat"><b id="sOfficial">195</b><span data-i18n="stats.official">official packages · clean</span></div>
+    <div class="stat"><b id="sMatrix">34/8</b><span data-i18n="stats.matrix">mutant gate · killed / clean</span></div>
+    <div class="stat"><b id="sSkips">12</b><span data-i18n="stats.skips">platform skips (win / mac)</span></div>
   </div>
 </section>
 
@@ -237,13 +237,13 @@ code{font-family:var(--mono)}
       <div class="card">
         <div class="icon">🔬</div>
         <h3 data-i18n="f1.t">Deterministic static scan</h3>
-        <p data-i18n="f1.d">R1–R20 rules over an AST, verdicts produced only by the static layer — never spoofable by prompt injection. The scanner runs as an isolated subprocess: AST read-only, never eval'd.</p>
+        <p data-i18n="f1.d">R1–R20 rules over an AST (engine v20), verdicts produced only by the static layer — never spoofable by prompt injection. The scanner runs as an isolated subprocess: AST read-only, never eval'd.</p>
         <span class="tag g" data-i18n="f1.tag">verdict · critical / suspicious / clean</span>
       </div>
       <div class="card">
         <div class="icon">📡</div>
         <h3 data-i18n="f2.t">Runtime guard — alarm only</h3>
-        <p data-i18n="f2.d">T1 sentinel watches host resources (Linux: /proc; macOS: ps/lsof — memory, forks, fds); T2 hooks wrap fs/child_process and attribute dangerous operations to the plugin that did them. Watches, never kills.</p>
+        <p data-i18n="f2.d">T1 sentinel watches host resources (Linux: /proc; macOS: ps/lsof + fs watch — memory, forks, fds); T2 hooks wrap fs/child_process and attribute dangerous operations to the plugin that did them. Watches, never kills.</p>
         <span class="tag a" data-i18n="f2.tag">alarm-only by default</span>
       </div>
       <div class="card">
@@ -255,7 +255,7 @@ code{font-family:var(--mono)}
       <div class="card">
         <div class="icon">🧾</div>
         <h3 data-i18n="f4.t">Audit-protocol skill</h3>
-        <p data-i18n="f4.d">The agent reviews a plugin in preset steps and writes a health record to disk; `requireAudit` turns "unaudited" into "unusable". vet ships criteria, not conclusions.</p>
+        <p data-i18n="f4.d">The agent reviews a plugin in preset steps and writes a health record to disk; `requireAudit` turns "unaudited" into "unusable". Official packages anchor to a content hash baseline (contentBaseline) — a changed tarball is surfaced, never silently trusted. vet ships criteria, not conclusions.</p>
         <span class="tag" data-i18n="f4.tag">vet-audit-protocol</span>
       </div>
       <div class="card">
@@ -269,6 +269,24 @@ code{font-family:var(--mono)}
         <h3 data-i18n="f6.t">Supply-chain OSV check</h3>
         <p data-i18n="f6.d">Exact-version known-vulnerability queries against Google OSV for the plugin and its direct dependencies. Network trouble degrades silently — never a false block.</p>
         <span class="tag" data-i18n="f6.tag">osvCheck · exact versions</span>
+      </div>
+      <div class="card">
+        <div class="icon">🧘</div>
+        <h3 data-i18n="f7.t">Alarm-fatigue control (0.3.3)</h3>
+        <p data-i18n="f7.d">Coverage-class boundary alerts are deduplicated persistently by (kind, pkg, version, capability diff) — the same version never re-alarms, an upgrade that changes capabilities does. Official-anchor C2 notices downgrade to info and fold across packages; the store fails open (repeat a notice, never go blind).</p>
+        <span class="tag g" data-i18n="f7.tag">known-boundaries · fail-open</span>
+      </div>
+      <div class="card">
+        <div class="icon">🎯</div>
+        <h3 data-i18n="f8.t">Kill-rate gate</h3>
+        <p data-i18n="f8.d">A QA contract, not a claim: 34 malicious mutants must all be killed and 8 benign controls must stay clean — enforced by `--gate` on every release. Escape shapes are added as corpus, never deleted.</p>
+        <span class="tag a" data-i18n="f8.tag">34 killed · 8 clean · R1–R20</span>
+      </div>
+      <div class="card">
+        <div class="icon">📦</div>
+        <h3 data-i18n="f9.t">Published-artifact self-pin</h3>
+        <p data-i18n="f9.d">Every release pins a hash of its shipped artifacts (`vet-self-pins.json`). Change the code without re-pinning and the self-scan gate fails — byte-swapped or tampered installs are caught on scan.</p>
+        <span class="tag" data-i18n="f9.tag">gen:self-pin · pinned-match</span>
       </div>
     </div>
   </div>
@@ -286,11 +304,14 @@ code{font-family:var(--mono)}
         <div class="arch">
           <h3>🖥️ <span data-i18n="arch.host">DSH host process</span> <span class="chip">in-process</span></h3>
           <div class="box g"><b data-i18n="a1.t">tools/execute guard</b><span data-i18n="a1.d">Scans cordis_define / cordis_run / run_code / workflow before execution.</span></div>
-          <div class="box g"><b data-i18n="a2.t">internal/plugin guard</b><span data-i18n="a2.d">Auto-scans newly installed third-party packages + requireAudit gate.</span></div>
-          <div class="box"><b>T1 sentinel</b><span data-i18n="a3.d">Sidecar subprocess samples host resources (/proc on Linux, ps/lsof on macOS) → alarm JSON lines back.</span></div>
-          <div class="box"><b>T2 hooks</b><span data-i18n="a4.d">Wraps fs / child_process; stack attribution to the plugin package.</span></div>
+          <div class="box g"><b data-i18n="a2.t">internal/plugin guard</b><span data-i18n="a2.d">Auto-scans newly installed third-party packages + requireAudit gate + content hash baseline for official packages.</span></div>
+          <div class="box"><b>T1 sentinel</b><span data-i18n="a3.d">Sidecar subprocess samples host resources (/proc on Linux, ps/lsof + fs watch on macOS) → alarm JSON lines back.</span></div>
+          <div class="box"><b>T2 hooks</b><span data-i18n="a4.d">Wraps fs / child_process; stack attribution to the plugin package; C2 ESM blind spot explicitly flagged (esm-guard-coverage).</span></div>
           <div class="box"><b>🪤 Honeypot</b><span data-i18n="a5.d">Fake key lures; touching them = high-confidence key hunt.</span></div>
+          <div class="box"><b>🧘 known-boundaries (0.3.3)</b><span data-i18n="a7.d">Persistent dedup store (kind, pkg, version, capability diff) — fail-open, auto-revoke on change.</span></div>
           <div class="box cy"><b>webServer /vet/*</b><span data-i18n="a6.d">GET status.json (shield polling) · POST runtime-guard toggle.</span></div>
+          <div class="flow-arrow"></div>
+          <div class="box cy" style="text-align:center"><b data-i18n="a8.d">Dual-OS CI gate: ubuntu coverage ratchet · macOS real ps/lsof integration</b></div>
           <div class="flow-arrow"></div>
           <div class="box cy" style="text-align:center"><b>spawn · request-response · exits after each scan</b></div>
         </div>
@@ -300,7 +321,7 @@ code{font-family:var(--mono)}
           <h3>🧠 <span data-i18n="arch.scanner">scanner-bin</span> <span class="chip" data-i18n="arch.isolated">isolated subprocess</span></h3>
           <div class="box"><b data-i18n="s1.t">Read stdin JSON</b><span data-i18n="s1.d">code / files / rules / targetKind / runtime.</span></div>
           <div class="box"><b>AST parse</b><span data-i18n="s2.d">TypeScript compiler API — read-only, never eval'd.</span></div>
-          <div class="box g"><b data-i18n="s3.t">Run rules R1–R20</b><span data-i18n="s3.d">score → staticScore → verdict → single-line stdout JSON.</span></div>
+          <div class="box g"><b data-i18n="s3.t">Run rules R1–R20</b><span data-i18n="s3.d">static engine v20 → score → staticScore → verdict → single-line stdout JSON.</span></div>
           <div class="box"><b>⚡ Cache</b><span data-i18n="s4.d">content hash + engine version + rule set + targetKind/runtime.</span></div>
           <div class="box"><b>🧯 OSV</b><span data-i18n="s5.d">Exact-version known-vuln query; silent network downgrade.</span></div>
         </div>
@@ -324,13 +345,13 @@ code{font-family:var(--mono)}
         <div class="chart-box"><canvas id="covChart"></canvas></div>
       </div>
       <div class="chart-card">
-        <h3 data-i18n="d2.t">1095 tests by suite</h3>
-        <div class="sub" data-i18n="d2.sub">1095 passed · 0 skipped</div>
+        <h3 data-i18n="d2.t">1102 tests by suite</h3>
+        <div class="sub" data-i18n="d2.sub">1102 passed · 12 platform-specific skips (win / mac /proc)</div>
         <div class="chart-box"><canvas id="testsChart"></canvas></div>
       </div>
       <div class="chart-card">
         <h3 data-i18n="d3.t">Adversarial matrix verdicts</h3>
-        <div class="sub" data-i18n="d3.sub">34 mutants + 8 controls across R1–R20</div>
+        <div class="sub" data-i18n="d3.sub">34 mutants + 8 benign controls across R1–R20 · kill-rate gate enforced</div>
         <div class="chart-box"><canvas id="matrixChart"></canvas></div>
       </div>
       <div class="chart-card">
@@ -355,6 +376,8 @@ code{font-family:var(--mono)}
       <div class="trust-item"><div class="n">04</div><p data-i18n="t4">Fail-open by default — `mode: report`; deny interception is an explicit deployer opt-in.</p></div>
       <div class="trust-item"><div class="n">05</div><p data-i18n="t5">Alarm-only runtime guard — watches, never kills. Interception exists only in the opt-in watch mode, for confirmed destructive operations.</p></div>
       <div class="trust-item"><div class="n">06</div><p data-i18n="t6">Not a security boundary — a "speed bump + forensics layer", aligned with DSH's official stance.</p></div>
+      <div class="trust-item"><div class="n">07</div><p data-i18n="t7">Deduplication never goes silent — the known-boundaries store fails open: a damaged or unwritable store means the notice repeats, never that it disappears.</p></div>
+      <div class="trust-item"><div class="n">08</div><p data-i18n="t8">Differential trust for official anchors — noise drops inside the content-trust anchor (info, folded, counted out of `alarmCount`); the anchor itself is content-hash-verified, and everything outside it is alarmed as usual.</p></div>
     </div>
   </div>
 </section>
@@ -373,7 +396,8 @@ code{font-family:var(--mono)}
       <div class="lim-item"><span class="n">04</span><span data-i18n="l4">Non-source files (.jsx/.tsx/.vue/binaries/wasm/shell) are outside the scan surface.</span></div>
       <div class="lim-item"><span class="n">05</span><span data-i18n="l5">T1/T2 can't catch worker threads' separate realms, native plugins, process.binding, or slow low-traffic exfiltration.</span></div>
       <div class="lim-item"><span class="n">06</span><span data-i18n="l6">/vet/status.json has no auth — keep dsh web on loopback if you care about LAN read access.</span></div>
-      <div class="lim-item"><span class="n">07</span><span data-i18n="l7">T2's stack attribution is best-effort; official-package spawn is intentionally not alarmed (capability grant).</span></div>
+      <div class="lim-item"><span class="n">07</span><span data-i18n="l7">T2's stack attribution is best-effort; inside the official content-trust anchor, C2 coverage notices are info-severity observations (0.3.3) — escalation still applies for anything outside the anchor.</span></div>
+      <div class="lim-item"><span class="n">08</span><span data-i18n="l8">The known-boundaries dedup store is per-machine: a fresh machine re-alarms once until the store is built; a damaged store repeats notices (the fail-open price).</span></div>
     </div>
   </div>
 </section>
@@ -387,7 +411,7 @@ code{font-family:var(--mono)}
       <button class="btn copy-btn" id="copyBtn2" data-i18n="hero.copy">Copy</button>
     </div>
     <div class="hero-actions" style="justify-content:center">
-      <a class="btn btn-primary" href="https://www.npmjs.com/package/@jieai/dsh-plugin-vet" target="_blank" rel="noopener">npm · v0.1.3</a>
+      <a class="btn btn-primary" href="https://www.npmjs.com/package/@jieai/dsh-plugin-vet" target="_blank" rel="noopener">npm · v0.3.3</a>
       <a class="btn" href="https://github.com/wulun811/dsh-plugin-vet" target="_blank" rel="noopener">GitHub</a>
       <a class="btn" href="https://github.com/wulun811/dsh-plugin-vet/blob/main/README.md" target="_blank" rel="noopener" data-i18n="cta.readme">Read the README →</a>
     </div>
@@ -415,34 +439,39 @@ const I18N = {
     "hero.positioning":"A monitoring alarm, not an enforcer.","hero.positioning2":" vet never acts on your behalf by default — it only does check → alarm → advise; the opt-in watch mode may block confirmed destructive operations. The final call is always yours on your own DSH.",
     "hero.copy":"Copy","hero.dash":"View dashboard",
     "shield.status":"● live guard · alarm-only",
-    "stats.tests":"tests · 1095 passed","stats.cov":"line coverage","stats.rules":"static rules R1–R20","stats.matrix":"adversarial samples","stats.official":"official packages · clean",
+    "stats.tests":"tests · 1102 passed","stats.cov":"line coverage","stats.rules":"static rules R1–R20","stats.matrix":"mutant gate · killed / clean","stats.skips":"platform skips (win / mac)",
     "feat.kicker":"What it does","feat.title":"One pipeline, <span class=\"hl\">from download to runtime.</span>",
     "feat.sub":"vet occupies the whole trust chain — download → scan → audit → score → decide → runtime watch — and by default stops there: it reports, it advises; interception exists only in the opt-in watch mode.",
-    "f1.t":"Deterministic static scan","f1.d":"R1–R20 rules over an AST, verdicts produced only by the static layer — never spoofable by prompt injection. The scanner runs as an isolated subprocess: AST read-only, never eval'd.","f1.tag":"verdict · critical / suspicious / clean",
-    "f2.t":"Runtime guard — alarm only","f2.d":"T1 sentinel watches host resources (Linux: /proc; macOS: ps/lsof — memory, forks, fds); T2 hooks wrap fs/child_process and attribute dangerous operations to the plugin that did them. Watches, never kills.","f2.tag":"alarm-only by default",
+    "f1.t":"Deterministic static scan","f1.d":"R1–R20 rules over an AST (engine v20), verdicts produced only by the static layer — never spoofable by prompt injection. The scanner runs as an isolated subprocess: AST read-only, never eval'd.","f1.tag":"verdict · critical / suspicious / clean",
+    "f2.t":"Runtime guard — alarm only","f2.d":"T1 sentinel watches host resources (Linux: /proc; macOS: ps/lsof + fs watch — memory, forks, fds); T2 hooks wrap fs/child_process and attribute dangerous operations to the plugin that did them. Watches, never kills.","f2.tag":"alarm-only by default",
     "f3.t":"Honeypot lures","f3.d":"Fake credentials planted in an unobtrusive location (no honeypot keywords — anti-honeypot). Anyone rifling through key files gets caught red-handed with high confidence.","f3.tag":"opt-in · honeypot.enabled",
-    "f4.t":"Audit-protocol skill","f4.d":"The agent reviews a plugin in preset steps and writes a health record to disk; `requireAudit` turns \"unaudited\" into \"unusable\". vet ships criteria, not conclusions.","f4.tag":"vet-audit-protocol",
+    "f4.t":"Audit-protocol skill","f4.d":"The agent reviews a plugin in preset steps and writes a health record to disk; `requireAudit` turns \"unaudited\" into \"unusable\". Official packages anchor to a content hash baseline (contentBaseline) — a changed tarball is surfaced, never silently trusted. vet ships criteria, not conclusions.","f4.tag":"vet-audit-protocol",
     "f5.t":"Live GUI shield","f5.d":"A green/yellow/red status light in the DSH web header with live metrics, per-alarm advice, one-click dismiss, and a runtime-guard toggle. Click to inspect, never to act.","f5.tag":"status.json · polled",
     "f6.t":"Supply-chain OSV check","f6.d":"Exact-version known-vulnerability queries against Google OSV for the plugin and its direct dependencies. Network trouble degrades silently — never a false block.","f6.tag":"osvCheck · exact versions",
+    "f7.t":"Alarm-fatigue control (0.3.3)","f7.d":"Coverage-class boundary alerts are deduplicated persistently by (kind, pkg, version, capability diff) — the same version never re-alarms, an upgrade that changes capabilities does. Official-anchor C2 notices downgrade to info and fold across packages; the store fails open (repeat a notice, never go blind).","f7.tag":"known-boundaries · fail-open",
+    "f8.t":"Kill-rate gate","f8.d":"A QA contract, not a claim: 34 malicious mutants must all be killed and 8 benign controls must stay clean — enforced by `--gate` on every release. Escape shapes are added as corpus, never deleted.","f8.tag":"34 killed · 8 clean · R1–R20",
+    "f9.t":"Published-artifact self-pin","f9.d":"Every release pins a hash of its shipped artifacts (`vet-self-pins.json`). Change the code without re-pinning and the self-scan gate fails — byte-swapped or tampered installs are caught on scan.","f9.tag":"gen:self-pin · pinned-match",
     "arch.kicker":"Architecture","arch.title":"Two worlds, <span class=\"hl\">physically separated.</span>",
     "arch.sub":"The scanner runs in its own process — even if the host is compromised by escaped plugin code, scan results still come from a clean, read-only process.",
     "arch.host":"DSH host process","arch.isolated":"isolated subprocess","arch.scanner":"scanner-bin","arch.note":"Detail in docs/ARCHITECTURE.md · trust boundaries below.",
     "a1.t":"tools/execute guard","a1.d":"Scans cordis_define / cordis_run / run_code / workflow before execution.",
-    "a2.t":"internal/plugin guard","a2.d":"Auto-scans newly installed third-party packages + requireAudit gate.",
-    "a3.d":"Sidecar subprocess samples host resources (/proc on Linux, ps/lsof on macOS) → alarm JSON lines back.",
-    "a4.d":"Wraps fs / child_process; stack attribution to the plugin package.",
+    "a2.t":"internal/plugin guard","a2.d":"Auto-scans newly installed third-party packages + requireAudit gate + content hash baseline for official packages.",
+    "a3.d":"Sidecar subprocess samples host resources (/proc on Linux, ps/lsof + fs watch on macOS) → alarm JSON lines back.",
+    "a4.d":"Wraps fs / child_process; stack attribution to the plugin package; C2 ESM blind spot explicitly flagged (esm-guard-coverage).",
     "a5.d":"Fake key lures; touching them = high-confidence key hunt.",
     "a6.d":"GET status.json (shield polling) · POST runtime-guard toggle.",
+    "a7.d":"Persistent dedup store (kind, pkg, version, capability diff) — fail-open, auto-revoke on change.",
+    "a8.d":"Dual-OS CI gate: ubuntu coverage ratchet · macOS real ps/lsof integration",
     "s1.t":"Read stdin JSON","s1.d":"code / files / rules / targetKind / runtime.",
     "s2.d":"TypeScript compiler API — read-only, never eval'd.",
-    "s3.t":"Run rules R1–R20","s3.d":"score → staticScore → verdict → single-line stdout JSON.",
+    "s3.t":"Run rules R1–R20","s3.d":"static engine v20 → score → staticScore → verdict → single-line stdout JSON.",
     "s4.d":"content hash + engine version + rule set + targetKind/runtime.",
     "s5.d":"Exact-version known-vuln query; silent network downgrade.",
     "dash.kicker":"Dashboard","dash.title":"Measured, <span class=\"hl\">not marketed.</span>",
     "dash.sub":"Real numbers from the test suite and coverage run — a security layer should be able to show its receipts.",
     "d1.t":"Coverage vs. enforced thresholds","d1.sub":"vitest v8 · v8 provider · thresholds lines/functions/statements ≥ 85%, branches ≥ 80% (ratchet, round-18)",
-    "d2.t":"1095 tests by suite","d2.sub":"1095 passed · 0 skipped",
-    "d3.t":"Adversarial matrix verdicts","d3.sub":"34 mutants + 8 controls across R1–R20",
+    "d2.t":"1102 tests by suite","d2.sub":"1102 passed · 12 platform-specific skips (win / mac /proc)",
+    "d3.t":"Adversarial matrix verdicts","d3.sub":"34 mutants + 8 benign controls across R1–R20 · kill-rate gate enforced",
     "d4.t":"Static rule severity map","d4.sub":"Default severity per rule (R1–R20)",
     "trust.kicker":"Trust boundaries","trust.title":"Design constraints <span class=\"hl\">that keep it honest.</span>",
     "t1":"The verdict comes only from the deterministic static layer — regex/AST judgments, not spoofable by prompt injection.",
@@ -451,6 +480,8 @@ const I18N = {
     "t4":"Fail-open by default — `mode: report`; deny interception is an explicit deployer opt-in.",
     "t5":"Alarm-only runtime guard — watches, never kills. Interception exists only in the opt-in watch mode, for confirmed destructive operations.",
     "t6":"Not a security boundary — a \"speed bump + forensics layer\", aligned with DSH's official stance.",
+    "t7":"Deduplication never goes silent — the known-boundaries store fails open: a damaged or unwritable store means the notice repeats, never that it disappears.",
+    "t8":"Differential trust for official anchors — noise drops inside the content-trust anchor (info, folded, counted out of `alarmCount`); the anchor itself is content-hash-verified, and everything outside it is alarmed as usual.",
     "lim.kicker":"Known limitations","lim.title":"What we <span class=\"hl\">openly admit</span> it can't catch.",
     "lim.sub":"A trust layer that hides its blind spots isn't a trust layer. All of these are empirically verified and documented.",
     "l1":"Static scan is not a security boundary: obfuscated/encoded/dynamically generated code can bypass AST rules.",
@@ -459,7 +490,8 @@ const I18N = {
     "l4":"Non-source files (.jsx/.tsx/.vue/binaries/wasm/shell) are outside the scan surface.",
     "l5":"T1/T2 can't catch worker threads' separate realms, native plugins, process.binding, or slow low-traffic exfiltration.",
     "l6":"/vet/status.json has no auth — keep dsh web on loopback if you care about LAN read access.",
-    "l7":"T2's stack attribution is best-effort; official-package spawn is intentionally not alarmed (capability grant).",
+    "l7":"T2's stack attribution is best-effort; inside the official content-trust anchor, C2 coverage notices are info-severity observations (0.3.3) — escalation still applies for anything outside the anchor.",
+    "l8":"The known-boundaries dedup store is per-machine: a fresh machine re-alarms once until the store is built; a damaged store repeats notices (the fail-open price).",
     "cta.title":"Vet it. <span class=\"hl\">Then decide.</span>",
     "cta.sub":"Install into any profile you want guarded. Reports by default, blocks only when you say so.",
     "cta.readme":"Read the README →",
@@ -473,34 +505,39 @@ const I18N = {
     "hero.positioning":"监控报警器，不是打手。","hero.positioning2":" vet 默认永不动手——只做「检查 → 报警 → 给建议」；显式开启 watch 后也只拦截已确认的破坏操作。最终处置永远由你在自己的 DSH 上决定。",
     "hero.copy":"复制","hero.dash":"查看仪表盘",
     "shield.status":"● 实时守卫 · 只报警",
-    "stats.tests":"用例 · 1095 通过","stats.cov":"行覆盖率","stats.rules":"静态规则 R1–R20","stats.matrix":"对抗样本","stats.official":"官方包 · 全 clean",
+    "stats.tests":"用例 · 1102 通过","stats.cov":"行覆盖率","stats.rules":"静态规则 R1–R20","stats.matrix":"击杀门禁 · 击杀/全净","stats.skips":"平台跳过（win / mac）",
     "feat.kicker":"它能做什么","feat.title":"一条流水线，<span class=\"hl\">从下载到运行时。</span>",
     "feat.sub":"vet 占据整条信任链——下载 → 扫描 → 审计 → 评分 → 决定 → 运行时盯梢——默认止步于此：报告、建议；拦截只存在于显式 opt-in 的 watch 模式。",
-    "f1.t":"确定性静态扫描","f1.d":"AST 上的 R1–R20 规则，verdict 只由静态层产出——提示注入无法欺骗。扫描器是独立子进程：AST 只读、从不 eval。","f1.tag":"verdict · critical / suspicious / clean",
-    "f2.t":"运行时守卫 — 只报警","f2.d":"T1 哨兵监控宿主资源（Linux 走 /proc；macOS 走 ps/lsof——内存/子进程/fd）；T2 钩子包装 fs/child_process，把危险操作按栈归因到对应插件。只看，从不杀。","f2.tag":"默认只报警",
+    "f1.t":"确定性静态扫描","f1.d":"AST 上的 R1–R20 规则（引擎 v20），verdict 只由静态层产出——提示注入无法欺骗。扫描器是独立子进程：AST 只读、从不 eval。","f1.tag":"verdict · critical / suspicious / clean",
+    "f2.t":"运行时守卫 — 只报警","f2.d":"T1 哨兵监控宿主资源（Linux 走 /proc；macOS 走 ps/lsof + fs watch——内存/子进程/fd）；T2 钩子包装 fs/child_process，把危险操作按栈归因到对应插件。只看，从不杀。","f2.tag":"默认只报警",
     "f3.t":"蜜罐诱饵","f3.d":"在隐蔽位置放置假凭据（无蜜罐关键词——反蜜罐设计）。谁偷偷翻找密钥文件，当场高置信现形。","f3.tag":"opt-in · honeypot.enabled",
-    "f4.t":"审查协议技能","f4.d":"agent 按预设步骤审查插件并落盘健康档案；`requireAudit` 把「未经审计」变成「不可用」。vet 只给判据，不给结论。","f4.tag":"vet-audit-protocol",
+    "f4.t":"审查协议技能","f4.d":"agent 按预设步骤审查插件并落盘健康档案；`requireAudit` 把「未经审计」变成「不可用」。官方包锚定内容哈希基线（contentBaseline）——tarball 变化必显形，绝不静默信任。vet 只给判据，不给结论。","f4.tag":"vet-audit-protocol",
     "f5.t":"实时 GUI 盾牌","f5.d":"DSH web 头部绿/黄/红状态灯，带实时指标、逐条建议、单击忽略、守卫一键开关。点开查看，从不代你行动。","f5.tag":"status.json · 轮询",
     "f6.t":"供应链 OSV 核对","f6.d":"对插件及其直接依赖向 Google OSV 做精确版本已知漏洞查询。网络异常静默降级——绝不误拦。","f6.tag":"osvCheck · 精确版本",
+    "f7.t":"警报疲劳控制（0.3.3）","f7.d":"coverage 类边界提示按 (kind, 包, 版本, 能力差分) 持久化去重——同版本不重报，升级且能力变化才重报；官方锚内 C2 提示降 info 并跨包折叠；存储 fail-open（宁可重复提示，不可静默失明）。","f7.tag":"known-boundaries · fail-open",
+    "f8.t":"击杀率门禁","f8.d":"这是 QA 契约而非口号：34 个恶意变异必须全杀、8 个良性对照必须全净——每次发布由 `--gate` 强制执行。新逃逸形态只增语料，永不删除。","f8.tag":"34 全杀 · 8 全净 · R1–R20",
+    "f9.t":"发布物自钉扎","f9.d":"每次发布钉扎发布物哈希（`vet-self-pins.json`）。改码不重钉 → 自扫门禁直接 FAIL——字节被调包或篡改的安装会在扫描时现行。","f9.tag":"gen:self-pin · pinned-match",
     "arch.kicker":"架构","arch.title":"两个世界，<span class=\"hl\">物理隔离。</span>",
     "arch.sub":"扫描器运行在独立进程——即使宿主被逃逸的插件代码攻破，扫描结果仍来自干净、只读的进程。",
     "arch.host":"DSH 宿主进程","arch.isolated":"独立子进程","arch.scanner":"scanner-bin","arch.note":"详见 docs/ARCHITECTURE.md · 信任边界见下。",
     "a1.t":"tools/execute 守卫","a1.d":"执行前扫描 cordis_define / cordis_run / run_code / workflow。",
-    "a2.t":"internal/plugin 守卫","a2.d":"新装第三方包自动静态扫描 + requireAudit 门槛。",
-    "a3.d":"旁路子进程采样宿主资源（Linux：/proc；macOS：ps/lsof）→ 报警 JSON 行回传。",
-    "a4.d":"包装 fs / child_process；栈归因到插件包名。",
+    "a2.t":"internal/plugin 守卫","a2.d":"新装第三方包自动静态扫描 + requireAudit 门槛 + 官方包内容哈希基线。",
+    "a3.d":"旁路子进程采样宿主资源（Linux：/proc；macOS：ps/lsof + fs watch）→ 报警 JSON 行回传。",
+    "a4.d":"包装 fs / child_process；栈归因到插件包名；C2 ESM 盲区显式标记（esm-guard-coverage）。",
     "a5.d":"放假密钥诱饵；触碰 = 高置信翻找密钥信号。",
     "a6.d":"GET status.json（盾牌轮询）· POST runtime-guard 开关。",
+    "a7.d":"持久化去重存储（kind/包/版本/能力差分）——fail-open，变化自动吊销。",
+    "a8.d":"双 OS 门禁 CI：ubuntu 覆盖率棘轮 · macOS 真 ps/lsof 集成",
     "s1.t":"读 stdin JSON","s1.d":"code / files / rules / targetKind / runtime。",
     "s2.d":"TypeScript compiler API —— 只读、从不 eval。",
-    "s3.t":"执行规则 R1–R20","s3.d":"评分 → staticScore → verdict → 单行 stdout JSON。",
+    "s3.t":"执行规则 R1–R20","s3.d":"静态引擎 v20 → 评分 → staticScore → verdict → 单行 stdout JSON。",
     "s4.d":"内容 hash + 引擎版本 + 规则集 + targetKind/runtime。",
     "s5.d":"精确版本已知漏洞查询；网络失败静默降级。",
     "dash.kicker":"仪表盘","dash.title":"用数据说话，<span class=\"hl\">不靠营销。</span>",
     "dash.sub":"来自测试套件与覆盖率实测的真实数字——安全层应当拿得出收据。",
     "d1.t":"覆盖率 vs 强制阈值","d1.sub":"vitest v8 · v8 provider · lines/functions/statements ≥ 85%、branches ≥ 80%（round-18 棘轮）",
-    "d2.t":"1095 用例按套件分布","d2.sub":"1095 通过 · 0 跳过",
-    "d3.t":"对抗矩阵 verdict 分布","d3.sub":"34 个恶意变异 + 8 个良性对照，覆盖 R1–R20",
+    "d2.t":"1102 用例按套件分布","d2.sub":"1102 通过 · 12 平台特定跳过（win / mac /proc）",
+    "d3.t":"对抗矩阵 verdict 分布","d3.sub":"34 个恶意变异 + 8 个良性对照，覆盖 R1–R20 · 击杀率门禁强制执行",
     "d4.t":"静态规则严重度地图","d4.sub":"各规则默认严重度（R1–R20）",
     "trust.kicker":"信任边界","trust.title":"让它保持诚实的<span class=\"hl\">设计约束。</span>",
     "t1":"verdict 只由确定性静态层产出——正则/AST 判定，提示注入无法欺骗。",
@@ -509,6 +546,8 @@ const I18N = {
     "t4":"默认 fail-open——`mode: report`；deny 拦截是部署者显式 opt-in。",
     "t5":"运行时守卫默认只报警——只看不杀；拦截只存在于显式 opt-in 的 watch 模式，且仅限已确认的破坏操作。",
     "t6":"不是安全边界——「减速带 + 取证层」，与 DSH 官方立场一致。",
+    "t7":"去重绝不静默——known-boundaries 存储 fail-open：存储损坏或不可写时提示会重复出现，绝不会消失。",
+    "t8":"官方锚差异化信任——内容信任锚内降噪（info、跨包折叠、不计入 `alarmCount`）；锚本身经内容哈希校验，锚外一切照常报警。",
     "lim.kicker":"已知局限","lim.title":"我们<span class=\"hl\">公开承认</span>抓不到的。",
     "lim.sub":"一个藏起盲区的信任层，不配叫信任层。以下全部经过实测验证并有文档记录。",
     "l1":"静态扫描不是安全边界：混淆/编码/动态生成代码可绕过 AST 规则。",
@@ -517,7 +556,8 @@ const I18N = {
     "l4":"非源码文件（.jsx/.tsx/.vue/二进制/wasm/shell）不在扫描面。",
     "l5":"T1/T2 抓不了 worker 线程独立 realm、原生插件、process.binding、低流量慢外联。",
     "l6":"/vet/status.json 无鉴权——介意局域网可读就把 dsh web 保持回环绑定。",
-    "l7":"T2 栈归因是 best-effort；官方包 spawn 有意不报警（能力授权）。",
+    "l7":"T2 栈归因是 best-effort；官方内容信任锚内，C2 coverage 提示为 info 级观察（0.3.3）——锚外一切照常升级。",
+    "l8":"known-boundaries 去重存储按机器隔离：新机器会重报一次直到建库；存储损坏则重复提示（fail-open 的代价）。",
     "cta.title":"先审查。 <span class=\"hl\">再决定。</span>",
     "cta.sub":"装进你想守护的任意 profile。默认只报告，只有你说了才算拦截。",
     "cta.readme":"阅读 README →",
@@ -561,7 +601,7 @@ function makeCharts(){
     data:{
       labels:['lines','functions','statements','branches'],
       datasets:[{
-        data:[89.49,93.48,89.49,84.68],
+        data:[88.7,92.66,88.7,84.77],
         backgroundColor:['#0ecb8b','#38bdf8','#0ecb8b','#a78bfa'],
         borderRadius:7, barPercentage:.62
       }]
@@ -578,7 +618,7 @@ function makeCharts(){
     data:{
       labels:['scanner','runtime','plugins','self','qa'],
       datasets:[{
-        data:[288,330,232,158,87],
+        data:[304,423,198,86,103],
         backgroundColor:['#38bdf8','#60a5fa','#a78bfa','#0ecb8b','#fbbf24'],
         borderRadius:7, barPercentage:.6
       }]
