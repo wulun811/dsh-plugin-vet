@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="70 60 680 180" role="img" aria-label="dsh.so logo">
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="180" viewBox="70 60 680 180" role="img" aria-label="dsh.so logo">
   <defs>
     <linearGradient id="dshG" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#16a34a"/>
@@ -12,5 +12,9 @@
   <rect x="165.6" y="145.6" width="52.5" height="52.5" rx="13.1" fill="#22d3ee" opacity=".9"/>
   <rect x="139.4" y="156.6" width="26.3" height="26.3" rx="8.8" fill="#4ade80" opacity=".7"/>
   <!-- 深色背景版字标：白色 + 亮绿 -->
-  <text x="296" y="150" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" font-size="118" font-weight="700" letter-spacing="-1" dominant-baseline="central" fill="#f8fafc">dsh<tspan fill="#4ade80">.so</tspan></text>
+  <!-- 0.3.4 审查修正：去掉 dominant-baseline="central"——tspan 对该属性的继承在部分渲染器
+       （SVG-as-img/Firefox 等）不一致，实测 .so 相对 dsh 基线整体下坠；现两段共用显式
+       字母基线（默认 alphabetic，全渲染器一致），.so 与 dsh 底边必然同高。「抬到同一水平面」。
+       y=202.5 按字标视觉中心 ≈ 方块中心（80..220 → 150）标定，与旧 central 渲染逐像素等价。 -->
+  <text x="296" y="202.5" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" font-size="118" font-weight="700" letter-spacing="-1" fill="#f8fafc">dsh<tspan fill="#4ade80">.so</tspan></text>
 </svg>

@@ -3,7 +3,69 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.3.5] - 2026-09-02
+
+### Added
+
+- **Official catalog trust anchor (0.3.5, user-side 0.3.3 evaluation)**: `~/.dsh/vet/official-catalog.json`
+  is now the source of truth for "what counts as an official `@deepseek-ai/*` package" — the
+  seed is generated from `dsh-src/packages` (`scripts/gen-official-catalog-seed.mjs`), refreshed
+  online via a bounded npm registry scope enumeration only when an out-of-catalog official-name
+  appears (never at boot; deny mode stays zero-network). Judgment at scan time, which every
+  plugin already passes: name in catalog + hash matches the official registry tarball → trusted
+  and anchored on first sight (no more TOFU window); name in catalog + hash mismatch → **yellow
+  observation, not red** (user decision: false positives burn more trust than misses); name not
+  in catalog ("the extra one" an impostor would have to be) → **yellow observation**, no trust
+  anchor, no interception — the scan + observation surface exposes impostors without runtime
+  paranoia.
+- **P8 fs-probe denoise for DSH housekeeping probes (0.3.5)**: `lstat/stat/access` against
+  `~/.dsh/` lock-sibling files (`<file>.lock`, atomic-write stale-lock probes) and
+  unattributed probes of session-log-shaped files are silent; official-name-attributed
+  housekeeping probes (session-store owner rotation, settings persistence) are downgraded to a
+  single aggregated **info** observation (visible, dismissible, excluded from `alarmCount` and
+  shield level) instead of yellow spam. Third-party attribution, body reads/writes/deletes,
+  honeypots and integrity canaries are untouched.
+
+### Changed
+
+- **`baseline-mismatch` for official packages is now yellow** (was red) in both deny and report
+  paths, and `registry 对账不可用` no longer fails closed to red — a missing network check is not
+  evidence of tampering. Third-party post-install baseline violations (P7 change-detection)
+  remain red (high-confidence supply-chain signal, different trust class).
+- **`first-seen` official packages are verified on first sight** (report mode): if local bytes
+  equal the official registry tarball, the content trust anchor is registered immediately
+  (`official-verified` info observation) instead of waiting for a second load to `match`.
+
+### Fixed
+
+- **Impostor first-sight detection hole**: a tarball naming itself `@deepseek-ai/*` used to
+  record a first-seen baseline and pass review silently; with the official catalog it is
+  flagged by a deterministic set-membership check the moment it loads.
+- **Registry 核对单页截断（0.3.5 审查加固）**: 在线全集核对改为有界分页枚举（最多 4 页 ×
+  250 槽位；实测 scope 231 个官方包散布在前 4 页——单页首页只含 201 个，尾部真官方包
+  （如 `dsh-code-runtime-python`）此前永远无法「自动核对并入目录」，黄牌永续）。
+- **首见校验不一致的黄不粘滞（0.3.5 审查加固）**: `baseline.json` 记录新增 `suspected`
+  疑标——registry 首见校验/对账坐实「本机 ≠ 官方」时持久置位；此后本地基线自证 match
+  不再自动授予内容信任锚（伪造 in-catalog 名 tarball「首见一次性黄牌 + 第二载 match
+  自证入锚获运行时全域静默」的缝合上），改为持续黄牌 `official-match-suspected`，直到
+  acknowledged-package-hashes 登记（= 用户声明负责，照常入锚 + baseline-patch-ack 黄牌）
+  或字节更新为官方（对账一致自动清除疑标）。
+- **首见验证并发限流（0.3.5 审查加固）**: report 模式全新 profile 首批官方包的 registry
+  验证走小池（并发 ≤4），消除启动期网络/CPU 突发。
+- **覆盖层读取大小上限（0.3.5 审查加固）**: official-catalog.json 超 8MB fail-open 回
+  种子，拒绝整读撑内存。
+- **deny 模式黄牌文案修正（0.3.5 审查加固）**: official-not-in-catalog 不再向 deny
+  用户声称「已触发 registry 核对」（deny 零网络，P2-7）。
+- **测试夹具隔离（0.3.5 审查加固）**: official-catalog 套件夹具改落临时 profile
+  node_modules，不再骑在仓库 node_modules/@deepseek-ai 上（afterAll 无条件清理有
+  误删真实依赖的风险）。
+- **dsh.so logo 字标基线（0.3.5 审查修正）**: assets/dsh-so-logo-dark.svg 的 `.so`
+  在部分渲染器（SVG-as-img/Firefox 等）因 `dominant-baseline="central"` 的 tspan
+  继承不一致而整体下坠——改为两段共用显式字母基线（默认 alphabetic，全渲染器一致），
+  `.so` 与 `dsh` 底边必然同高；y 按字标视觉中心 ≈ 方块中心标定，与旧渲染逐像素等价；
+  顺带显式 width/height 归一化固有尺寸（300×79 vs 680×180 的跨渲染器差异）。
+- **Suite 0.3.5 审查加固**: +catalog 分页/覆盖层上限/疑标-ack 联动用例 → **76 files /
+  1135 tests**。
 
 ### Added
 
