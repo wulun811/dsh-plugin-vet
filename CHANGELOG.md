@@ -3,7 +3,32 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
-## [0.3.5] - 2026-09-02
+## [0.3.6] - 2026-09-03
+
+### Changed
+
+- **Upgrade alarms (N6 upgrade-diff / upgrade-cold) downgraded to blue `info` and aggregated
+  into one row (0.3.6, DSH npm-public modular upgrade feedback)**: after a DSH upgrade the
+  whole official family bumps at once (observed live: 19× `upgrade-diff` + 1×
+  `official-not-in-catalog` yellow alarms filled the 20-slot buffer and held the shield at
+  yellow). Plain added capabilities now record as **info** observations (blue, excluded from
+  `alarmCount` and shield level) and all upgrade alarms fold into a single row via
+  `mergeKey: scan:upgrade` with a running count; red stays red for the high-risk combos
+  (exec+network / sensitive-path+network / sensitive-path+exec — the poisoning signature),
+  and `VetStatus` takes the max severity on merge so one red combo turns the whole aggregated
+  row red. Shield floating upgrade-diff card renders info in blue (`tok.info`). Full per-package
+  diffs remain available via `vet_diff` / nutrition labels / plugin detail.
+- **Official catalog seed collection widened to four sources
+  (`scripts/gen-official-catalog-seed.mjs`, 219 → 261 names)**: `dsh-src/packages` +
+  `dsh-src/apps` (`@deepseek-ai/dsh`, `dsh-web-frontend`) + `dsh-src/vendor` (cordis fork
+  family: `@deepseek-ai/cordis`, `cordis-plugin-*`, `cosmokit`, …) + the locally installed DSH
+  family (`npm global root/@deepseek-ai/dsh/node_modules/@deepseek-ai`, auto-detected).
+  Rationale: npm registry **search** does not index the cordis family (verified: no hits in
+  2500 slots for `@deepseek-ai/cordis` / `cosmokit` / `schemastery` / `dsh-acp-app`), so the
+  old packages-only seed let legit official packages appear "out of catalog" → yellow
+  `official-not-in-catalog` watch after every upgrade; the widened seed makes the whole
+  published family offline-trusted. Registry refresh remains the online complement for names
+  unknown even to the seed.
 
 ### Added
 
