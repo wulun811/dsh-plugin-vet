@@ -689,7 +689,11 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       incrementScanned()
       // N1：注册静态能力清单（声明侧）——T2 观测与此对账，差分出隐藏能力
       capabilityDiff.registerStatic(entryName, res.report.capabilities)
-      // N6：版本行为差分——同名异版清单对比，新增敏感能力 → yellow/red 报警（首次记录只存不报）
+      // N6：版本行为差分——同名异版清单对比，新增敏感能力 → info(蓝)/red 报警（首次记录只存不报）
+      // 0.3.6：mergeKey 聚合——升级类报警（upgrade-diff/upgrade-cold）折叠为一行、跨包累计
+      // count（DSH 模块化升级一次升几十个官方包，逐包一行会刷满 20 槽缓冲）；status.ts 合并
+      // 时 severity 取高（任一 red 组合 → 整行 red），普通新增 → info 蓝色，不参与盾牌
+      // level/alarmCount。dismiss 同样按 mergeKey：一次忽略 = 整桶升级观察折叠。
       const nav = recordVersionScan(entryName, installedVersion, res.report.capabilities)
       if (nav.alarm !== null) {
         status?.record({
@@ -700,6 +704,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           message: nav.alarm.message,
           target: entryName,
           pluginHint: entryName,
+          mergeKey: 'scan:upgrade',
           at: Date.now(),
         })
       }

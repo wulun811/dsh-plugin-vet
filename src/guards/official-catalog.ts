@@ -5,8 +5,9 @@
  * 名字先在 TOFU 窗口里被当成「可能是假冒」逐条报警，等第二次加载哈希 match 才入内容信任锚，
  * 导致官方插件自己的家务（锁探针/会话分片探针）在窗口期刷黄警（用户机实测三条）。
  *
- * 新模型：全量官方目录（种子来自 dsh-src/packages，运行时用 registry scope 枚举在线刷新）是
- * 名字的真值。判定方（internal-plugin 的 classifyOfficial）由此一分为三：
+ * 新模型：全量官方目录（种子来自 dsh-src 的 packages+apps+vendor + 本机已装 DSH 家族，
+ * 运行时用 registry scope 枚举在线刷新）是名字的真值。判定方（internal-plugin 的
+ * classifyOfficial）由此一分为三：
  * - 名字 ∈ 目录 且 哈希与官方 registry 一致 → 真官方，首见即可入内容信任锚（TOFU 窗口合上）；
  * - 名字 ∈ 目录 但 哈希不一致 → 黄牌观察（非红——误报比漏报更消耗信任，用户决策）；
  * - 名字 ∉ 目录（"多出来的那个"）→ 黄牌观察（冒充官方，或官方新包尚未纳入目录），不拦不入锚，
@@ -16,6 +17,12 @@
  * scripts/gen-official-catalog-seed.mjs），覆盖层落盘 ~/.dsh/vet/official-catalog.json（C3 快照
  * 纪律 + 原子写），registry 核对在线兜底。任何一层读不到都 fail-open 回退种子/纯前缀旧行为，
  * 绝不把「目录缺失」当成「目录为空」去误判。
+ *
+ * 0.3.6（DSH npm-public 模块化家族）：npm search 的 scope 枚举不索引 cordis fork 家族与部分
+ * 官方包（实测定 @deepseek-ai 搜索 2500 槽内不出现 @deepseek-ai/cordis、cosmokit、schemastery、
+ * dsh-acp-app——升级前这些靠 vendor 目录漏了种，DSH 升级后 cordis-plugin-hmr 等误报
+ * official-not-in-catalog 黄牌）。种子已扩为 packages+apps+vendor+live 家族四源收集，这批名的
+ * 真值由种子内置承担，在线刷新只作补充（新增包名发现仍靠 registry 核对自动入覆盖层）。
  *
  * @module dsh-plugin-vet/official-catalog
  */

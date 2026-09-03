@@ -3,7 +3,9 @@
  * 靶子 G4：供应链投毒几乎都发生在"老包的新版本"——每版独立扫描看不到"这一版比上一版多要了什么"。
  * 本模块把 N1 的静态能力清单（CapabilityManifest，声明侧）按 `name@version` 记入本地存储，
  * 同一包出现新版本时与该包上一个版本（按 recordedAt 选取，不引入 semver 依赖）的能力清单做
- * 纯本地 JSON 差分：**只报"能力变了"**（新增敏感能力 → yellow/red），不报"代码变了"。
+ * 纯本地 JSON 差分：**只报"能力变了"**（新增敏感能力 → info(蓝)/red），不报"代码变了"。
+ * 0.3.6：升级类报警降档聚合——普通新增能力报蓝色 info 观察并聚合为单行（DSH 模块化升级
+ * 一次升级几十个官方包，逐包黄牌会刷满 20 槽缓冲），高敏感组合（执行+网络等）仍报 red。
  * 完全离线、alarm-only（N6 只产生报警，从不拦截）。
  *
  * 存储（复用 content-baseline 基建，原子写临时文件 + rename，0600/0700）：
@@ -52,7 +54,7 @@ export interface ManifestDelta {
 
 export interface VersionDiffAlarm {
   kind: 'upgrade-diff' | 'upgrade-cold'
-  severity: 'yellow' | 'red'
+  severity: 'info' | 'red'
   message: string
 }
 
@@ -66,7 +68,7 @@ export interface VersionDiffOutcome {
   added: ManifestDelta | null
   /** 相对上一版的移除能力（仅审计展示，不报警）。 */
   removed: ManifestDelta | null
-  severity: 'yellow' | 'red' | null
+  severity: 'info' | 'red' | null
   alarm: VersionDiffAlarm | null
 }
 
@@ -291,12 +293,17 @@ function describeDelta(delta: ManifestDelta): string[] {
   return parts
 }
 
-/** 升级差分的严重度：新增能力 → yellow；新增构成高敏感组合（执行+网络 / 敏感路径+网络 / 敏感路径+执行）→ red。 */
-export function upgradeSeverity(added: ManifestDelta): 'yellow' | 'red' | null {
+/**
+ * 升级差分的严重度（0.3.6 改档）：普通新增能力 → info（蓝色观察，不再黄牌——DSH 模块化
+ * 升级会一次性升级几十个官方包，逐包黄牌 = 20 槽警报轰炸、盾牌假性持黄；升级是预期事件，
+ * 差异详情仍完整留在 vet_diff/营养标签，报警面只留汇总行）；新增构成高敏感组合（执行+网络 /
+ * 敏感路径+网络 / 敏感路径+执行）→ red（此组合是供应链投毒主签名，保持可行动）。
+ */
+export function upgradeSeverity(added: ManifestDelta): 'info' | 'red' | null {
   if (!hasAnyAddition(added)) return null
   const sensitiveFs = added.fsPaths.some(isSensitiveFsPath)
   const combo = (added.hasNetwork && added.hasExec) || (added.hasNetwork && sensitiveFs) || (added.hasExec && sensitiveFs)
-  return combo ? 'red' : 'yellow'
+  return combo ? 'red' : 'info'
 }
 
 function buildUpgradeAlarm(plugin: string, from: string, to: string, added: ManifestDelta): VersionDiffAlarm | null {
@@ -304,16 +311,17 @@ function buildUpgradeAlarm(plugin: string, from: string, to: string, added: Mani
   if (severity === null) return null
   const parts = describeDelta(added)
   // 0.1.20 A 方案：red 级别 → 明确告知用户需要重新审计（审查完成后警报自动解除）
+  // 0.3.6：非组合新增降为 info（蓝色观察，聚合单行）——不再逐包黄牌轰炸
   const suffix = severity === 'red'
     ? '——已构成 高敏感能力组合（执行+网络 / 敏感路径+网络），请让 agent 执行 vet-audit-protocol skill 重新审查（审查完成后警报自动解除）'
-    : '——升级前请审查（N6）'
+    : '——升级观察（N6，蓝色提示，已聚合）'
   return { kind: 'upgrade-diff', severity, message: '升级行为差分：' + plugin + ' ' + from + ' → ' + to + ' 新增 ' + parts.join('；') + suffix }
 }
 
 /**
  * 记录一次扫描的能力清单并产出版本差分结果。
  * - 无版本/无清单 → no-op（不写存储）；
- * - 冷启动（无旧版）→ 只记录；exec+network 双高时附 yellow upgrade-cold 提示；
+ * - 冷启动（无旧版）→ 只记录；exec+network 双高时附 info upgrade-cold 提示（蓝色，已聚合）；
  * - 升级（有旧版）→ 计算差分，新增敏感能力 → upgrade-diff 报警（yellow/red）；
  * - 同版本重录 → 刷新 recordedAt，不差分。
  * fail-open：任何异常返回 no-op，不打扰插件加载。
@@ -339,12 +347,13 @@ export function recordScan(
       if (prev === null) {
         // 冷启动：只记录；exec + network 双高组合给一条提示，不完全静默
         // 0.1.20：upgrade-cold 联审计——已有审计档案则不报（用户审查行为有可见回报）
+        // 0.3.6：severity 降为 info（蓝色观察，聚合单行），与 upgrade-diff 同桶
         const alarm: VersionDiffAlarm | null =
           manifest.hasNetwork === true && manifest.hasExec === true && !hasAuditRecord(plugin, version)
             ? {
                 kind: 'upgrade-cold',
-                severity: 'yellow',
-                message: '新安装插件 ' + plugin + '@' + version + ' 声明 执行+网络 双高能力（首次记录，无旧版本可差分）——建议审查其能力面（N6 冷启动提示）',
+                severity: 'info',
+                message: '新安装插件 ' + plugin + '@' + version + ' 声明 执行+网络 双高能力（首次记录，无旧版本可差分）——升级观察（N6 冷启动，蓝色提示，已聚合）',
               }
             : null
         outcome = { plugin, from: null, to: version, added: null, removed: null, severity: alarm?.severity ?? null, alarm }

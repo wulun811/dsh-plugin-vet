@@ -839,7 +839,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
         {/* —— 浮动卡（P4，mock 版式；随条件出现于主面板正下方，同宽不遮挡）—— */}
         {snap?.lastUpgradeDiff !== undefined && (() => {
           const d = snap.lastUpgradeDiff
-          const sevColor = d.severity === 'red' ? tok.rose : tok.ochre
+          // 0.3.6：升级差分降档——info 蓝色（tok.info），red 组合保持 rose；yellow 仅兜底
+          const sevColor = d.severity === 'red' ? tok.rose : d.severity === 'info' ? tok.info : tok.ochre
           return (
             <div
               role="button"
