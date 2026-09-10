@@ -85,7 +85,9 @@ stdin/stdout are single-line JSON:
 { "kind": "code" | "files", "code"?, "language"?, "files"?, "rules"?, "targetKind"?, "runtime"?, "osv"? }
 // response
 { "ok": true, "report": { "engine", "sourceCount", "findings", "staticScore", "verdict", "capabilities" } }
-// capabilities (files mode, N1): { hosts[], fsPaths[], spawnCmds[], imports[], hasNetwork, hasExec }
+// capabilities (files mode, N1): { hosts[], fsPaths[], spawnCmds[], imports[], hasNetwork, hasExec, hasNativeBinary (0.3.8 C4) }
+// engine: 'static-v22' since 0.3.9（审查修复批次：缓存写入门控/单文件容错/环检测/限读等——规则
+// 判定语义沿用 static-v21 集，但缓存纪律与输出形态（R8-rule-error 元 finding）已变化，旧缓存失效）
 ```
 
 ### 4.2 AST parsing
@@ -176,6 +178,11 @@ interface CapabilityManifest {
   hasExec: boolean      // references eval/Function/child_process …
   ghostDeps?: string[]  // R16: imported but undeclared (ghost dependency)
   zombieDeps?: string[] // R16: declared but not installed (zombie dependency)
+  hasNativeBinary: boolean    // C4 (0.3.8): package ships precompiled native modules — file-surface
+                              // evidence (.node/.dll/.dylib/.so/.exe/.wasm/.ocx/.sys extension hits or
+                              // ELF/PE/Mach-O/wasm magic revalidation, which also catches compiled
+                              // binaries renamed to .js); recorded files are never read/parsed
+  nativeBinaries?: string[]   // C4: deduped basenames (cap 10) — label/diff evidence list
 }
 ```
 

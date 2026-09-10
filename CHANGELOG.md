@@ -3,6 +3,162 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.3.9] - 2026-09-11
+
+Comprehensive review-fix release: every true positive found in the full deep review
+(four parallel review agents + individual reproduction against the built artifacts)
+is addressed. Engine version bumped `static-v21 → static-v22` — all stale scanner
+caches (including previously solidified partial results) are invalidated on first boot.
+
+### Fixed — scanner engine (hardening / silent-evasion directions)
+
+- **Budget-exhausted partial results are no longer written to cache** — a deadline-skip
+  on the first scan no longer permanently solidifies a false `clean` (the payload file,
+  typically ordered last, could get silently skipped forever even when the host budget
+  later allows a full scan). Partial reports are simply not cached; the next scan
+  re-scans in full.
+- **A single broken file no longer crashes the whole package scan** — `const x = x + 'a';`
+  (self-referential initializer, legal syntax) previously drove `stringyValue` into
+  infinite recursion → `RangeError` → entire scan `ok:false`, silently discarding
+  critical findings from the package's other files. `stringyValue`/`numberyValue` now
+  have cycle detection + depth caps, and the scan loop is per-file fault-tolerant
+  (new `R8-rule-error` meta finding; `R8` added to `RULE_IDS`).
+- **Extensionless FIFO no longer hangs the scan** — `isExtensionlessJs` now has the same
+  `stat().isFile()` guard as the native-binary sniffer (a FIFO with no extension could
+  block the synchronous loop until host SIGKILL).
+- **`extOf` computed from basename** — a dot-containing directory segment (e.g. the
+  ubiquitous `~/.dsh/` install tree) previously fabricated a pseudo-extension for
+  extensionless files, making the round-16 extensionless-bin detection dead code on
+  real install paths.
+- **`R9 isRedosPattern` linearized** — bracket pairing is precomputed in one pass with a
+  work budget; a 64 KB deeply-nested regex previously took ~5.6 s inside a single file
+  (non-preemptible, defeating the timeout structure).
+- **Out-of-loop `package.json` reads are size-capped** — `packageShape` / `buildDepsInfo`
+  / OSV no longer read a multi-GB forged manifest into memory (bypassing the 8 MB
+  in-loop precheck).
+
+### Fixed — host-side scan surface
+
+- **`listSourceFiles` now includes bin/scripts-declared entry files** — extensionless
+  `bin/cli` (npm standard form; previously invisible on the auto-scan path, verified
+  with a live `curl|sh` payload) and any script-referenced path that exists as a regular
+  file inside the package root are enumerated.
+- **`isSensitiveFsPath` splits on both `/` and `\`** — a Windows-path credential target
+  (`C:\Users\x\.ssh\id_rsa`) previously escaped the red-combo judgement entirely.
+- **`isSensitivePath` folds `.`/`..` segments** (`normPath`) — a `..` traversal inside a
+  `node_modules` exemption (`…/.dsh/node_modules/x/../../.credentials.yaml`) previously
+  hid the real sensitive target from T2/N3/N1 (verified `false` before the fix).
+
+### Fixed — runtime guard (observability)
+
+- **Runtime alarms are emitted before the wrapped call** — fs/cp and network wrappers
+  previously sank the alarm *after* invoking the original function, so a destructive
+  command that exits non-zero (which `execSync` always throws) executed for real with
+  zero alarms (the file-header contract and dgram/fetch side were already "report first,
+  call after"). Ledger record is still best-effort on the failure path.
+- **`n3-exfil-match` red now requires a read→write association window** — lifetime
+  cumulative byte counts with no time gate made the [0.4, 3.0] ratio band a near-certain
+  false red for any long-running plugin (verified: 2 KB startup secret read + 17×50 B
+  unrelated telemetry writes → red). The magnitude red is now gated by the same
+  `exfilAssocWindowMs` used by the soft-yellow branch.
+- **`fs.open(path, { flag: 'w' })` object-form flags are honored** — family-2 "open =
+  truncate" blocking and the fs-write classification both missed the object form.
+- **T1 sentinel respawn budget is a sliding 30-minute window**, not a lifetime counter —
+  occasional crashes no longer permanently disable respawn after 5 incidents.
+
+### Fixed — N6 upgrade diff & store robustness
+
+- **Native-binary "swap" is no longer silent** — `hasAnyAddition`/`describeDelta`/
+  `vet_diff`/panel diffSummary now surface native *name* changes even when the boolean
+  flag doesn't flip (previously `system.node → evil.node` produced zero alarms and no
+  tool-layer display).
+- **A single null/corrupt store record no longer neutralizes the whole audit center** —
+  `findPreviousRecord`/`pruneCapabilities`/`history`/`label` skip non-object records
+  (previously a `null` entry threw `TypeError` and the entire package's diff went silent).
+- **Degenerate scans no longer write an N6 baseline** — when a scan parses zero sources
+  with an empty capability manifest (files unreadable / all skipped), the version diff
+  record is skipped at the caller, so the next normal scan is a cold start instead of a
+  false-red cascade.
+- **Contract M1 reconciliation strips the path from net-egress targets** —
+  `webhook.site/post/abc` against a `connect: ['webhook.site']` contract no longer
+  misreports an out-of-scope crossing (verified `within:false` before the fix).
+
+### Fixed — persistence & presentation
+
+- **`cordis.patch.yml.bak.latest` backup written via exclusive-tmp + rename** — the
+  fixed-name `writeFileSync` followed a pre-planted symlink (SEC-5 discipline restored:
+  rename replaces the link itself, not its target).
+- **`dismiss`/`restore` memory state uses the same key as `snapshot.isFold`** — with a
+  mergeKey alarm, "ignore" no longer silently fails when the persistent store cannot be
+  written.
+- **Persisted dismissal list is capped (200, LRU by `dismissedAt`)** — the only manual
+  cleanup was "restore"; the on-disk list could grow unbounded.
+- **`scan:upgrade` bucket that escalates to red now replaces the stale blue message.**
+- **Telemetry-config baseline survives transient unreadable polls** — the "delete-then
+  swap" two-phase rewrite can no longer reset the baseline with zero signal.
+
+### Tests
+
+New `test/review-0.3.9-fixes.test.ts` (11 cases) plus updated engine-version assertions
+across the suite: self-referential initializer isolation, cache-gate on budget exhaust,
+FIFO no-hang, >8 MB manifest cap, bin-entry enumeration + engine hit, backslash/traversal
+sensitive paths, native swap visibility, null-record store guards, contract host+path
+stripping. Full suite: **78 files, 1158 passed | 1 skipped**.
+
+## [0.3.8] - 2026-09-10
+
+### Added
+
+- **Native binary awareness — C4 (0.3.8, DSH 0.1.5 sync)**: the official family ships
+  platform binaries for the first time (`@deepseek-ai/node-addon-system-linux-x64` with
+  `.node` addons), while precompiled native code is completely invisible to the JS rule
+  surface — a third-party plugin smuggling `.node` blobs is a classic malicious technique.
+  `CapabilityManifest` gains **`hasNativeBinary`** + **`nativeBinaries`** (deduped basenames,
+  cap 10), computed from pure file-surface evidence: extension hits (`.node .dll .dylib .so
+  .exe .wasm .ocx .sys`) plus magic revalidation (ELF / PE (MZ + `PE\0\0` at e_lfanew) /
+  Mach-O thin+fat / wasm `\0asm`) that also catches compiled binaries renamed to `.js`
+  inside the scan surface. Hit files are recorded, never read/parsed (no OOM or corpus
+  contamination), and excluded from `sourceCount`. Host enumeration
+  (`package-sources.listSourceFiles`) now includes native-extension files — and its
+  previously case-sensitive extension matching is fixed (`.NODE`/`.SH` had once again slipped
+  past the host filter). Nutrition label gains a `📦 原生二进制` flag + file list, plugin
+  detail panel a seventh row, `vet_diff`/`scan_plugin` schema the new fields. Engine bumped
+  to **static-v21** (output-shape change; old caches invalidated). Upgrade-diff severity:
+  plain native addition stays blue `info` (official binary packages bump routinely — red
+  spam violates the 0.3.6 aggregation doctrine), but native + (network | exec | sensitive
+  path) added in the same version is a **red** combo (unauditable payload + delivery or
+  execution leg). Legacy records (pre-0.3.8, field absent) surface native as
+  first-observation info on the next version change.
+
+## [0.3.7] - 2026-09-10
+
+### Fixed
+
+- **Local file entries (`file:` URL / `link:` / bare paths) no longer raise a bogus
+  `audit-required:file:` yellow (0.3.7, DSH 0.1.5-rc.1 sync)**: the cordis 4.x loader
+  normalizes profile inserts and local plugin entries to `file:///…` URLs (or keeps
+  `link:/…` / bare-path forms). Feeding those to `extractPackageName` sliced them into the
+  meaningless pseudo-package `file:` — never official-classifiable, never archive-matchable,
+  so `requireAudit` produced a permanent, unactionable yellow every boot (the message even
+  instructed agents to audit a package name that cannot exist). New `classifyLocalEntry`
+  short-circuits package-name semantics for such entries: vet's own `link:` mount is fully
+  exempt; other local entries record as one aggregated blue `info` observation row
+  (`mergeKey: scan:local-entry`, full path in the message) that never touches `alarmCount`
+  or shield level.
+
+### Changed
+
+- **Official catalog seed regenerated against the DSH 0.1.5-rc.1 installed family
+  (261 → 278 names)**: the `@deepseek-ai/cordis` fork family now nests inside the installed
+  `@deepseek-ai/dsh` tree (the `@jieai` global scope is gone); 19 new official names joined —
+  session-format migration chain (`dsh-session-format`, `-catalog`, `-v0-to-v1/v1-to-v2/
+  v2-to-v3`), `dsh-api-workspace-files`, `dsh-tool-present`, `dsh-http-proxy`,
+  `dsh-chunked-list`, client-UI sidebar/upload splits, `@deepseek-ai/node-addon-system`
+  (+`-linux-x64`, first platform-binary official packages); two pre-modularization
+  `node-addon-landlock-run*` names dropped (renamed to `node-addon-system*`). This clears the
+  stale post-upgrade `official-not-in-catalog` yellows on legit new packages while keeping
+  genuine unknown `@deepseek-ai/*` names (typosquat defense) yellow.
+
 ## [0.3.6] - 2026-09-03
 
 ### Changed
