@@ -3,6 +3,46 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.3.10] - 2026-09-11
+
+R13 (network-exfil) false-positive governance, based on an upstream bug report backed by a
+registry-wide scan (14,672 vet records, 64 R13 hits over 35 plugins, zero actionable hits;
+5 source-verified deny-list/SSRF-guard cases). Every claim was reproduced locally before
+fixing. Engine version bumped `static-v22 → static-v23` — all stale scanner caches are
+invalidated.
+
+### Fixed — R13 `network-exfil` false positives (signal inversion)
+
+Previously R13 flagged a substring match anywhere inside a string literal as
+`high/likely` — the very literals security-conscious plugins use to *block* these
+endpoints (deny lists, SSRF guards, CIDR tables), plus prose/labels/docstrings that
+merely mention them. A purely defensive plugin (deny-list + docs) scored 4 / `suspicious`.
+Now:
+
+- **Endpoint shape required** — the whole literal must look like a host/IP/URL
+  (template literals: any static segment counts). Prose, labels, docstrings and rule
+  descriptions no longer produce findings at all.
+- **Tor labels validated** — only real labels (`[a-z2-7]{16}` v2 / `[a-z2-7]{56}` v3) +
+  `.onion` match; `action.onion`, bare `.onion`, and prose mentions no longer hit.
+- **Deny-list / guard context downgraded to `info`** (capability-surface observation,
+  verdict no longer upgraded): equality-comparison operands (`host === "metadata…"`),
+  `new Set([…])` bindings consumed by `.has()`/`.includes()`/`.indexOf()`, `Object.freeze([…])`
+  tables, and containers whose binding name carries guard semantics
+  (`DENY/BLOCK/REFUSE/FORBID/GUARD/PRIVATE/RESERVED/INTERNAL/METADATA/SSRF`). Target lists
+  (e.g. `Set` + `for..of` + `fetch`, no membership consumer) stay `high` — no false-negative
+  regression.
+- **Test/CI files downgraded to `info`** (same policy as R3's directory downgrade).
+- **Redacted placeholders** (`[REDACTED]`, `***`, `xxxx`) downgraded to `info`.
+
+True-positive channels (webhook URLs, cloud-metadata endpoints, valid onion addresses in
+non-guard/test context) remain `high/likely`, verified by control fixtures.
+
+### Tests
+
+- `test/r13-r14.test.ts`: +9 regression cases covering every mitigation plus the
+  no-false-negative controls (target-list `Set`, template URL with interpolation gap, N2
+  base64 decode) — 78 test files, 1168 passed | 1 skipped.
+
 ## [0.3.9] - 2026-09-11
 
 Comprehensive review-fix release: every true positive found in the full deep review
