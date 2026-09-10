@@ -21,6 +21,21 @@ import { capabilityDiff } from '../lib/guard/capability-diff.js'
 
 const YELLOW = (id: string) => ({ id, severity: 'yellow' as const, source: 't2' as const, kind: 'k', message: id, at: Date.now() })
 
+/** 符号链接能力探针：Windows 无开发者模式/非管理员时 symlinkSync 抛 EPERM——
+ * 该环境无法物化「预置 symlink」场景，跳过对应用例（CI 特权 runner 与 POSIX 照常执行）。
+ * 不用 skipIf(win32)：Windows CI 具备符号链接能力时不应丢覆盖。 */
+const canSymlink = ((): boolean => {
+  const d = mkdtempSync(join(tmpdir(), 'vet-symprobe-'))
+  try {
+    symlinkSync(join(d, 'a'), join(d, 'b'))
+    return true
+  } catch {
+    return false
+  } finally {
+    rmSync(d, { recursive: true, force: true })
+  }
+})()
+
 describe('SA2-2：spawn 相对敏感裸 token（破坏头 rm/shred/…；cp/mv 排除）', () => {
   it('spawn("rm", ["-rf", ".ssh"]) → spawn 报警（裸相对敏感名此前漏报）', () => {
     const alarm = classifyOp({ module: 'child_process', op: 'spawn', args: ['rm', ['-rf', '.ssh']] }, DEFAULT_HOOK_CONFIG)
@@ -154,7 +169,7 @@ describe('SEC-4：scan-summaries records 键劫持防护', () => {
 })
 
 describe('SEC-5：writeTmpExclusive 排他落盘（预置符号链接不跟随）', () => {
-  it('预置 symlink 指向 victim：写入不穿链接，victim 内容不变，tmp 为全新普通文件', () => {
+  it.skipIf(!canSymlink)('预置 symlink 指向 victim：写入不穿链接，victim 内容不变，tmp 为全新普通文件', () => {
     const dir = mkdtempSync(join(tmpdir(), '.wx-sec5-'))
     try {
       const victim = join(dir, 'victim')

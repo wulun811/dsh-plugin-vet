@@ -487,7 +487,7 @@ function baseDir(): string {
   return join(import.meta.dirname, '..')
 }
 
-describe('round-22：engine 回归（static-v20）', () => {
+describe('round-22：engine 回归（static-v20→v21）', () => {
   it('require() 无实参不再整扫描崩溃（此前 capability 提取 TypeError → ok:false 且多文件全丢）', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-r22a-'))
     try {

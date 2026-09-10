@@ -5,6 +5,20 @@ import { tmpdir } from 'node:os'
 import { hashScanFiles, pinStateFor, type SelfPins } from '../lib/report/self-pin.js'
 import { listShippedFiles } from '../lib/report/self-scope.js'
 
+/** 符号链接能力探针：Windows 无开发者模式/非管理员时 symlinkSync 抛 EPERM——
+ * 该环境无法物化符号链接场景，跳过对应用例（CI 特权 runner 与 POSIX 照常执行）。 */
+const canSymlink = ((): boolean => {
+  const d = mkdtempSync(join(tmpdir(), 'vet-symprobe-'))
+  try {
+    symlinkSync(join(d, 'a'), join(d, 'b'))
+    return true
+  } catch {
+    return false
+  } finally {
+    rmSync(d, { recursive: true, force: true })
+  }
+})()
+
 function tmpTree(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'vet-pin-'))
   for (const [rel, content] of Object.entries(files)) {
@@ -111,7 +125,7 @@ describe('listShippedFiles（round-16：发布物范围，生产安装可 pinned
       rmSync(dir, { recursive: true, force: true })
     }
   })
-  it('符号链接不进面（与 listSourceFiles walk 纪律一致）', () => {
+  it.skipIf(!canSymlink)('符号链接不进面（与 listSourceFiles walk 纪律一致）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-pin-link-'))
     const target = tmpTree({ 'evil.js': 'x' })
     try {

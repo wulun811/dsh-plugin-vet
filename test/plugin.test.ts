@@ -9,7 +9,7 @@ import { apply } from '../lib/index.js'
 import { scan } from '../lib/scanner-bin/engine.js'
 import { buildRequest, createScanPluginTool, detectTargetKind } from '../lib/tools/scan-plugin.js'
 import { installToolExecuteGuard } from '../lib/guards/tool-execute.js'
-import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
+import { installInternalPluginGuard, classifyLocalEntry } from '../lib/guards/internal-plugin.js'
 import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
 import { resolvePackageRoot } from '../lib/scanner/package-sources.js'
 import { VetConfigSchema } from '../lib/config.js'
@@ -545,6 +545,67 @@ describe('internal/plugin guard', () => {
       rmSync(profile, { recursive: true, force: true })
       rmSync(bdir, { recursive: true, force: true })
     }
+  })
+
+  // 0.3.7（DSH 0.1.5-rc.1 同步）：cordis 4.x loader 把 profile insert/本地插件条目规范成
+  // `file:///…` URL（或保持 `link:/…`/裸路径形态）。此前 extractPackageName 把这类名字切成
+  // `file:` 伪包名，requireAudit 下产出无法处置的永久黄牌 `audit-required:file:`。
+  it('0.3.7：file: URL 条目不再产 audit-required，降为聚合蓝色观察', () => {
+    const bdir = mkdtempSync(join(tmpdir(), 'vet-bl4-'))
+    setArchiveDirForTest(join(bdir, 'audits'))
+    setSummariesDirForTest(join(bdir, 'summaries'))
+    setCapabilitiesDirForTest(join(bdir, 'caps'))
+    try {
+      const ctx = new FakeCtx()
+      const status = new VetStatus()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'report', requireAudit: true }), status)
+      const h = ctx.handlers.get('internal/plugin')![0]
+      const f1 = fiber({ entry: { options: { name: 'file:///home/u/.dsh/profiles/web/lan-uuid-polyfill.mjs' } } })
+      expect(() => h(f1)).not.toThrow()
+      expect(ctx.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
+      const snap = status.snapshot()
+      const rows = snap.alarms.filter(a => a.kind === 'local-entry')
+      expect(rows).toHaveLength(1)
+      expect(rows[0].severity).toBe('info')
+      expect(rows[0].message).toContain('/home/u/.dsh/profiles/web/lan-uuid-polyfill.mjs')
+      expect(snap.alarms.map(a => a.kind)).not.toContain('audit-required')
+      // 蓝行不参与警报计价：level 不因本地条目抬升
+      expect(snap.alarmCount).toBe(0)
+      // 第二个不同本地条目 → mergeKey 聚合成一行 ×2，仍无黄
+      h(fiber({ entry: { options: { name: 'file:/home/u/.dsh/profiles/web/another.mjs' } } }))
+      const snap2 = status.snapshot()
+      const rows2 = snap2.alarms.filter(a => a.kind === 'local-entry')
+      expect(rows2).toHaveLength(1)
+      expect(rows2[0].count).toBe(2)
+      expect(snap2.alarmCount).toBe(0)
+    } finally {
+      setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+      setSummariesDirForTest(undefined)
+      setCapabilitiesDirForTest(undefined)
+      rmSync(bdir, { recursive: true, force: true })
+    }
+  })
+
+  it('0.3.7：vet 本体 link: 豁免；裸路径计观察；classifyLocalEntry 不误伤包名', () => {
+    const vetRoot = realpathSync(join(import.meta.dirname, '..'))
+    const ctx = new FakeCtx()
+    const status = new VetStatus()
+    installInternalPluginGuard(ctx as never, cfg({ mode: 'report', requireAudit: true }), status)
+    const h = ctx.handlers.get('internal/plugin')![0]
+    h(fiber({ entry: { options: { name: 'link:' + vetRoot } } }))
+    expect(status.snapshot().alarms).toHaveLength(0)
+    // 裸绝对/相对路径同样按本地条目处理，不再落到伪包名黄牌路径
+    h(fiber({ entry: { options: { name: '/home/u/plugins/mystery.js' } } }))
+    const snap = status.snapshot()
+    expect(snap.alarms.map(a => a.kind)).toContain('local-entry')
+    expect(snap.alarms.map(a => a.kind)).not.toContain('audit-required')
+    // helper 单测：正常包名与带子路径包名不误伤；file: URL 解出真实路径
+    expect(classifyLocalEntry('@deepseek-ai/dsh-web-app')).toBeNull()
+    expect(classifyLocalEntry('@deepseek-ai/dsh-tool-subagent-control/list-agents')).toBeNull()
+    expect(classifyLocalEntry('some-plain-package')).toBeNull()
+    expect(classifyLocalEntry('file:///a/b%20c.mjs')).toBe('/a/b c.mjs')
+    expect(classifyLocalEntry('file:/a/b.mjs')).toBe('/a/b.mjs')
+    expect(classifyLocalEntry('link:/x/y')).toBe('/x/y')
   })
 })
 
