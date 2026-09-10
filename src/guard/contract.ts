@@ -494,6 +494,11 @@ export function checkAlarmInContract(
   if (field === 'network') {
     let host = target.trim()
     let port: number | undefined
+    // 0.3.9（审查修复）：先剥路径——运行时报警的 target 是 `hostname+path`（runtime-net.ts
+    // net-egress 拼 hostname + target.path），此前整串进 HOSTNAME_RE 判定：含 '/' 直接判
+    // 非法 → 契约内主机误记「越界」（M1 对账数据污染，实测 within:false）。
+    const slash = host.indexOf('/')
+    if (slash !== -1) host = host.slice(0, slash)
     // 末尾「:数字」拆成 port（IPv6 括号形态先剥 []；从最后一个冒号切开，避开无端口主机名）
     const colon = host.lastIndexOf(':')
     const afterColon = host.slice(colon + 1)

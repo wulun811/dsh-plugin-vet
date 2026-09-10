@@ -133,8 +133,13 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
     // P1-7：跳过首参（路径本身以 r/w/a 开头会误当 flags，如 open('auth.txt','r')）——
     // flags 认 Node 短合法形态：r/w/a/x（x=排他新建）、可带 s（同步）/x/+（rwx/as/ax/wx 等 2-3 字符），
     // 长度 ≤3；wx+/ax+/as+/rs+ 等复合也要进入写意图判定（旧正则 ^[rwax]\+?$ 漏复合 → 按读报，盲点）。只认首参之后。
+    // 0.3.9（审查修复）：同补对象形态 { flag: 'w' }（fs.open(path, { flag }, cb)）。
     if ((name === 'open' || name === 'openSync') && READ_OPS.has(name)) {
-      const flags = args.slice(1).find((a): a is string => typeof a === 'string' && /^(?:[rwax]|[rwa][sx]|[rwa][+]|[rwa][sx][+])$/.test(a))
+      const flagArg = args.slice(1).find((a): a is string => typeof a === 'string' && /^(?:[rwax]|[rwa][sx]|[rwa][+]|[rwa][sx][+])$/.test(a))
+      const objFlag = args.slice(1)
+        .filter((a): a is { flag?: unknown } => typeof a === 'object' && a !== null && typeof (a as { flag?: unknown }).flag === 'string')
+        .map(a => a.flag as string)[0]
+      const flags = flagArg ?? (objFlag !== undefined && /^(?:[rwax]|[rwa][sx]|[rwa][+]|[rwa][sx][+])$/.test(objFlag) ? objFlag : undefined)
       if (flags !== undefined && /[wax+]/.test(flags) && isSensitivePath(target, cfg, 'mutate')) {
         return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入（open flags=${flags}）：${target.slice(0, 120)}`, target }
       }

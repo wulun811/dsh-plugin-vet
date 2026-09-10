@@ -34,6 +34,8 @@ function renderLabel(value: CapabilityLabel): string {
   const flags: string[] = []
   if (m.hasNetwork) flags.push('网络')
   if (m.hasExec) flags.push('执行')
+  // C4（0.3.8）：原生二进制——预编译产物对 JS 规则面不可审，营养标签必须显影。
+  if (m.hasNativeBinary === true) flags.push('📦 原生二进制')
   if (m.esmNamedBuiltins === true) flags.push('⚠️ ESM 具名导入盲区')
   lines.push('  能力: ' + (flags.length > 0 ? flags.join(' / ') : '（无网络/执行声明）'))
 
@@ -59,7 +61,13 @@ function renderLabel(value: CapabilityLabel): string {
     lines.push('  ⚠️ 僵尸依赖（package.json 声明但 node_modules 缺失，运行到即失败）:')
     for (const d of m.zombieDeps) lines.push('    · ' + d)
   }
-  if (hosts.length === 0 && fsPaths.length === 0 && spawnCmds.length === 0 && imports.length === 0) {
+  // C4（0.3.8）：原生二进制清单（残缺记录健壮化——与 ghostDeps 同族纪律）
+  const natives = Array.isArray(m.nativeBinaries) ? m.nativeBinaries : []
+  if (natives.length > 0) {
+    lines.push('  📦 原生二进制（预编译，JS 规则面不可审；来源存疑请重新审计）:')
+    for (const n of natives) lines.push('    · ' + n)
+  }
+  if (hosts.length === 0 && fsPaths.length === 0 && spawnCmds.length === 0 && imports.length === 0 && natives.length === 0) {
     lines.push('  （无静态敏感足迹）')
   }
   // 三轮审查修复（DSH.SO 反馈 bug）：execute 对 null 字段整键省略，JSON 往返后这里是 undefined

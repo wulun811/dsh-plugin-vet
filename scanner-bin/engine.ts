@@ -37,10 +37,15 @@ const PRE_FILE_SIZE_LIMIT = 8 * 1024 * 1024
 /** Extension of a path (without dot, lowercased), or undefined when none.
  * round-16：统一小写——`.SH`/`.CMD`/`.MD` 等大小写变体此前绕过 R14/R18 与源码面
  * （大小写不敏感文件系统/显式 `bash Setup.SH` 是真实形态；isInstructionFile 等内部
- * 判定早已按大小写不敏感写）。 */
+ * 判定早已按大小写不敏感写）。
+ * 0.3.9（审查修复）：只看 **basename**——此前对整条路径 lastIndexOf('.')，路径里带点的
+ * 目录段（DSH 安装树 ~/.dsh/… 必带）会把无扩展名文件算成伪扩展名（`dsh/profiles/…/cli`），
+ * 481 行据此提前 continue → round-16 的无扩展名 bin 入口判定在真实安装路径下等于死代码。 */
 function extOf(file: string): string | undefined {
-  const dot = file.lastIndexOf('.')
-  return dot === -1 ? undefined : file.slice(dot + 1).toLowerCase()
+  const base = basename(file)
+  const dot = base.lastIndexOf('.')
+  if (dot <= 0) return undefined
+  return base.slice(dot + 1).toLowerCase()
 }
 
 /** 无扩展名文件是否按 JS 解析（round-16）：package.json bin/scripts 引用的入口，或
@@ -48,6 +53,10 @@ function extOf(file: string): string | undefined {
 function isExtensionlessJs(file: string, referenced: Set<string> | undefined): boolean {
   if (referenced !== undefined && referenced.has(basename(file))) return true
   try {
+    // 0.3.9（审查修复）：stat 前置守卫——与 sniffNativeBinary 同款纪律。此前直接
+    // openSync('r')，无扩展名 FIFO 会让同步循环永久阻塞（deadline/宿主 timeoutMs 都
+    // 无法抢占，只能 SIGKILL）；D3 回归测试只覆盖了 x.sh 这类走 R14（有守卫）的形态。
+    if (!statSync(file).isFile()) return false
     const fd = openSync(file, 'r')
     try {
       const buf = Buffer.alloc(512)
@@ -71,6 +80,67 @@ function readOrDefault(file: string): string {
     return readFileSync(file, 'utf8')
   } catch {
     return ''
+  }
+}
+
+/** 限量整读（0.3.9 审查修复）：超限/非常规文件一律返回 ''。
+ * 循环**外**的 package.json 读取（packageShape/buildDepsInfo/checkOsv）此前走 readOrDefault
+ * ——多 GB 假 manifest 会被整个读进内存（实测 120MB → +147MB RSS），绕开 round-15 在扫描
+ * 循环内加的 8MB 预检（那份注释正是为「超大 package.json」写的）。 */
+function readCapped(file: string, limit = PRE_FILE_SIZE_LIMIT): string {
+  try {
+    const st = statSync(file)
+    if (!st.isFile() || st.size > limit) return ''
+    return readFileSync(file, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+// ── C4（0.3.8，DSH 0.1.5 同步）：原生二进制感知 ──────────────────────────────
+// 官方首发平台二进制包（@deepseek-ai/node-addon-system-linux-x64 携带 .node）；预编译二进制
+// 对 JS 规则面完全不可见（AST/文本规则都扫不到 native 代码），第三方插件夹带 .node 是经典
+// 恶意载荷手法。判定纪律：纯文件面证据——扩展名命中或 ELF/PE/Mach-O/wasm 魔数命中（后者顺带
+// 覆盖把编译产物伪装成 .js/.yml 等入面名的形态）；命中文件只计数不读取解析（防二进制内容
+// 进语料/OOM），不入 sourceCount。与宿主侧 package-sources.ts 的 NATIVE_BINARY_EXT 同步——
+// 跨构建根目录无法单源共享，改动需两边同改（SOURCE_EXT/CONFIG_EXT 同款纪律）。
+const NATIVE_BINARY_EXT = new Set(['node', 'dll', 'dylib', 'so', 'exe', 'wasm', 'ocx', 'sys'])
+
+/** 魔数复核：只读头部（64B + PE 头一跳）。必须先 stat 挡非常规文件——
+ * 对 FIFO 调 openSync('r') 会无界阻塞（scanner-fixes D3 场景：包目录里有 mkfifo），
+ * 设备/socket 同理；读失败按非原生处理。 */
+function sniffNativeBinary(file: string): boolean {
+  let fd: number | undefined
+  try {
+    if (!statSync(file).isFile()) return false
+    fd = openSync(file, 'r')
+    const head = Buffer.alloc(64)
+    const n = readSync(fd, head, 0, 64, 0)
+    if (n < 4) return false
+    // ELF：7f 'ELF'
+    if (head[0] === 0x7f && head[1] === 0x45 && head[2] === 0x4c && head[3] === 0x46) return true
+    // wasm：00 'asm'
+    if (head[0] === 0x00 && head[1] === 0x61 && head[2] === 0x73 && head[3] === 0x6d) return true
+    // Mach-O thin/fat（含字节序反相；0xcafebabe 兼收 Java class——npm 语境同为编译二进制）
+    const u32 = head.readUInt32BE(0)
+    if (u32 === 0xfeedface || u32 === 0xfeedfacf || u32 === 0xcefaedfe || u32 === 0xcffaedfe
+      || u32 === 0xcafebabe || u32 === 0xbebafeca) return true
+    // PE：'MZ' + e_lfanew(0x3c) 指向 'PE\0\0'（文本文件恰好以 MZ 开头的形态被偏移复核排除）
+    if (head[0] === 0x4d && head[1] === 0x5a && n >= 64) {
+      const peOff = head.readUInt32LE(0x3c)
+      if (peOff > 0 && peOff < 4096) {
+        const sig = Buffer.alloc(4)
+        const m = readSync(fd, sig, 0, 4, peOff)
+        if (m === 4 && sig[0] === 0x50 && sig[1] === 0x45 && sig[2] === 0 && sig[3] === 0) return true
+      }
+    }
+    return false
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch { /* 已失效 */ }
+    }
   }
 }
 
@@ -147,7 +217,7 @@ export function buildDepsInfo(files: string[] | undefined): DepsInfo | null {
   if (pkgFile === undefined) return null
   let pkg: Record<string, unknown>
   try {
-    pkg = JSON.parse(readOrDefault(pkgFile)) as Record<string, unknown>
+    pkg = JSON.parse(readCapped(pkgFile)) as Record<string, unknown>
   } catch {
     return null
   }
@@ -252,6 +322,20 @@ function skipFinding(file: string): Finding {
   }
 }
 
+/** 0.3.9（审查修复）：单文件处理异常（解析/规则/能力提取抛错）的 info 元 finding。
+ * 关键差别在**不丢整包**：此前这种异常让 scan() 返回 ok:false，同包其它文件的 critical
+ * 命中一并丢失；现在只标记该文件“未完成静态审”，其余文件照常出结论。 */
+function ruleErrorFinding(file: string): Finding {
+  return {
+    rule: 'R8',
+    severity: 'info',
+    confidence: 'heuristic',
+    message: '文件处理异常跳过（R8-rule-error）——该文件未完成静态审，其余文件不受影响',
+    evidence: '',
+    file: basename(file),
+  }
+}
+
 /** 大文件预检（round-12 供 R17/R18 分支复用）：整读前先 stat，超限即 R8-skip（不整读、不 OOM）。
  * round-16 review（D3）：非常规文件（fifo/设备/socket）一律视为超限跳过——/dev/zero 等
  * 无限流 readFileSync 无 EOF 会打爆扫描子进程内存、fifo 会挂死到宿主超时（size 恒 0 骗过
@@ -304,7 +388,7 @@ function scanFiles(request: ScanRequest): ScanResponse {
   const runtime = request.runtime ?? 'host'
   // round-7：package.json 内容参与缓存 hash（bin 形态变化 → 缓存自然失效），无需额外 context
   const pkgJson = request.files.find(f => basename(f) === 'package.json')
-  const shape = pkgJson === undefined ? undefined : packageShape(readOrDefault(pkgJson))
+  const shape = pkgJson === undefined ? undefined : packageShape(readCapped(pkgJson))
   // P0-2 #9（R16）：依赖健康上下文（幽灵/僵尸对账 + 缓存指纹）
   const depsInfo = buildDepsInfo(request.files)
   // R8-skip 先于缓存散列：超过 PRE_FILE_SIZE_LIMIT 的文件不会进入扫描循环（stat 先行跳过），
@@ -341,12 +425,17 @@ function scanFiles(request: ScanRequest): ScanResponse {
 
   const findings: Finding[] = []
   const manifests: CapabilityManifest[] = []
+  /** C4（0.3.8）：命中的原生二进制文件（basename，去重）。 */
+  const nativeBinaries: string[] = []
   let sourceCount = 0
+  /** 0.3.9（审查修复）：本轮是否因预算耗尽提前 break——决定能不能写缓存（见下方 writeCached）。 */
+  let budgetExceeded = false
   const deadline = Date.now() + budgetMs(request.files.length, request.timeoutMs)
   for (let i = 0; i < request.files.length; i++) {
     const file = request.files[i]
     if (i > 0 && Date.now() > deadline) {
       findings.push(skipFinding(file))
+      budgetExceeded = true
       break
     }
     // R10/R12: package.json manifests are JSON, not source; scan them directly.
@@ -373,6 +462,14 @@ function scanFiles(request: ScanRequest): ScanResponse {
       continue
     }
     const ext = extOf(file)
+    // C4（0.3.8）：原生二进制取证——扩展名命中（.node/.so/.dll/.dylib/.exe/.wasm/.ocx/.sys）
+    // 或魔数命中（编译产物伪装成 .js/.yml 等入面名的形态）。只记名不读取解析（二进制内容进
+    // AST/语料无意义且有 OOM 面），不入 sourceCount、不产 finding（纯能力面，见 protocol 注记）。
+    if ((ext !== undefined && NATIVE_BINARY_EXT.has(ext)) || sniffNativeBinary(file)) {
+      const nb = basename(file)
+      if (!nativeBinaries.includes(nb)) nativeBinaries.push(nb)
+      continue
+    }
     // R14: non-JS script files (shell/PowerShell/batch) get a deterministic
     // text scan for download-and-exec primitives — the AST rules do not see them.
     // （round-16：extOf 已统一小写，Setup.SH/evil.CMD 同样命中）
@@ -439,27 +536,42 @@ function scanFiles(request: ScanRequest): ScanResponse {
     } catch {
       // stat 失败（文件消失/不可读）：走 readOrDefault 的空串兜底
     }
-    const code = readOrDefault(file)
-    if (code === '') continue
-    const language = ext === 'ts' ? 'ts' : 'js'
-    const sf = parseSource(code, basename(file), language)
-    // N2：解码预处理（每文件独立采集，结果并入 R13/R7/R11 语料）
-    const decodedLiterals = collectDecodedLiterals(sf, basename(file))
-    const fileFindings = executeRules(sf, {
-      request,
-      runtime,
-      cliFiles: shape?.cliFiles,
-      appShape: shape?.appShape,
-      filePath: file,
-      decodedLiterals,
-    })
-    for (const f of fileFindings) {
-      if (f.file === undefined) f.file = basename(file)
-      findings.push(f)
+    // 0.3.9（审查修复）：单文件处理全程容错——解析/解码/规则/能力提取任一抛错（环状初始化器
+    // 的 RangeError、超深嵌套把 TS parser 栈打爆等）此前一路冒到 scan() 顶层 → 整包 ok:false，
+    // 同包其它文件的 critical 命中一并丢失（deny 模式 fail-closed 误拦 / report 模式 scan-fail）。
+    // 与 R8-skip 同族：当前文件记一条 info 元 finding，继续扫下一个。
+    try {
+      const code = readOrDefault(file)
+      if (code === '') continue
+      const language = ext === 'ts' ? 'ts' : 'js'
+      const sf = parseSource(code, basename(file), language)
+      // N2：解码预处理（每文件独立采集，结果并入 R13/R7/R11 语料）
+      const decodedLiterals = collectDecodedLiterals(sf, basename(file))
+      const fileFindings = executeRules(sf, {
+        request,
+        runtime,
+        cliFiles: shape?.cliFiles,
+        appShape: shape?.appShape,
+        filePath: file,
+        decodedLiterals,
+      })
+      for (const f of fileFindings) {
+        if (f.file === undefined) f.file = basename(file)
+        findings.push(f)
+      }
+      // N1：每文件能力提取 → 聚合（files 模式才有插件身份；code 模式不产出）
+      manifests.push(extractCapabilities(sf))
+      sourceCount++
+    } catch {
+      findings.push(ruleErrorFinding(file))
     }
-    // N1：每文件能力提取 → 聚合（files 模式才有插件身份；code 模式不产出）
-    manifests.push(extractCapabilities(sf))
-    sourceCount++
+  }
+  // C4（0.3.8）：原生二进制证据以合成 manifest 并入同一聚合路（唯一出口，不另开形状分支）。
+  if (nativeBinaries.length > 0) {
+    manifests.push({
+      hosts: [], fsPaths: [], spawnCmds: [], imports: [],
+      hasNetwork: false, hasExec: false, hasNativeBinary: true, nativeBinaries,
+    })
   }
   const capabilities = aggregateCapabilities(manifests)
   // P0-2 #9（R16）：幽灵/僵尸依赖三方对账——写入能力清单 + info 观测（files 模式 + 有 package.json 才生效；
@@ -483,7 +595,11 @@ function scanFiles(request: ScanRequest): ScanResponse {
     findings.push(...depsFindings(ghost, zombie))
   }
   const report = buildReport(request, findings, sourceCount, capabilities)
-  writeCached(key, report, cacheDir, request.cacheNonce ?? '')
+  // 0.3.9（审查修复）：预算耗尽的部分结果**不写缓存**——此前无条件 writeCached，首轮在
+  // deadline 下跳过的尾部文件（payload 常被故意放到枚举末尾）会把假 clean 永久固化：
+  // 缓存键不含预算/超时维度，之后预算充裕的重扫也命中该条目（实测：首轮 clean+R8，
+  // 无限预算复扫 14ms 返回同一份 clean，新缓存目录才现形 suspicious）——静默漏判通道。
+  if (!budgetExceeded) writeCached(key, report, cacheDir, request.cacheNonce ?? '')
   return { ok: true, report }
 }
 
@@ -572,7 +688,7 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promi
   if (pkgFile === undefined) return []
   let pkg: Record<string, unknown>
   try {
-    pkg = JSON.parse(readOrDefault(pkgFile)) as Record<string, unknown>
+    pkg = JSON.parse(readCapped(pkgFile)) as Record<string, unknown>
   } catch {
     return []
   }

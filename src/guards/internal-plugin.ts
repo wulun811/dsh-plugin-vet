@@ -12,7 +12,7 @@ import { incrementScanned, incrementBlocked } from '../guard/stats.js'
 import { hasAuditRecord, auditRequiredMessage, setArchiveIoWarn } from '../audit/archive.js'
 import { withVetSelfIo, markOfficialTrusted } from '../guard/runtime-hooks.js'
 import { capabilityDiff } from '../guard/capability-diff.js'
-import { recordScan as recordVersionScan, consumeCapabilitiesTamper } from '../guard/version-diff.js'
+import { recordScan as recordVersionScan, isEmptyManifest, consumeCapabilitiesTamper } from '../guard/version-diff.js'
 import { recordScanSummary } from '../guard/scan-summaries.js'
 import { isKnownBoundary, markKnownBoundary } from '../guard/known-boundaries.js'
 import type { VetStatus } from '../guard/status.js'
@@ -85,6 +85,7 @@ function readInstalledVersion(root: string): string | undefined {
  * - '@deepseek-ai/dsh-tool-subagent-control/list-agents' → '@deepseek-ai/dsh-tool-subagent-control'
  * - '@deepseek-ai/dsh-web-app' → '@deepseek-ai/dsh-web-app'
  * - '/path/to/file.mjs' → 原样返回（本地文件路径）
+ * 0.3.7 注：`file:`/`link:`/路径形态条目在进入本函数前已由 classifyLocalEntry 分流，不再走包名语义。
  */
 function extractPackageName(packageName: string): string {
   // @scope/name/subpath 格式
@@ -105,6 +106,28 @@ function extractPackageName(packageName: string): string {
     return packageName.split('/')[0]
   }
   return packageName
+}
+
+/**
+ * 0.3.7（DSH 0.1.5-rc.1 同步）：识别「本地文件条目」——非 npm 包名的 entry.options.name。
+ * cordis 4.x loader 会把 profile 自置的 insert（绝对路径）规范成 `file:///…` URL；`link:` spec
+ * （开发态安装，如 vet 本体 link:/path/plugin-vet）保持 `link:/path` 形态。此前这类名字被
+ * extractPackageName 按 `/` 切段成无意义的 `file:`——官方分类必不命中、审计档案名永远无法匹配，
+ * requireAudit 下变成**永久伪黄牌**（文案还指挥 agent 去审一个不存在名字的包）。
+ * 命中返回解析后的路径，非本地条目返回 null。
+ */
+export function classifyLocalEntry(rawName: string): string | null {
+  const scheme = /^(file|link):(.*)$/i.exec(rawName)
+  if (scheme !== null) {
+    let p = scheme[2]
+    // file:///home/x → /home/x；file://host/x（localhost 语境）→ /x
+    if (p.startsWith('///')) p = p.slice(2)
+    else if (p.startsWith('//')) p = p.slice(1)
+    try { p = decodeURIComponent(p) } catch { /* 非法编码保留原样 */ }
+    return p === '' ? rawName : p
+  }
+  if (rawName.startsWith('/') || rawName.startsWith('./') || rawName.startsWith('../')) return rawName
+  return null
 }
 
 /** P-5 判定结果：官方包是否豁免；mismatch 携带上下文供 report 模式 registry 对账。
@@ -461,6 +484,36 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     if (fiber.uid === null) return
     const rawEntryName = vetFiber.entry?.options?.name
     if (typeof rawEntryName !== 'string') return
+    // 0.3.7（DSH 0.1.5 同步）：本地文件条目（file: URL / link: / 裸路径）不走包名语义——
+    // 官方分类与审计档案匹配对非包名恒不成立，此前产出永久伪黄牌 `audit-required:file:`。
+    // profile 自置文件是用户/本机 agent 落的层（非 npm 拉取攻击面），降为蓝色聚合观察行；
+    // 路径原样进消息，异常来源一眼可见。vet 本体 link: 挂载直接豁免。
+    const localPath = classifyLocalEntry(rawEntryName)
+    if (localPath !== null) {
+      if (!isVetSelfPath(localPath)) {
+        status?.record({
+          id: 'local-entry:' + localPath,
+          severity: 'info',
+          source: 'scan',
+          kind: 'local-entry',
+          mergeKey: 'scan:local-entry',
+          message: `DSH 本地文件条目 ${localPath}（profile 自置/link 挂载，非 npm 包名）——已列观察，不参与包名审计门槛`,
+          target: localPath,
+          pluginHint: localPath,
+          at: Date.now(),
+        })
+        // 0.3.9（审查修复）：deny 模式恢复 fail-closed——0.3.7 的早期 return 让本地文件条目
+        // 绕过了下方 root===undefined 的 deny 拦截（SA2-6「声称名与实际安装位置分离」正是
+        // 此类形态），deny 用户对自置文件条目的拦截语义被静默关停（0.3.6 及更早是拦截的）。
+        // vet 本体 link: 挂载已在上方 isVetSelfPath 豁免，不影响引导承载方。
+        if (config.mode === 'deny') {
+          incrementBlocked()
+          void fiber.dispose()
+          throw new Error(`vet: 本地文件条目 ${localPath} 非 npm 包名形态，deny 模式拒绝加载（fail-closed）——如为 vet 自身挂载会由 isVetSelfPath 自动豁免`)
+        }
+      }
+      return
+    }
     // rc.8 起部分插件 entryName 带子模块路径（如 @deepseek-ai/dsh-tool-subagent-control/list-agents），
     // 提取包名用于解析/豁免/档案匹配，保留原始名用于日志
     const entryName = extractPackageName(rawEntryName)
@@ -694,8 +747,13 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       // count（DSH 模块化升级一次升几十个官方包，逐包一行会刷满 20 槽缓冲）；status.ts 合并
       // 时 severity 取高（任一 red 组合 → 整行 red），普通新增 → info 蓝色，不参与盾牌
       // level/alarmCount。dismiss 同样按 mergeKey：一次忽略 = 整桶升级观察折叠。
-      const nav = recordVersionScan(entryName, installedVersion, res.report.capabilities)
-      if (nav.alarm !== null) {
+      // 0.3.9（审查修复）：退化扫描不写 N6 基线——sourceCount===0 且能力清单为空（文件存在
+      // 但全不可读/全超限/整包在解析前跳过）时，落盘空基线会让下一次正常扫描把既有能力
+      // 全部算「新增」→ 假 red 组合；跳过记录 = 下次正常扫描按冷启动处理（只记不差）。
+      // 真正「无源码」的官方二进制包（node-addon-*）清单带 hasNativeBinary → 不退化。
+      const degenerate = res.report.sourceCount === 0 && isEmptyManifest(res.report.capabilities)
+      const nav = degenerate ? null : recordVersionScan(entryName, installedVersion, res.report.capabilities)
+      if (nav !== null && nav.alarm !== null) {
         status?.record({
           id: 'upgrade-diff:' + entryName + ':' + (nav.from ?? 'cold') + ':' + nav.to,
           severity: nav.alarm.severity,

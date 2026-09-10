@@ -10,7 +10,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { readFileSync, writeFileSync, renameSync, rmSync, openSync, fsyncSync, closeSync } from 'node:fs'
+import { readFileSync, renameSync, rmSync, openSync, fsyncSync, closeSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -313,9 +313,14 @@ function atomicWritePatch(patchPath: string, content: string, previousContent: s
   validateYaml(content)
   const tmp = patchPath + '.tmp'
   const backup = patchPath + '.bak.latest'
+  // 0.3.9（审查修复，SEC-5 纪律）：备份改用「排他 tmp + rename」——此前 writeFileSync 固定名
+  // 且默认 'w' 跟随符号链接，同用户恶意进程可预植 `cordis.patch.yml.bak.latest → ~/.bashrc`
+  // 让 vet 以 patch 原文盲写穿链接毁掉目标；rename 覆盖的是符号链接本体（不是其目标），
+  // 与主文件写入同一原子惯例，且固定名仍保留（防 Date.now 碰撞/无限堆积）。
   try {
-    // 改动前快照（固定名，供人工回滚）
-    writeFileSync(backup, previousContent, { mode: 0o600 })
+    const backupTmp = backup + '.tmp.' + process.pid
+    writeTmpExclusive(backupTmp, previousContent, 0o600)
+    renameSync(backupTmp, backup)
   } catch {
     // 快照失败不阻断主写入
   }
@@ -782,13 +787,15 @@ function lastUpgradeDiffOf(alarms: ReturnType<VetStatus['snapshot']>['alarms']):
 }
 
 /** ManifestDelta → 展示串列表（hosts/fsPaths/spawn/imports/ghost 摘要，上限 6 条）。 */
-function describeAdded(delta: { hosts: string[]; fsPaths: string[]; spawnCmds: string[]; imports?: string[]; ghostDeps?: string[] }): string[] {
+function describeAdded(delta: { hosts: string[]; fsPaths: string[]; spawnCmds: string[]; imports?: string[]; ghostDeps?: string[]; nativeBinaries?: string[] }): string[] {
   const out: string[] = []
   if (delta.hosts.length > 0) out.push('网络主机 +' + delta.hosts.slice(0, 3).join('、') + (delta.hosts.length > 3 ? ` 等 ${delta.hosts.length} 个` : ''))
   if (delta.fsPaths.length > 0) out.push('文件访问 +' + delta.fsPaths.slice(0, 3).join('、') + (delta.fsPaths.length > 3 ? ` 等 ${delta.fsPaths.length} 个` : ''))
   if (delta.spawnCmds.length > 0) out.push('子进程 +' + delta.spawnCmds.slice(0, 2).join('、'))
   if ((delta.ghostDeps ?? []).length > 0) out.push('幽灵依赖 +' + (delta.ghostDeps ?? []).length + ' 个')
   if ((delta.imports ?? []).length > 0 && out.length < 4) out.push('导入 +' + (delta.imports ?? []).length + ' 项')
+  // 0.3.9：原生二进制换血也要在面板 diffSummary 可见（与 vet_diff 同口径；换血场景布尔不翻）
+  if ((delta.nativeBinaries ?? []).length > 0 && out.length < 4) out.push('原生二进制 +' + (delta.nativeBinaries ?? []).slice(0, 3).join('、'))
   return out.slice(0, 6)
 }
 

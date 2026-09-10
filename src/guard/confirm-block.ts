@@ -128,9 +128,20 @@ const PAIR_OVERWRITE_OPS = new Set(['cp', 'cpSync', 'copyFile', 'copyFileSync', 
 const DESTROY_OPS = new Set(['unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync', 'rename', 'renameSync'])
 /** round-16（SA2-5）：open 写标志合法形态（与 runtime-classify 同源：r/w/a/x、可带 s/+）。 */
 const OPEN_WRITE_FLAG_RE = /^(?:[rwax]|[rwa][sx]|[rwa][+]|[rwa][sx][+])$/
-/** open/openSync 实参中的写标志（只读标志 r/rs 等返回 undefined；SA2-5 与族 1 共用判定）。 */
-function openWriteFlagsOf(pathArgs: string[]): string | undefined {
-  return pathArgs.slice(1).find(f => OPEN_WRITE_FLAG_RE.test(f) && /[wax+]/.test(f))
+/** open/openSync 实参中的写标志（只读标志 r/rs 等返回 undefined；SA2-5 与族 1 共用判定）。
+ * 0.3.9（审查修复）：补**对象形态**——fs.open(path, { flag: 'w' }, cb) 的 flag 此前不在
+ * string 位置参数里，族 2「打开即截断」拦截与 runtime-classify 的 fs-write 分类双双漏掉该形态。 */
+function openWriteFlagsOf(rawArgs: unknown[]): string | undefined {
+  if (!Array.isArray(rawArgs)) return undefined
+  const hit = (f: unknown): f is string => typeof f === 'string' && OPEN_WRITE_FLAG_RE.test(f) && /[wax+]/.test(f)
+  for (const a of rawArgs.slice(1)) {
+    if (hit(a)) return a
+    if (typeof a === 'object' && a !== null && typeof (a as { flag?: unknown }).flag === 'string') {
+      const f = (a as { flag: string }).flag
+      if (hit(f)) return f
+    }
+  }
+  return undefined
 }
 
 /**
@@ -201,7 +212,7 @@ export class ConfirmBlockStore {
       // round-16（SA2-5）：open/openSync 写标志 = 打开即截断（writeFile 同语义，但走 fd 面：
       // open → write → close 链此前族 2 拦截面只覆盖 writeFile/truncate，fd 面凭据破坏漏拦）。
       if ((opName === 'open' || opName === 'openSync') && isCredentialFile(target) && safeExists(target)) {
-        const flags = openWriteFlagsOf(pathArgs)
+        const flags = openWriteFlagsOf(Array.isArray(args) ? args : [])
         if (flags !== undefined) {
           return { family: 2, reason: `凭据本体 ${target} 以写标志打开（${opName} ${flags}）——打开即截断，原文不可恢复` }
         }
@@ -212,7 +223,7 @@ export class ConfirmBlockStore {
       // runtime-patch 装配中不可达（blockRelevant 判定短路），已确认破坏插件的 fd 面写
       // 破坏同漏。
       if (this.f1Blocked.has(plugin)) {
-        const openFlags = (opName === 'open' || opName === 'openSync') ? openWriteFlagsOf(pathArgs) : undefined
+        const openFlags = (opName === 'open' || opName === 'openSync') ? openWriteFlagsOf(Array.isArray(args) ? args : []) : undefined
         if (BLOCK_FS_OPS.has(opName) || openFlags !== undefined) {
           return { family: 1, reason: `该插件（${plugin}）已被确认破坏/勒索行为，后续破坏类操作被拦截（${opName}${openFlags !== undefined ? ' ' + openFlags : ''}(${target.slice(0, 80)})）` }
         }

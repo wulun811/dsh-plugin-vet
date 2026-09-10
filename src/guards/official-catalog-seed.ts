@@ -1,8 +1,11 @@
 /**
- * 官方包目录种子（M1，0.3.6）：dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的
- * @deepseek-ai/* 全量包名。
+ * 官方包目录种子（M1，0.3.6 首建四源；0.3.7 随 DSH 0.1.5-rc.1 模块化家族重生成）：
+ * dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的 @deepseek-ai/* 全量包名。
  * 生成方式：node scripts/gen-official-catalog-seed.mjs
  *        （dsh-src 更新或本机 DSH 升级后重跑；收集源：dsh-src/packages、dsh-src/apps、dsh-src/vendor、live:/home/chen/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai）。
+ * 0.1.5 家族注记：@deepseek-ai/cordis fork 已 npm 化并嵌套进 dsh 的 node_modules（@jieai scope
+ * 消失）；新增 session-format 迁移链 / api-workspace-files / tool-present / http-proxy /
+ * node-addon-system（官方首发平台二进制包）；node-addon-landlock-run 更名 node-addon-system。
  * 语义：目录内 = 可信官方名候选（仍要求与官方哈希一致才入内容信任锚）；
  *       目录外多出来的 @deepseek-ai/* = 冒充或官方新包（黄牌观察，不拦）。
  * 运行时在线刷新（registry scope 枚举）结果与种子合并后落盘覆盖层，见 official-catalog.ts。
@@ -35,6 +38,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-api-session-controller',
   '@deepseek-ai/dsh-api-settings-controller',
   '@deepseek-ai/dsh-api-workspace-controller',
+  '@deepseek-ai/dsh-api-workspace-files',
   '@deepseek-ai/dsh-app-boot',
   '@deepseek-ai/dsh-atomic-write',
   '@deepseek-ai/dsh-attachment',
@@ -44,10 +48,13 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-bash-local',
   '@deepseek-ai/dsh-bash-sandbox',
   '@deepseek-ai/dsh-brand',
+  '@deepseek-ai/dsh-chunked-list',
   '@deepseek-ai/dsh-client-connection',
+  '@deepseek-ai/dsh-client-file-upload',
   '@deepseek-ai/dsh-client-hmr',
   '@deepseek-ai/dsh-client-locale',
   '@deepseek-ai/dsh-client-modules',
+  '@deepseek-ai/dsh-client-resources',
   '@deepseek-ai/dsh-client-runtime',
   '@deepseek-ai/dsh-client-schema-form',
   '@deepseek-ai/dsh-client-test-runtime',
@@ -68,6 +75,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-client-ui-layout',
   '@deepseek-ai/dsh-client-ui-message-feedback',
   '@deepseek-ai/dsh-client-ui-model-selection',
+  '@deepseek-ai/dsh-client-ui-open-in-app',
   '@deepseek-ai/dsh-client-ui-permission-presets',
   '@deepseek-ai/dsh-client-ui-plan',
   '@deepseek-ai/dsh-client-ui-primitives',
@@ -81,6 +89,9 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-client-ui-settings-plugin-inventory',
   '@deepseek-ai/dsh-client-ui-settings-plugins',
   '@deepseek-ai/dsh-client-ui-sidebar',
+  '@deepseek-ai/dsh-client-ui-sidebar-documentpreview',
+  '@deepseek-ai/dsh-client-ui-sidebar-files',
+  '@deepseek-ai/dsh-client-ui-sidebar-right',
   '@deepseek-ai/dsh-client-ui-skill',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-subagent',
@@ -129,8 +140,10 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-host-directory-picker-browse',
   '@deepseek-ai/dsh-host-directory-picker-native',
   '@deepseek-ai/dsh-host-frontend-static',
+  '@deepseek-ai/dsh-host-open-in-app',
   '@deepseek-ai/dsh-host-plugin-inventory',
   '@deepseek-ai/dsh-host-webserver',
+  '@deepseek-ai/dsh-http-proxy',
   '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-jobs',
   '@deepseek-ai/dsh-jobs-local',
@@ -148,6 +161,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-message-feedback',
   '@deepseek-ai/dsh-native-command',
   '@deepseek-ai/dsh-output-retention',
+  '@deepseek-ai/dsh-package-manifest',
   '@deepseek-ai/dsh-permission-presets',
   '@deepseek-ai/dsh-persona',
   '@deepseek-ai/dsh-plan-mode',
@@ -169,6 +183,11 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-sdk-protocol',
   '@deepseek-ai/dsh-session',
   '@deepseek-ai/dsh-session-checkpoint-policy',
+  '@deepseek-ai/dsh-session-format',
+  '@deepseek-ai/dsh-session-format-catalog',
+  '@deepseek-ai/dsh-session-format-v0-to-v1',
+  '@deepseek-ai/dsh-session-format-v1-to-v2',
+  '@deepseek-ai/dsh-session-format-v2-to-v3',
   '@deepseek-ai/dsh-session-log-deepseek',
   '@deepseek-ai/dsh-session-log-export',
   '@deepseek-ai/dsh-session-persistence',
@@ -229,6 +248,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-tool-goal',
   '@deepseek-ai/dsh-tool-jobs',
   '@deepseek-ai/dsh-tool-lsp',
+  '@deepseek-ai/dsh-tool-present',
   '@deepseek-ai/dsh-tool-pwsh',
   '@deepseek-ai/dsh-tool-pwsh-persistent',
   '@deepseek-ai/dsh-tool-ralph',
@@ -266,7 +286,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-workflow',
   '@deepseek-ai/dsh-workflow-worker-thread',
   '@deepseek-ai/dsh-workspace',
-  '@deepseek-ai/node-addon-landlock-run',
-  '@deepseek-ai/node-addon-landlock-run-linux-x64',
+  '@deepseek-ai/node-addon-system',
+  '@deepseek-ai/node-addon-system-linux-x64',
   '@deepseek-ai/schemastery',
 ]

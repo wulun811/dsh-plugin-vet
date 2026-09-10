@@ -51,35 +51,55 @@ function initializerMap(sf: ts.SourceFile): Map<string, ts.Expression> {
  * to a const/let string initializer (first declaration wins; v1 heuristic).
  */
 export function stringyValue(node: ts.Node, sf: ts.SourceFile): StringyValue | undefined {
-  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-    return { text: node.text, exact: true }
-  }
-  if (ts.isTemplateExpression(node)) {
-    const parts: string[] = [node.head.text]
-    for (const span of node.templateSpans) {
-      const sub = stringyValue(span.expression, sf)
-      if (sub === undefined) return undefined
-      parts.push(sub.text, span.literal.text)
+  return stringyValueInner(node, sf, new Set(), 0)
+}
+
+/**
+ * 0.3.9（审查修复）：求值主体加**环检测 + 深度帽**。
+ * 此前 `const x = x + 'a';`（合法语法，TDZ 只有运行期才报）会让标识符分支取回自己的
+ * 初始化器无限递归 → RangeError 冒到 scan() 顶层 → **整包 ok:false**，同包其它文件的
+ * critical 命中一并丢失（deny 模式 fail-closed 误拦 / report 模式 scan-fail）。
+ * 互引（const a = b + 'x'; const b = a + 'y'）同源。深度帽另外挡住超长 `+` 链的栈溢出。
+ */
+const STRINGY_MAX_DEPTH = 64
+
+function stringyValueInner(node: ts.Node, sf: ts.SourceFile, seen: Set<ts.Node>, depth: number): StringyValue | undefined {
+  if (depth > STRINGY_MAX_DEPTH) return undefined
+  if (seen.has(node)) return undefined
+  seen.add(node)
+  try {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      return { text: node.text, exact: true }
     }
-    return { text: parts.join(''), exact: false }
+    if (ts.isTemplateExpression(node)) {
+      const parts: string[] = [node.head.text]
+      for (const span of node.templateSpans) {
+        const sub = stringyValueInner(span.expression, sf, seen, depth + 1)
+        if (sub === undefined) return undefined
+        parts.push(sub.text, span.literal.text)
+      }
+      return { text: parts.join(''), exact: false }
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const left = stringyValueInner(node.left, sf, seen, depth + 1)
+      const right = stringyValueInner(node.right, sf, seen, depth + 1)
+      if (left === undefined || right === undefined) return undefined
+      return { text: left.text + right.text, exact: false }
+    }
+    if (ts.isIdentifier(node)) {
+      // round-16：词法遮蔽——形参/局部声明遮蔽同名模块级 const 时必须放弃求值
+      // （此前 `const url='/etc/passwd'` + `function f(url){…}` 会把形参解析成模块级
+      // 常量 → R11 敏感路径误报；isShadowed 只在 R2/R3/R4 直用，stringyValue 的共同
+      // 消费者（R11/R20/capability）此前全部暴露）。
+      if (isShadowedForStringy(node.text, node)) return undefined
+      const init = initializerMap(sf).get(node.text)
+      if (init === undefined) return undefined
+      return stringyValueInner(init, sf, seen, depth + 1)
+    }
+    return undefined
+  } finally {
+    seen.delete(node)
   }
-  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    const left = stringyValue(node.left, sf)
-    const right = stringyValue(node.right, sf)
-    if (left === undefined || right === undefined) return undefined
-    return { text: left.text + right.text, exact: false }
-  }
-  if (ts.isIdentifier(node)) {
-    // round-16：词法遮蔽——形参/局部声明遮蔽同名模块级 const 时必须放弃求值
-    // （此前 `const url='/etc/passwd'` + `function f(url){…}` 会把形参解析成模块级
-    // 常量 → R11 敏感路径误报；isShadowed 只在 R2/R3/R4 直用，stringyValue 的共同
-    // 消费者（R11/R20/capability）此前全部暴露）。
-    if (isShadowedForStringy(node.text, node)) return undefined
-    const init = initializerMap(sf).get(node.text)
-    if (init === undefined) return undefined
-    return stringyValue(init, sf)
-  }
-  return undefined
 }
 
 /**
@@ -90,37 +110,52 @@ export function stringyValue(node: ts.Node, sf: ts.SourceFile): StringyValue | u
  * For R9 unbounded-allocation checks.
  */
 export function numberyValue(node: ts.Node, sf: ts.SourceFile): number | undefined {
-  if (ts.isNumericLiteral(node)) {
-    return Number(node.text.replace(/_/g, ''))
-  }
-  if (ts.isParenthesizedExpression(node)) {
-    return numberyValue(node.expression, sf)
-  }
-  if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.MinusToken) {
-    const v = numberyValue(node.operand, sf)
-    return v === undefined ? undefined : -v
-  }
-  if (ts.isBinaryExpression(node)) {
-    const left = numberyValue(node.left, sf)
-    const right = numberyValue(node.right, sf)
-    if (left === undefined || right === undefined) return undefined
-    switch (node.operatorToken.kind) {
-      case ts.SyntaxKind.AsteriskAsteriskToken: return left ** right
-      case ts.SyntaxKind.LessThanLessThanToken: return left << right
-      case ts.SyntaxKind.AsteriskToken: return left * right
-      case ts.SyntaxKind.PlusToken: return left + right
-      case ts.SyntaxKind.MinusToken: return left - right
-      default: return undefined
+  return numberyValueInner(node, sf, new Set(), 0)
+}
+
+/** 0.3.9（审查修复）：与 stringyValue 同款环检测 + 深度帽（`const n = n * 2;` 自引用
+ * 此前同样无限递归 → 整包 ok:false）。 */
+const NUMBERY_MAX_DEPTH = 64
+
+function numberyValueInner(node: ts.Node, sf: ts.SourceFile, seen: Set<ts.Node>, depth: number): number | undefined {
+  if (depth > NUMBERY_MAX_DEPTH) return undefined
+  if (seen.has(node)) return undefined
+  seen.add(node)
+  try {
+    if (ts.isNumericLiteral(node)) {
+      return Number(node.text.replace(/_/g, ''))
     }
+    if (ts.isParenthesizedExpression(node)) {
+      return numberyValueInner(node.expression, sf, seen, depth + 1)
+    }
+    if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.MinusToken) {
+      const v = numberyValueInner(node.operand, sf, seen, depth + 1)
+      return v === undefined ? undefined : -v
+    }
+    if (ts.isBinaryExpression(node)) {
+      const left = numberyValueInner(node.left, sf, seen, depth + 1)
+      const right = numberyValueInner(node.right, sf, seen, depth + 1)
+      if (left === undefined || right === undefined) return undefined
+      switch (node.operatorToken.kind) {
+        case ts.SyntaxKind.AsteriskAsteriskToken: return left ** right
+        case ts.SyntaxKind.LessThanLessThanToken: return left << right
+        case ts.SyntaxKind.AsteriskToken: return left * right
+        case ts.SyntaxKind.PlusToken: return left + right
+        case ts.SyntaxKind.MinusToken: return left - right
+        default: return undefined
+      }
+    }
+    if (ts.isIdentifier(node)) {
+      // round-16：与 stringyValue 同款遮蔽防护（numberyValue 的标识符解析同样吃形参遮蔽）
+      if (isShadowedForStringy(node.text, node)) return undefined
+      const init = initializerMap(sf).get(node.text)
+      if (init === undefined) return undefined
+      return numberyValueInner(init, sf, seen, depth + 1)
+    }
+    return undefined
+  } finally {
+    seen.delete(node)
   }
-  if (ts.isIdentifier(node)) {
-    // round-16：与 stringyValue 同款遮蔽防护（numberyValue 的标识符解析同样吃形参遮蔽）
-    if (isShadowedForStringy(node.text, node)) return undefined
-    const init = initializerMap(sf).get(node.text)
-    if (init === undefined) return undefined
-    return numberyValue(init, sf)
-  }
-  return undefined
 }
 
 // ---------------------------------------------------------------------------

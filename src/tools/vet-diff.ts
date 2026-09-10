@@ -31,6 +31,12 @@ function renderDiff(value: VersionDiffHistory): string {
     for (const i of value.diff.added.zombieDeps) added.push('+ 僵尸依赖 ' + i + '（声明但未安装）')
     if (value.diff.added.hasNetwork) added.push('+ 网络能力')
     if (value.diff.added.hasExec) added.push('+ 执行能力')
+    // C4（0.3.8）：原生二进制新增（含 0.3.8 前存量记录无字段的「首次观察」；差分旧形状无此键 → 静默跳过）
+    // 0.3.9：展示条件挂「布尔或名单任一」——换血场景布尔不翻但名单变了，此前整段被布尔门挡住。
+    if (value.diff.added.hasNativeBinary === true || (Array.isArray(value.diff.added.nativeBinaries) && value.diff.added.nativeBinaries.length > 0)) {
+      const names = Array.isArray(value.diff.added.nativeBinaries) ? value.diff.added.nativeBinaries : []
+      added.push('+ 原生二进制' + (names.length > 0 ? '（' + names.slice(0, 3).join('/') + (names.length > 3 ? '…' : '') + '）' : '') + '（预编译，不可静态审）')
+    }
     const removed: string[] = []
     for (const h of value.diff.removed.hosts) removed.push('- 网络主机 ' + h)
     for (const f of value.diff.removed.fsPaths) removed.push('- 敏感路径 ' + f)
@@ -40,6 +46,10 @@ function renderDiff(value: VersionDiffHistory): string {
     for (const i of value.diff.removed.zombieDeps) removed.push('- 僵尸依赖 ' + i)
     if (value.diff.removed.hasNetwork) removed.push('- 网络能力')
     if (value.diff.removed.hasExec) removed.push('- 执行能力')
+    if (value.diff.removed.hasNativeBinary === true || (Array.isArray(value.diff.removed.nativeBinaries) && value.diff.removed.nativeBinaries.length > 0)) {
+      const names = Array.isArray(value.diff.removed.nativeBinaries) ? value.diff.removed.nativeBinaries : []
+      removed.push('- 原生二进制' + (names.length > 0 ? '（' + names.slice(0, 3).join('/') + (names.length > 3 ? '…' : '') + '）' : ''))
+    }
     if (added.length > 0) lines.push(...added)
     else lines.push('  （无新增能力）')
     if (removed.length > 0) lines.push('  移除能力（不报警，仅供审计）:', ...removed)

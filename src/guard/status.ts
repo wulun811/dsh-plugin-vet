@@ -96,20 +96,23 @@ export class VetStatus {
     }
     // 忽略状态随报警记录存活：对应报警全部过期/消失后自动清除忽略，将来再次触发会重新
     // 可见（用户可再忽略）；持续复发的报警记录不断续期，忽略保持有效。
+    // 0.3.9：内存键可能存的是 mergeKey（见 dismiss 修复）——按 id **或** mergeKey 匹配保留。
     for (const id of [...this.dismissedIds]) {
-      if (!this.alarms.some(a => a.id === id)) this.dismissedIds.delete(id)
+      if (!this.alarms.some(a => a.id === id || (a.mergeKey ?? a.id) === id)) this.dismissedIds.delete(id)
     }
   }
 
   /** 用户忽略一条报警：从盾牌 level 与活动列表隐藏，记录保留（可恢复）。
    *  0.2.1：同时持久化忽略状态，DSH 重启后仍生效。
    *  对于有 mergeKey 的警报（如 N3 无主警报），使用 mergeKey 作为持久化 key，
-   *  这样忽略一个警报后，所有同类警报都会被忽略。 */
+   *  这样忽略一个警报后，所有同类警报都会被忽略。
+   *  0.3.9（审查修复）：**内存集合与 snapshot.isFold 同键**——此前 dismissedIds 存原始 id
+   *  而 isFold 按 mergeKey 查内存集合，平时被持久化层掩盖；saveDismissed 写盘失败（只读/
+   *  满盘，写失败时缓存不更新）时「忽略」对聚合行完全无效（行留在 active、继续计黄/红）。 */
   dismiss(id: string): void {
-    this.dismissedIds.add(id)
-    // 查找警报的 mergeKey（如果存在）
     const alarm = this.alarms.find(a => a.id === id)
     const dismissKey = alarm?.mergeKey ?? id
+    this.dismissedIds.add(dismissKey)
     persistentlyDismiss(dismissKey)
   }
 
@@ -117,9 +120,10 @@ export class VetStatus {
    *  0.2.1：同时从持久化存储中恢复。
    *  对于有 mergeKey 的警报，使用 mergeKey 作为持久化 key。 */
   restore(id: string): void {
-    this.dismissedIds.delete(id)
     const alarm = this.alarms.find(a => a.id === id)
     const dismissKey = alarm?.mergeKey ?? id
+    this.dismissedIds.delete(id)
+    this.dismissedIds.delete(dismissKey)
     restorePersistentDismissal(dismissKey)
   }
 
@@ -152,7 +156,12 @@ export class VetStatus {
       // 合并：累计次数、刷新时间、严重度取高者、保留最新一次 target 便于查看
       recent.count = (recent.count ?? 1) + 1
       recent.at = now
-      if (alarm.severity === 'red') recent.severity = 'red'
+      if (alarm.severity === 'red') {
+        recent.severity = 'red'
+        // 0.3.9：升级到 red 时同步换掉旧文案——scan:upgrade 桶先 info 后 red 时，
+        // 行变红但文案仍是「…蓝色提示，已聚合」会误导（呈现错位）。
+        recent.message = alarm.message
+      }
       if (alarm.target !== undefined) recent.target = alarm.target
       return 'deduped'
     }

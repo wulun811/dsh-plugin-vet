@@ -148,6 +148,9 @@ export interface PluginDetailWire {
       esmNamedBuiltins?: boolean
       ghostDeps?: string[]
       zombieDeps?: string[]
+      /** C4（0.3.8）：含预编译原生二进制（.node/.so/.dll 等，JS 规则面不可审）。 */
+      hasNativeBinary?: boolean
+      nativeBinaries?: string[]
     } | null
     versions: { version: string; recordedAt: number }[]
     diffSummary?: { from: string; to: string; added: string[] } | null

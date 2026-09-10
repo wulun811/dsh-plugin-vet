@@ -177,7 +177,11 @@ function pushCap<T>(arr: T[], item: T): void {
 export function isEncryptionRename(from: string, to: string): boolean {
   if (from === to) return false
   const extOf = (p: string): string => {
-    const base = p.slice(p.lastIndexOf('/') + 1).replace(/\\/g, '/')
+    // 0.3.9（审查修复）：先统一反斜杠再取 basename——此前先按 '/' 切再替换反斜杠，
+    // Windows 路径 `C:\v 1.2\notes` 的 basename 取到整段 `v 1.2\notes`，目录里的点
+    // （v1.2）被当成扩展名 → 加密改名签名漏报。
+    const norm = p.replace(/\\/g, '/')
+    const base = norm.slice(norm.lastIndexOf('/') + 1)
     const dot = base.lastIndexOf('.')
     return dot === -1 ? '' : base.slice(dot + 1)
   }
@@ -457,13 +461,21 @@ export class ExfilLedger {
       }
     }
     // 量级匹配（疑似整包外传 → red）
+    // 0.3.9（审查修复）：加**时间关联闸**——此前只用「终身累计字节」比值带 [0.4,3.0]，
+    // 单调增长的 netWriteBytes 必然某刻扫过比值带（实测：启动读 2KB 凭据 + 17×50B 无关
+    // 遥测写就触发 red，盾牌挂 24h）。叠上层下方软黄分支同款 exfilAssocWindowMs：读与写
+    // 必须落在关联窗口内才构成「读完立刻同量级外传」的整包外传签名；终身累计但时间解耦的
+    // 遥测只落软黄（或完全不报），不再误红。
     if (row.sensitiveReadBytes >= this.exfilMinBytes && row.netWriteBytes >= this.exfilMinBytes) {
+      const linked = row.lastSecretReadAt !== 0 && row.lastNetWriteAt !== 0 &&
+        row.lastNetWriteAt >= row.lastSecretReadAt &&
+        (row.lastNetWriteAt - row.lastSecretReadAt) <= this.exfilAssocWindowMs
       const ratio = row.netWriteBytes / row.sensitiveReadBytes
-      if (ratio >= this.exfilRatioMin && ratio <= this.exfilRatioMax) {
+      if (linked && ratio >= this.exfilRatioMin && ratio <= this.exfilRatioMax) {
         out.push({
           severity: 'red',
           kind: 'n3-exfil-match',
-          message: `疑似整包外传：敏感读 ${row.sensitiveReadBytes}B、网络写 ${row.netWriteBytes}B，量级相近（N3 台账）`,
+          message: `疑似整包外传：敏感读 ${row.sensitiveReadBytes}B、网络写 ${row.netWriteBytes}B，量级相近且落入读→写关联窗口（N3 台账）`,
         })
         red = true
       }

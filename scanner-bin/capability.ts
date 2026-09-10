@@ -70,6 +70,8 @@ const HOST_CAP = 50
 const FS_CAP = 50
 const CMD_CAP = 20
 const IMPORT_CAP = 50
+/** C4（0.3.8）：原生二进制清单展示上限（超出只报布尔 + 「…更多」由消费方处理）。 */
+const NATIVE_CAP = 10
 
 const PUSH_UNIQ = (arr: string[], item: string, cap: number): void => {
   const v = item.trim()
@@ -294,7 +296,7 @@ function collectPathJoin(args: readonly ts.Expression[], sf: ts.SourceFile, out:
 /**
  * 单文件能力提取（宽松、确定性）。 */
 export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
-  const out: CapabilityManifest = { hosts: [], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false, esmNamedBuiltins: false }
+  const out: CapabilityManifest = { hosts: [], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false, esmNamedBuiltins: false, hasNativeBinary: false }
   const { fsRefs, cpRefs, pathRefs } = moduleBindings(sf)
   const isFsBase = (base: ts.Expression): boolean => {
     if (ts.isIdentifier(base)) return base.text === "fs" || fsRefs.has(base.text)
@@ -467,7 +469,7 @@ export function isEmptyManifest(m: CapabilityManifest): boolean {
 /** 多文件聚合：并集 + OR 旗标（数组去重、按上限截断防膨胀）。
  * 0.1.16：esmNamedBuiltins 任一文件命中即 true（C2）。 */
 export function aggregateCapabilities(parts: CapabilityManifest[]): CapabilityManifest {
-  const out: CapabilityManifest = { hosts: [], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false, esmNamedBuiltins: false }
+  const out: CapabilityManifest = { hosts: [], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false, esmNamedBuiltins: false, hasNativeBinary: false }
   for (const p of parts) {
     for (const h of p.hosts) PUSH_UNIQ(out.hosts, h, HOST_CAP)
     for (const f of p.fsPaths) PUSH_UNIQ(out.fsPaths, f, FS_CAP)
@@ -476,6 +478,13 @@ export function aggregateCapabilities(parts: CapabilityManifest[]): CapabilityMa
     if (p.hasNetwork) out.hasNetwork = true
     if (p.hasExec) out.hasExec = true
     if (p.esmNamedBuiltins === true) out.esmNamedBuiltins = true
+    // C4（0.3.8）：原生二进制为文件面证据（scanFiles 主循环注入 per-file manifest，AST 提取不产出）；
+    // 聚合同步并集——scanFiles 的清单也走这里，不另开第二条聚合路。
+    if (p.hasNativeBinary === true) out.hasNativeBinary = true
+    for (const nb of p.nativeBinaries ?? []) {
+      if (!out.nativeBinaries) out.nativeBinaries = []
+      PUSH_UNIQ(out.nativeBinaries, nb, NATIVE_CAP)
+    }
   }
   return out
 }

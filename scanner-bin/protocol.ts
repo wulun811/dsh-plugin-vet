@@ -87,6 +87,13 @@ export interface CapabilityManifest {
   /** P0-2（round-11，0.1.21）：package.json 声明但 node_modules 缺失的"僵尸依赖"（陈旧/伪造声明）；
    * 仅本地能定位到 node_modules 时才能判定（无 node_modules 则不设此字段）。 */
   zombieDeps?: string[]
+  /** C4（0.3.8，DSH 0.1.5 同步——官方首发平台二进制包 node-addon-system）：包内含预编译原生/
+   * 二进制模块（.node/.dll/.dylib/.so/.exe/.wasm/.ocx 扩展名，或已入面文件的 ELF/PE/Mach-O 魔数）。
+   * 判定纪律：纯**文件面证据**（扩展名 + 头部魔数），不静态可审——第三方插件夹带预编译二进制
+   * 是经典恶意手法（native 代码绕过一切 JS 规则面），故进能力清单/营养标签/升级差分。 */
+  hasNativeBinary: boolean
+  /** C4：命中的原生二进制文件名（basename，去重，上限 10）——标签/差分展示用。 */
+  nativeBinaries?: string[]
 }
 
 export interface ScanReport {
@@ -96,8 +103,17 @@ export interface ScanReport {
    * round-22 起 static-v20——R1/R2 逃逸正则扩形态（括号/前缀元素访问）+ R1 别名遮蔽修复（误判
    * critical 面收窄）、R3 前缀元素访问与解构成员形态补漏（critical 面扩大）、R7 sk-proj-/github_pat_
    * 补漏、R2 顶级 require 判定收紧到真·模块顶层、capability require() 空参崩溃修复 + node: 前缀
-   * 能力归一（hasNetwork/hasExec 不再漏记）。 */
-  engine: 'static-v20'
+   * 能力归一（hasNetwork/hasExec 不再漏记）；
+   * 0.3.8 起 static-v21——C4 原生二进制感知：能力清单新增 hasNativeBinary/nativeBinaries
+   * （.node/.dll/.dylib/.so/.exe/.wasm/.ocx/.sys 扩展名 + ELF/PE/Mach-O/wasm 魔数复核；
+   * 计数不解析不入 sourceCount）——输出形状变化，引擎版本递增使旧缓存失效。
+   * 0.3.9 起 static-v22（审查修复批次）——① 预算耗尽的部分结果不再写缓存（此前 deadline
+   * 跳过的尾部文件会把假 clean 永久固化）；② 单文件异常不再丢整包（元 finding R8-rule-error）；
+   * ③ stringyValue/numberyValue 环检测 + 深度帽（自引用初始化器此前 RangeError → 整包 ok:false）；
+   * ④ isExtensionlessJs 补 stat 守卫（无扩展名 FIFO 永久挂起）与 extOf 基名化（带点目录段下
+   * 无扩展名入口判定的死代码）；⑤ R9 isRedosPattern 改线性配对 + 工作预算；⑥ 循环外
+   * package.json 读取改限量（大 manifest 不再绕开 8MB 预检）。规则行为与扫描面均变化。 */
+  engine: 'static-v22'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -141,15 +157,22 @@ export interface ScanResponse {
  * 误判）；④ R3 补 globalThis['process'].exit 元素访问形态（此前零命中）与解构成员形态
  * （const { exit } = process; exit(1) 此前只报 info）；⑤ R7 补 sk-proj- 与 github_pat_
  * 现行密钥格式（'-' 打散旧字符类整族漏报）；⑥ R2 顶级 require 判定收紧到真·模块顶层
- * （函数体 const require 此前被误当顶级降噪漏报）。规则行为变化，引擎版本递增使旧缓存失效。 */
-export const ENGINE_VERSION = 'static-v20' as const
+ * （函数体 const require 此前被误当顶级降噪漏报）。规则行为变化，引擎版本递增使旧缓存失效。
+ * 0.3.8（C4）：原生二进制感知——能力清单新增 hasNativeBinary/nativeBinaries（文件面证据：
+ * 原生扩展名命中或 ELF/PE/Mach-O/wasm 魔数命中；命中文件不解析、不入 sourceCount）。
+ * 输出形状变化（且扫描面自 0.3.8 起含原生扩展文件，cacheKey 随之漂移），引擎版本递增失效旧缓存。
+ * 0.3.9（审查修复）：缓存写入门控（预算耗尽不缓存）、单文件容错元 finding、ast 环检测/深度帽、
+ * FIFO 守卫与 extOf 基名化、R9 线性化、循环外 package.json 限量读——规则行为与形状均有变化。 */
+export const ENGINE_VERSION = 'static-v22' as const
 
-/** The rules of static-v20. R8 is a meta finding emitted by the engine (scan timeout skip);
+/** The rules of static-v22（规则集与 static-v21 一致；v22 为引擎健壮性/缓存纪律修复批次，
+ * 规则判定语义未变，但新增 R8-rule-error 元 finding 形态）。 R8 is a meta finding emitted by the engine (scan timeout skip / per-file error skip);
  * R17/R18/R19 are surface-gated text/config rules (emitted by the engine, not per-file AST rules);
  * R20 is a per-file AST rule (exec/spawn-family argument download-and-exec, registry-driven);
  * OSV / OSV-T are engine-emitted data-source findings (OSV advisory board / transitive upstream-radar)
- * — 列入 RULE_IDS 供白名单式消费方完整枚举（round-16：此前只枚举 AST 规则，OSV 两码会静默丢失）。 */
-export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19', 'R20', 'OSV', 'OSV-T'] as const
+ * — 列入 RULE_IDS 供白名单式消费方完整枚举（round-16：此前只枚举 AST 规则，OSV 两码会静默丢失；
+ * 0.3.9 review：R8 元 finding 同样由 engine 产出却漏列，白名单消费方会静默丢跳过提示）。 */
+export const RULE_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19', 'R20', 'OSV', 'OSV-T'] as const
 
 /** Shared context handed to every rule. */
 export interface RuleContext {

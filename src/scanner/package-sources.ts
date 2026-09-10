@@ -1,10 +1,17 @@
 import { createRequire } from 'node:module'
-import { lstatSync, readdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { lstatSync, readdirSync, readFileSync } from 'node:fs'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** 常规源码扩展（R17 配置面不在此列——cordis.yml 等由下方根级配置名条件单独收口，面更窄）。 */
 const SOURCE_EXT = new Set(['.js', '.ts', '.mjs', '.cjs', '.sh', '.bash', '.ps1', '.cmd', '.bat', '.psm1', '.zsh'])
+
+/** C4（0.3.8，DSH 0.1.5 同步）：原生二进制扩展——官方首发平台二进制包（node-addon-system-*
+ * 携带 .node），第三方插件夹带预编译二进制是经典恶意手法（native 代码不可 JS 静态审）。
+ * 与 scanner-bin/engine.ts 的 NATIVE_BINARY_EXT 保持同步（跨构建根无法单源共享，改动需两边
+ * 同改——SOURCE_EXT/CONFIG_EXT 同款纪律）。仅以「存在性证据」进扫描面：engine 命中即记名，
+ * 不读取、不解析、不入 sourceCount（见 engine C4 注记）。 */
+const NATIVE_BINARY_EXT = new Set(['.node', '.dll', '.dylib', '.so', '.exe', '.wasm', '.ocx', '.sys'])
 
 /** 根级配置文件白名单（R17 面；与 scanner-bin/rules/config-scan.ts isRootConfigName 保持同步——
  * 跨构建根目录无法单源共享，改动需两边同改）。 .md 不进 SOURCE_EXT：指令/技能文件由
@@ -56,7 +63,10 @@ export function resolvePackageRoot(packageName: string, baseDir?: string): strin
   return undefined
 }
 
-/** 递归收集包内可扫描源码（跳过 node_modules/.git/隐藏目录，深度 ≤ 6）。 */
+/** 递归收集包内可扫描源码（跳过 node_modules/.git/隐藏目录，深度 ≤ 6）。
+ * 0.3.9（审查修复）：额外收集 package.json 声明的 bin/scripts 入口文件——npm 标准形态的
+ * bin 入口普遍无扩展名，此前整段隐形（实证：bin/cli 里放 curl|sh 不出现在枚举结果里），
+ * engine 侧的 isExtensionlessJs/cliFiles 判定在自动扫描链上永远收不到这些文件 = 死代码。 */
 export function listSourceFiles(root: string): string[] {
   const out: string[] = []
   const walk = (dir: string, depth: number): void => {
@@ -80,7 +90,12 @@ export function listSourceFiles(root: string): string[] {
       if (stat.isSymbolicLink()) continue
       if (stat.isDirectory()) {
         walk(full, depth + 1)
-      } else if (stat.isFile() && (SOURCE_EXT.has(extOf(full)) ||
+      } else if (stat.isFile() && (
+        // 0.3.8：扩展名统一小写再比对（engine 侧 round-16 已小写；宿主枚举侧此前大小写敏感——
+        // `.NODE`/`.SH` 从宿主面漏出，engine 的大小写处理形同虚设。两侧口径就此对齐）
+        SOURCE_EXT.has(extOf(full).toLowerCase()) ||
+        // C4（0.3.8）：原生二进制存在性证据（engine 只记名不解析）
+        NATIVE_BINARY_EXT.has(extOf(full).toLowerCase()) ||
         // 根级配置文件（R17 面）：cordis.yml/cordis.patch.yml/plugin.yml 仅限包根
         (dir === root && isRootConfigFile(name)) ||
         (name === 'package.json' && dir === root))) {
@@ -89,6 +104,56 @@ export function listSourceFiles(root: string): string[] {
     }
   }
   walk(root, 0)
+  const declared = listDeclaredEntries(root)
+  if (declared.length === 0) return out
+  const have = new Set(out)
+  for (const d of declared) if (!have.has(d)) out.push(d)
+  return out
+}
+
+/** package.json 声明的入口/脚本目标文件（bin 值 + scripts 里的路径 token，0.3.9）。
+ * 与 engine 侧 packageShape 的 cliFiles 收集同口径（宽松：含 '/' 或带源码扩展名的 token），
+ * 但这里额外要求**真实存在的常规文件且落在包根内**（防 `../` 逃逸与远程 URL token 进面）。 */
+function listDeclaredEntries(root: string): string[] {
+  const out: string[] = []
+  let pkg: Record<string, unknown>
+  try {
+    const raw = readFileSync(join(root, 'package.json'), 'utf8')
+    if (raw.length > 4 * 1024 * 1024) return out
+    pkg = JSON.parse(raw) as Record<string, unknown>
+  } catch {
+    return out
+  }
+  const tokens = new Set<string>()
+  const bin = pkg.bin
+  if (typeof bin === 'string') tokens.add(bin)
+  else if (typeof bin === 'object' && bin !== null) {
+    for (const v of Object.values(bin as Record<string, unknown>)) if (typeof v === 'string') tokens.add(v)
+  }
+  const scripts = pkg.scripts
+  if (typeof scripts === 'object' && scripts !== null) {
+    for (const v of Object.values(scripts as Record<string, unknown>)) {
+      if (typeof v !== 'string') continue
+      for (const tok of v.split(/\s+/)) {
+        if (tok === '' || tok.startsWith('-')) continue
+        if (tok.includes('/') || SOURCE_EXT.has(extOf(tok))) tokens.add(tok)
+      }
+    }
+  }
+  const seen = new Set<string>()
+  for (const t of tokens) {
+    const rel = t.replace(/^\.\//, '')
+    const abs = rel.startsWith('/') ? rel : resolve(root, rel)
+    if (abs !== root && !abs.startsWith(root + sep)) continue
+    if (seen.has(abs)) continue
+    seen.add(abs)
+    try {
+      if (!lstatSync(abs).isFile()) continue
+    } catch {
+      continue
+    }
+    out.push(abs)
+  }
   return out
 }
 
@@ -136,6 +201,10 @@ export function listInstructionFiles(root: string): string[] {
 }
 
 function extOf(file: string): string {
-  const dot = file.lastIndexOf('.')
-  return dot === -1 ? '' : file.slice(dot)
+  // 0.3.9（审查修复）：只看 basename——此前对整条路径 lastIndexOf('.')，路径里带点的目录段
+  // （DSH 安装树 ~/.dsh/… 必带）会给无扩展名文件造出伪扩展名，bin 入口判定恒不命中。
+  const base = basename(file)
+  const dot = base.lastIndexOf('.')
+  if (dot <= 0) return ''
+  return base.slice(dot)
 }

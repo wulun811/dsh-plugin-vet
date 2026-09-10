@@ -157,9 +157,35 @@ export function patchModule(
         incrementBlocked()
         throw new Error('vet 拦截（N7）：' + block.reason + '；如系误判请将 confirmBlock 降为 alarm 后重试')
       }
-      const result = (fn as (...a: unknown[]) => unknown).apply(this, args)
+      // 0.3.9（审查修复）：报警先于原函数调用——sink 此前在 apply **之后**，破坏类命令带非零
+      // 退出（execSync 必抛）时 ledger/sink/M1/N1 整段观测被跳过：实测
+      // execSync('bash -c "payload; exit 3"') 命令真实执行却零报警。本文件头注释与
+      // runtime-guard 的 dgram/fetch 侧都是「先报后调」，此处对齐。
+      if (alarm !== null) sink({ ...alarm, pluginHint: hint, ...(officialHousekeeping ? { officialHousekeeping: true } : {}) })
+      const target = firstString(args) ?? ''
+      let result: unknown
+      try {
+        result = (fn as (...a: unknown[]) => unknown).apply(this, args)
+      } catch (error) {
+        // 台账留痕：调用失败同样是观测事实（此前整段跳过）；无 result → 字节计 0
+        if (observe !== undefined && !isRootIndexing() && !isVetSelfIo() && ledgerRelevant) {
+          try {
+            observe({
+              plugin: hint,
+              module: moduleName,
+              op: opName,
+              target,
+              paths: allStrings(args),
+              sensitive: isSensitivePath(target, cfg, 'read'),
+              bytes: 0,
+            })
+          } catch {
+            // 台账失败绝不改变原调用语义（异常原样上抛）
+          }
+        }
+        throw error
+      }
       if (observe !== undefined && !isRootIndexing() && !isVetSelfIo() && ledgerRelevant) {
-        const target = firstString(args) ?? ''
         const evt: LedgerFsEvent = {
           plugin: hint,
           module: moduleName,
@@ -182,7 +208,6 @@ export function patchModule(
           observe(evt)
         }
       }
-      if (alarm !== null) sink({ ...alarm, pluginHint: hint, ...(officialHousekeeping ? { officialHousekeeping: true } : {}) })
       return result
     }
       mod[opName] = wrapped
@@ -245,6 +270,32 @@ export function patchNetworkModule(
           target: (firstString(args) ?? '').slice(0, 120),
         })
       }
+      // 0.3.9（审查修复）：网络报警与回环观测先于原函数调用——连接失败（ECONNREFUSED/
+      // DNS 失败）是常见形态，此前 apply 抛错即整段跳过（与 fs 面同源缺陷；dgram/fetch 侧
+      // 本就先报后调）。下面需要 result 的台账/金丝雀挂载仍留在调用之后。
+      if (alarm !== null) {
+        // round-16（SEC-1）：内容信任锚（同 fs 面抑制判据）；回环观测走廊
+        // 保留名称级 isOfficial——纯展示观测，不构成防线盲区。
+        if (hint === undefined || !isOfficialTrusted(hint)) {
+          sink({ ...alarm, pluginHint: hint })
+        }
+      }
+      // round-13（Phase 3）：本地 API 回环观测——observeLoopback=true、命中 DSH 控制面路径、
+      // 归因第三方插件（非官方/非无主）→ yellow 观测（alarm-only；观测不是修复，RPC 认证需 dsh 侧）
+      // round-16（SEC-1）：本条保留名称级 isOfficial（纯展示走廊，不构成防线盲区）。
+      if (cfg.observeLoopback === true && hint !== undefined && !isOfficial(hint)) {
+        const lp = extractNetworkTarget(args)
+        if (lp !== null && isLoopbackHost(lp.hostname) && isControlPlanePath(lp.path)) {
+          const lpTarget = lp.hostname + (lp.port !== undefined ? ':' + lp.port : '') + lp.path
+          sink({
+            severity: 'yellow',
+            kind: 'loopback-control',
+            message: '插件访问本地 DSH 控制面：' + lpTarget + '（回环观测，observeLoopback——无认证 RPC 面，P15/P17 形态）',
+            target: lpTarget.slice(0, 120),
+            pluginHint: hint,
+          })
+        }
+      }
       const result = (fn as (...a: unknown[]) => unknown).apply(this, args)
       if (observe !== undefined && !isRootIndexing() && !isVetSelfIo()) {
         const target = extractNetworkTarget(args)
@@ -270,29 +321,6 @@ export function patchNetworkModule(
               attachCanaryScanner(res, (text) => canaryScan(hint, text, 'body'))
             }
           }
-        }
-      }
-      if (alarm !== null) {
-        // round-16（SEC-1）：内容信任锚（同 fs 面抑制判据）；回环观测走廊（下方 247）
-        // 保留名称级 isOfficial——纯展示观测，不构成防线盲区。
-        if (hint === undefined || !isOfficialTrusted(hint)) {
-          sink({ ...alarm, pluginHint: hint })
-        }
-      }
-      // round-13（Phase 3）：本地 API 回环观测——observeLoopback=true、命中 DSH 控制面路径、
-      // 归因第三方插件（非官方/非无主）→ yellow 观测（alarm-only；观测不是修复，RPC 认证需 dsh 侧）
-      // round-16（SEC-1）：本条保留名称级 isOfficial（纯展示走廊，不构成防线盲区）。
-      if (cfg.observeLoopback === true && hint !== undefined && !isOfficial(hint)) {
-        const lp = extractNetworkTarget(args)
-        if (lp !== null && isLoopbackHost(lp.hostname) && isControlPlanePath(lp.path)) {
-          const lpTarget = lp.hostname + (lp.port !== undefined ? ':' + lp.port : '') + lp.path
-          sink({
-            severity: 'yellow',
-            kind: 'loopback-control',
-            message: '插件访问本地 DSH 控制面：' + lpTarget + '（回环观测，observeLoopback——无认证 RPC 面，P15/P17 形态）',
-            target: lpTarget.slice(0, 120),
-            pluginHint: hint,
-          })
         }
       }
       return result

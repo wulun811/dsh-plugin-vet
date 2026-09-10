@@ -117,16 +117,22 @@ function destructuredProcessMembers(sf: ts.SourceFile): Map<string, string> {
 export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const found: Finding[] = []
   const cliEntryOf = (): boolean => ctx.cliFiles !== undefined && ctx.cliFiles.has(sf.fileName)
-  /** 形态降级（与主遍历同口径；抽取共用避免新形态漏降级）。 */
+  /** 形态降级（与主遍历同口径；抽取共用避免新形态漏降级）。
+   * 0.3.9（审查修复）：appShape（仅声明 bin）不再对**全包所有文件**降级——元数据自证即可
+   * 系统性压 verdict（恶意包声明任一 bin、把载荷命名成任意 js，R3 对全部逃逸链失明）；收窄
+   * 为「声明 bin 且当前文件是 bin/scripts 命中的入口文件」才按应用型降级（真实 CLI 的
+   * cwd/进程访问确实是产品功能）。 */
   const degrade = (severity: Severity, message: string): { severity: Severity; message: string } => {
     if (severity === 'info') return { severity, message }
     const testOrCi = isTestOrCiFile(ctx.filePath ?? sf.fileName)
-    if (ctx.request.targetKind === 'generic' || cliEntryOf() || ctx.appShape === true || testOrCi) {
+    if (ctx.request.targetKind === 'generic' || cliEntryOf() || testOrCi) {
       const why = testOrCi ? '测试/CI 文件'
         : ctx.request.targetKind === 'generic' ? '非 DSH 插件包'
-        : cliEntryOf() ? 'CLI/bin 入口'
-        : '应用型包（bin 入口，process 即产品功能）'
+        : 'CLI/bin 入口'
       return { severity: 'info', message: '能力触达面（' + why + '）：' + message }
+    }
+    if (ctx.appShape === true && cliEntryOf()) {
+      return { severity: 'info', message: '能力触达面（应用型 CLI 入口）：' + message }
     }
     return { severity, message }
   }
@@ -216,15 +222,15 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
 
     // 形态降级（round-7，P4a/P4c）：process 访问是能力触达面或产品功能，不是沙箱逃逸 →
     // info 不进 verdict。三类形态：generic 包（PLAN §14.3 边界落地）、bin 入口文件
-    // （CLI 脚本永远独立运行）、应用型包（bin 声明：TUI/CLI/server 的 process 即产品功能，
-    // 外部实测 dsh-tui 4065 分扣减全部误报）
+    // （CLI 脚本永远独立运行）、应用型 CLI 入口（0.3.9 收窄——见 degrade 注释：appShape
+    // 不再对全包所有文件降级，元数据自证不可系统性压低 verdict）。
     const cliEntry = ctx.cliFiles !== undefined && ctx.cliFiles.has(sf.fileName)
     const testOrCi = isTestOrCiFile(ctx.filePath ?? sf.fileName)
-    if (severity !== 'info' && (ctx.request.targetKind === 'generic' || cliEntry || ctx.appShape === true || testOrCi)) {
+    if (severity !== 'info' && (ctx.request.targetKind === 'generic' || cliEntry || testOrCi
+      || (ctx.appShape === true && cliEntry))) {
       const why = testOrCi ? '测试/CI 文件'
         : ctx.request.targetKind === 'generic' ? '非 DSH 插件包'
-        : cliEntry ? 'CLI/bin 入口'
-        : '应用型包（bin 入口，process 即产品功能）'
+        : 'CLI/bin 入口'
       severity = 'info'
       message = '能力触达面（' + why + '）：' + message
     }

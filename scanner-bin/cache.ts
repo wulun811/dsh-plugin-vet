@@ -43,6 +43,12 @@ function validCapabilities(c: unknown): boolean {
       if (!Array.isArray(m[key]) || !(m[key] as unknown[]).every(v => typeof v === 'string')) return false
     }
   }
+  // C4（0.3.8）：hasNativeBinary 可选布尔、nativeBinaries 可选字符串数组（旧缓存条目无字段合法；
+  // v21 起 engine 必产出，但缓存失效已由 validReport 的 engine 严格比对兜住）
+  if (m.hasNativeBinary !== undefined && typeof m.hasNativeBinary !== 'boolean') return false
+  if (m.nativeBinaries !== undefined) {
+    if (!Array.isArray(m.nativeBinaries) || !(m.nativeBinaries as unknown[]).every(v => typeof v === 'string')) return false
+  }
   return typeof m.hasNetwork === 'boolean' && typeof m.hasExec === 'boolean'
 }
 

@@ -247,10 +247,19 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
   let spawnedOnce = false
   let lastSpawnAt = 0
   let killTimedOut = false
-  /** 意外退出重拉：上限 5 次 + 5s 退避（监控器自身失活必须可见，不能静默）。 */
+  /** 意外退出重拉：滑动窗口上限（0.3.9 审查修复——此前为「安装以来累计」上限 5，长时间
+   * uptime 下每次偶发崩溃耗一格，5 次后哨兵永久不重拉、只剩 t1:sentinel-down 常亮。改为
+   * 30 分钟窗口内 5 次：窗内连续崩溃照旧触发上限（防 crash-loop 空转），偶发崩溃随时间
+   * 自然恢复重拉能力。S1 快速自杀依旧不计预算。 */
+  const RESPAWN_WINDOW_MS = 30 * 60 * 1000
   const MAX_RESPAWN = 5
   const RESPAWN_DELAY_MS = 5000
-  let respawnCount = 0
+  const respawnTimes: number[] = []
+  const respawnCountNow = (): number => {
+    const cutoff = Date.now() - RESPAWN_WINDOW_MS
+    while (respawnTimes.length > 0 && respawnTimes[0] < cutoff) respawnTimes.shift()
+    return respawnTimes.length
+  }
   const spawnSidecar = (): void => {
     if (stopping) return
     // H2：守卫已关（off/dispose）→ 不复活哨兵（pending respawn 定时器触发时走到这里）
@@ -351,7 +360,7 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
       // env 指向已死 pid 无害（spawnSidecar 的 pidAlive 探测失败会重新 spawn 并覆盖 env；
       // off/接管场景 env 已被清/改指，decideRespawn 为 false 不复活）。
       const registered = envSidecarPid()
-      const respawn = decideRespawn(registered, child?.pid, stopping, respawnCount, MAX_RESPAWN)
+      const respawn = decideRespawn(registered, child?.pid, stopping, respawnCountNow(), MAX_RESPAWN)
       ctx.logger.warn(`vet: T1 哨兵退出（code=${code ?? 'null'}，respawn=${respawn}）`)
       if (stopping) return
       // 监控器失活本身是黄灯报警（vet 自己的进程挂了，用户该知道守护断了）
@@ -366,10 +375,14 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
       // 仅当 env 注册表仍指向本哨兵时才 respawn（off/接管场景不复活）
       if (respawn) {
         // S1：不耗预算的自杀——code 0 且刚接管过（killTimedOut）或快速退出（兄弟锁自杀）：
-        // 旧哨兵死透前/竞态窗口内的临时退出不消耗 MAX_RESPAWN，否则 5 次空转后监控静默中断。
+        // 旧哨兵死透前/竞态窗口内的临时退出不消耗预算，否则窗口内 5 次空转后监控静默中断。
         const selfExitRace = code === 0 && (killTimedOut || Date.now() - lastSpawnAt < 3000)
-        if (!selfExitRace) respawnCount++
-        ctx.logger.warn(`vet: 5s 后重拉哨兵（第 ${respawnCount}/${MAX_RESPAWN} 次${selfExitRace ? '，本次不计入重拉上限' : ''}）`)
+        if (!selfExitRace) {
+          const cutoff = Date.now() - RESPAWN_WINDOW_MS
+          while (respawnTimes.length > 0 && respawnTimes[0] < cutoff) respawnTimes.shift()
+          respawnTimes.push(Date.now())
+        }
+        ctx.logger.warn(`vet: 5s 后重拉哨兵（窗口内第 ${respawnCountNow()}/${MAX_RESPAWN} 次${selfExitRace ? '，本次不计入重拉上限' : ''}）`)
         setTimeout(spawnSidecar, RESPAWN_DELAY_MS).unref?.()
       }
       // P2-3：env 不再指向本实例且指向存活 pid → 哨兵已被其他实例接管/替换（跨模块重复安装

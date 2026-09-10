@@ -113,10 +113,13 @@ if (liveFamily !== undefined && liveFamily !== null && existsSync(liveFamily)) {
 const sorted = [...names].sort()
 const lines = sorted.map(n => `  '${n}',`).join('\n')
 const header = `/**
- * 官方包目录种子（M1，0.3.6）：dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的
- * @deepseek-ai/* 全量包名。
+ * 官方包目录种子（M1，0.3.6 首建四源；0.3.7 随 DSH 0.1.5-rc.1 模块化家族重生成）：
+ * dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的 @deepseek-ai/* 全量包名。
  * 生成方式：node scripts/gen-official-catalog-seed.mjs
  *        （dsh-src 更新或本机 DSH 升级后重跑；收集源：${sources.join('、')}）。
+ * 0.1.5 家族注记：@deepseek-ai/cordis fork 已 npm 化并嵌套进 dsh 的 node_modules（@jieai scope
+ * 消失）；新增 session-format 迁移链 / api-workspace-files / tool-present / http-proxy /
+ * node-addon-system（官方首发平台二进制包）；node-addon-landlock-run 更名 node-addon-system。
  * 语义：目录内 = 可信官方名候选（仍要求与官方哈希一致才入内容信任锚）；
  *       目录外多出来的 @deepseek-ai/* = 冒充或官方新包（黄牌观察，不拦）。
  * 运行时在线刷新（registry scope 枚举）结果与种子合并后落盘覆盖层，见 official-catalog.ts。

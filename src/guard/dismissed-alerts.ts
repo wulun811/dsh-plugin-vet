@@ -97,6 +97,13 @@ export function isPersistentlyDismissed(alertId: string): boolean {
 }
 
 /** 持久化忽略某警报（用户点击"忽略"时调用）；写盘成功后才更新内存缓存——
+ * 写失败时缓存保持旧态（盘上没有该记录，重启后自然恢复为未忽略，行为一致）。
+ * 0.3.9（审查修复）：**容量上限 + LRU 淘汰**——restore 是唯一手动清理途径，此前无回收，
+ * 同源页面被 XSS / 官方面板被注入时可无限堆积忽略档案（ids 上限 200，超出按 dismissedAt
+ * 淘汰最旧；上限外新忽略照常生效，只丢最旧的已忽略记录）。 */
+export const DISMISSED_MAX_KEPT = 200
+
+/** 持久化忽略某警报（用户点击"忽略"时调用）；写盘成功后才更新内存缓存——
  * 写失败时缓存保持旧态（盘上没有该记录，重启后自然恢复为未忽略，行为一致）。 */
 export function persistentlyDismiss(alertId: string, reason?: string): void {
   const store = loadDismissed()
@@ -104,7 +111,20 @@ export function persistentlyDismiss(alertId: string, reason?: string): void {
     dismissedAt: Date.now(),
     reason,
   }
+  pruneDismissedStore(store)
   if (saveDismissed(store) && cachedIds !== undefined) cachedIds.add(alertId)
+}
+
+/** 0.3.9：按 dismissedAt 保留最近 DISMISSED_MAX_KEPT 条（非有限值排最末淘汰，与 capabilities LRU 同款纪律）。 */
+function pruneDismissedStore(store: DismissedStore): void {
+  const entries = Object.entries(store.dismissed)
+  if (entries.length <= DISMISSED_MAX_KEPT) return
+  entries.sort((a, b) => {
+    const ar = Number.isFinite(a[1].dismissedAt) ? a[1].dismissedAt : -Infinity
+    const br = Number.isFinite(b[1].dismissedAt) ? b[1].dismissedAt : -Infinity
+    return br - ar
+  })
+  for (const [key] of entries.slice(DISMISSED_MAX_KEPT)) delete store.dismissed[key]
 }
 
 /** 恢复某警报（用户点击"恢复"时调用）；写盘成功后才更新内存缓存。 */

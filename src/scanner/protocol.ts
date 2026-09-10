@@ -66,11 +66,16 @@ export interface CapabilityManifest {
   ghostDeps?: string[]
   /** P0-2（0.1.21，R16）：package.json 声明但 node_modules 缺失的"僵尸依赖"（与 scanner-bin 同步）。 */
   zombieDeps?: string[]
+  /** C4（0.3.8）：包内含预编译原生/二进制模块（.node/.so/.dll/.dylib/.exe/.wasm 等；
+   * 文件面证据，见 scanner-bin/protocol.ts 注记）。宿主侧可选——0.3.8 前的存量记录无此字段。 */
+  hasNativeBinary?: boolean
+  /** C4（0.3.8）：命中的原生二进制文件名（basename，去重，上限 10）。 */
+  nativeBinaries?: string[]
 }
 
 export interface ScanReport {
-  /** 与 scanner-bin/protocol.ts 同步；round-16 起为 static-v18，round-17（R16 幽灵子路径修复）起为 static-v19。 */
-  engine: 'static-v19'
+  /** 与 scanner-bin/protocol.ts 同步；0.3.3 起 static-v19，round-22 起 static-v20，0.3.8（C4 原生二进制感知）起 static-v21，0.3.9（审查修复批次）起 static-v22。 */
+  engine: 'static-v22'
   sourceCount: number
   findings: Finding[]
   staticScore: number

@@ -50,6 +50,11 @@ export interface ManifestDelta {
   zombieDeps: string[]
   hasNetwork: boolean
   hasExec: boolean
+  /** C4（0.3.8）：原生二进制（预编译 .node/.so/…）新增/移除。展示口径含「首次观察」——
+   * 0.3.8 前的存量记录无此字段（undefined），下一版本记录 true 即入列（宁可多报蓝，不静默）。 */
+  hasNativeBinary: boolean
+  /** C4：新增/移除的原生二进制文件名（basename 差分；「首次观察」时全部计为新增）。 */
+  nativeBinaries: string[]
 }
 
 export interface VersionDiffAlarm {
@@ -185,8 +190,10 @@ export function pruneCapabilities(store: CapabilityStore, maxKept = VERSION_DIFF
   const entries = Object.entries(store.records)
   if (entries.length <= maxKept) return
   entries.sort((a, b) => {
-    const ar = Number.isFinite(a[1].recordedAt) ? a[1].recordedAt : -Infinity
-    const br = Number.isFinite(b[1].recordedAt) ? b[1].recordedAt : -Infinity
+    // 0.3.9（审查修复）：单条 null/非对象记录此前直接读 a[1].recordedAt 抛 TypeError →
+    // recordScan 的 catch 吞成整包 noop（该包乃至整个 store 的差分永久静默、审计中心空白）。
+    const ar = a[1] !== null && typeof a[1] === 'object' && Number.isFinite(a[1].recordedAt) ? a[1].recordedAt : -Infinity
+    const br = b[1] !== null && typeof b[1] === 'object' && Number.isFinite(b[1].recordedAt) ? b[1].recordedAt : -Infinity
     return br - ar
   })
   const keptKeys = new Set(entries.slice(0, maxKept).map(e => e[0]))
@@ -196,16 +203,30 @@ export function pruneCapabilities(store: CapabilityStore, maxKept = VERSION_DIFF
 }
 
 /** 上一个版本：同名、异版、recordedAt 最大者（不引入 semver 解析，规划 v2）。
- * round-15：recordedAt 非有限值的损坏记录不参与（否则 NaN 比较恒 false，排序任意）。 */
+ * round-15：recordedAt 非有限值的损坏记录不参与（否则 NaN 比较恒 false，排序任意）。
+ * 0.3.9（审查修复）：单条 null/非对象记录跳过（此前 record.name 直接 TypeError）。 */
 export function findPreviousRecord(store: CapabilityStore, name: string, version: string): CapabilityRecord | null {
   let best: CapabilityRecord | null = null
   for (const record of Object.values(store.records)) {
+    if (record === null || typeof record !== 'object') continue
     if (record.name !== name || record.version === version) continue
     if (!Number.isFinite(record.recordedAt)) continue
     // >=：同毫秒记录的 tie-break 取后插入者（object key 保持插入序，确定性）
     if (best === null || record.recordedAt >= best.recordedAt) best = record
   }
   return best
+}
+
+/** 0.3.9：清单是否「无任何已观测能力」——退化扫描（文件全不可读/全超限等）的产物。
+ * 判定任一能力面有值即非空；用于把空清单基线当作「从未观测过」处理（防假红级联）。 */
+export function isEmptyManifest(m: unknown): boolean {
+  if (m === null || typeof m !== 'object') return true
+  const mm = m as Record<string, unknown>
+  if (mm.hasNetwork === true || mm.hasExec === true || mm.hasNativeBinary === true) return false
+  for (const k of ['hosts', 'fsPaths', 'spawnCmds', 'imports', 'ghostDeps', 'zombieDeps']) {
+    if (Array.isArray(mm[k]) && (mm[k] as unknown[]).length > 0) return false
+  }
+  return true
 }
 
 /**
@@ -215,7 +236,9 @@ export function findPreviousRecord(store: CapabilityStore, name: string, version
  * credentials-app、.ssh/config（段 .ssh 整段）。裸 'key'/'token' 等宽泛词仍不入表。
  */
 export function isSensitiveFsPath(path: string): boolean {
-  const segs = path.toLowerCase().split('/')
+  // 0.3.9（审查修复）：按 / 与 \ 双分隔分段（Windows 载荷写反斜杠凭据路径时此前整段漏判，
+  // native+敏感Fs 等 red 组合随之降 info——实测 C:\Users\x\.ssh\id_rsa 返回 false）。
+  const segs = path.toLowerCase().split(/[\\/]/)
   const markers = [
     '.ssh', '.aws', '.dsh', '.gnupg', '.kube',
     'credentials', 'credential', 'authorized_keys',
@@ -242,7 +265,7 @@ function arrayDelta(prev: string[], next: string[]): { added: string[]; removed:
 
 const emptyDelta = (): ManifestDelta => ({
   hosts: [], fsPaths: [], spawnCmds: [], imports: [], ghostDeps: [], zombieDeps: [],
-  hasNetwork: false, hasExec: false,
+  hasNetwork: false, hasExec: false, hasNativeBinary: false, nativeBinaries: [],
 })
 
 /** 两份清单的差分（added/removed；布尔字段 = 是否新增/移除该能力）。
@@ -259,25 +282,36 @@ export function diffManifests(prev: CapabilityManifest, next: CapabilityManifest
   const imports = arrayDelta(prev.imports ?? [], next.imports ?? [])
   const ghostDeps = arrayDelta(prev.ghostDeps ?? [], next.ghostDeps ?? [])
   const zombieDeps = arrayDelta(prev.zombieDeps ?? [], next.zombieDeps ?? [])
+  // C4（0.3.8）：原生二进制——清单名差分管展示（首次观察时 prev 无名单 → 全部计新增）；
+  // 布尔新增按「prev !== true && next === true」口径（旧记录缺字段视为未观察过，见 ManifestDelta 注）。
+  const nativeNames = arrayDelta(prev.nativeBinaries ?? [], next.nativeBinaries ?? [])
   return {
     added: {
       hosts: hosts.added, fsPaths: fsPaths.added, spawnCmds: spawnCmds.added, imports: imports.added,
       ghostDeps: ghostDeps.added, zombieDeps: zombieDeps.added,
       hasNetwork: (prev.hasNetwork === false || prev.hasNetwork === undefined) && next.hasNetwork === true,
       hasExec: (prev.hasExec === false || prev.hasExec === undefined) && next.hasExec === true,
+      hasNativeBinary: prev.hasNativeBinary !== true && next.hasNativeBinary === true,
+      nativeBinaries: nativeNames.added,
     },
     removed: {
       hosts: hosts.removed, fsPaths: fsPaths.removed, spawnCmds: spawnCmds.removed, imports: imports.removed,
       ghostDeps: ghostDeps.removed, zombieDeps: zombieDeps.removed,
       hasNetwork: prev.hasNetwork === true && next.hasNetwork !== true,
       hasExec: prev.hasExec === true && next.hasExec !== true,
+      hasNativeBinary: prev.hasNativeBinary === true && next.hasNativeBinary !== true,
+      nativeBinaries: nativeNames.removed,
     },
   }
 }
 
 export function hasAnyAddition(delta: ManifestDelta): boolean {
   return delta.hosts.length > 0 || delta.fsPaths.length > 0 || delta.spawnCmds.length > 0 ||
-    delta.imports.length > 0 || delta.hasNetwork || delta.hasExec
+    delta.imports.length > 0 || delta.hasNetwork || delta.hasExec || delta.hasNativeBinary ||
+    // 0.3.9（审查修复）：原生二进制**名字**变化必须可见——换血（system.node → evil.node）
+    // 此前布尔不翻（prev 已 true）→ hasAnyAddition 恒 false → 升级零报警、vet_diff 也不显示
+    // 名字，与「宁可多报蓝、不静默」的自述口径矛盾。
+    (delta.nativeBinaries ?? []).length > 0
 }
 
 function describeDelta(delta: ManifestDelta): string[] {
@@ -290,19 +324,32 @@ function describeDelta(delta: ManifestDelta): string[] {
   for (const d of delta.zombieDeps) parts.push('僵尸依赖 ' + d + '（声明但未安装）')
   if (delta.hasNetwork) parts.push('网络能力')
   if (delta.hasExec) parts.push('执行能力')
+  // C4（0.3.8）：原生二进制定性词——「预编译、JS 规则面不可静态审」是它区别于其他能力项的点。
+  // 0.3.9（审查修复）：列名展示挂在「布尔或名单任一」上——换血场景布尔不翻但名单变了，
+  // 此前名字被布尔门挡住（报警消息与 vet_diff 同时静默）。
+  if (delta.hasNativeBinary || (delta.nativeBinaries ?? []).length > 0) {
+    const names = delta.nativeBinaries ?? []
+    parts.push(names.length > 0
+      ? '原生二进制 ' + names.slice(0, 3).join('/') + (names.length > 3 ? '…' : '') + '（预编译，不可静态审）'
+      : '原生二进制（预编译，不可静态审）')
+  }
   return parts
 }
 
 /**
- * 升级差分的严重度（0.3.6 改档）：普通新增能力 → info（蓝色观察，不再黄牌——DSH 模块化
+ * 升级差分的严重度（0.3.6 改档；0.3.8 组合扩列）：普通新增能力 → info（蓝色观察，不再黄牌——DSH 模块化
  * 升级会一次性升级几十个官方包，逐包黄牌 = 20 槽警报轰炸、盾牌假性持黄；升级是预期事件，
  * 差异详情仍完整留在 vet_diff/营养标签，报警面只留汇总行）；新增构成高敏感组合（执行+网络 /
- * 敏感路径+网络 / 敏感路径+执行）→ red（此组合是供应链投毒主签名，保持可行动）。
+ * 敏感路径+网络 / 敏感路径+执行 / **原生二进制+网络·执行·敏感路径**）→ red（此组合是供应链投毒
+ * 主签名，保持可行动）。C4 注：预编译二进制对 JS 规则面完全不可审，与任何强能力组合即构成
+ * 「不可见载荷 + 外联/执行/敏感触点」的投递形态——单独新增 .node 仍是 info（官方平台二进制包
+ * 升级会普遍命中，红轰炸违背 0.3.6 口径）。
  */
 export function upgradeSeverity(added: ManifestDelta): 'info' | 'red' | null {
   if (!hasAnyAddition(added)) return null
   const sensitiveFs = added.fsPaths.some(isSensitiveFsPath)
   const combo = (added.hasNetwork && added.hasExec) || (added.hasNetwork && sensitiveFs) || (added.hasExec && sensitiveFs)
+    || (added.hasNativeBinary && (added.hasNetwork || added.hasExec || sensitiveFs))
   return combo ? 'red' : 'info'
 }
 
@@ -343,6 +390,9 @@ export function recordScan(
       // round-4 review（H2）：差分必须在写盘之前完成——旧实现先写 store 再 diff，
       // diff 抛错时 catch 返回 no-op，但新记录已落盘（「no-op = 不写存储」的语义被破坏，
       // 且坏数据已固化）。先算差分（纯内存），成功后才写盘；diff 抛错 → 不写、返回 noop。
+      // 退化扫描的拦截在调用方（internal-plugin finish：sourceCount===0 且清单为空时不调
+      // recordScan，见 internal-plugin 0.3.9 注）——这里不按清单内容猜，避免误伤真正
+      // 「旧版无任何能力」的升级（空 1.0.0 → net+exec 2.0.0 应照常 red）。
       let outcome: VersionDiffOutcome
       if (prev === null) {
         // 冷启动：只记录；exec + network 双高组合给一条提示，不完全静默
@@ -353,7 +403,9 @@ export function recordScan(
             ? {
                 kind: 'upgrade-cold',
                 severity: 'info',
-                message: '新安装插件 ' + plugin + '@' + version + ' 声明 执行+网络 双高能力（首次记录，无旧版本可差分）——升级观察（N6 冷启动，蓝色提示，已聚合）',
+                message: '新安装插件 ' + plugin + '@' + version + ' 声明 执行+网络 双高能力'
+                  + (manifest.hasNativeBinary === true ? '（且含原生二进制，不可静态审）' : '')
+                  + '（首次记录，无旧版本可差分）——升级观察（N6 冷启动，蓝色提示，已聚合）',
               }
             : null
         outcome = { plugin, from: null, to: version, added: null, removed: null, severity: alarm?.severity ?? null, alarm }
@@ -381,8 +433,10 @@ export function history(pkg: string): VersionDiffHistory {
   return withVetSelfIo(() => {
     try {
       const store = loadCapabilities()
+      // 0.3.9（审查修复）：null/非对象记录跳过（此前 r.name 直接 TypeError → catch 吞成
+      // 整表「存储不可读」——一条坏记录瘫痪整个包的版本史/营养标签）。
       const records = Object.values(store.records)
-        .filter(r => r.name === pkg && Number.isFinite(r.recordedAt))
+        .filter(r => r !== null && typeof r === 'object' && r.name === pkg && Number.isFinite(r.recordedAt))
         .sort((a, b) => a.recordedAt - b.recordedAt)
       const versions = records.map(r => ({ version: r.version, recordedAt: r.recordedAt }))
       if (records.length === 0) {
@@ -429,7 +483,7 @@ export function label(pkg: string): CapabilityLabel {
       const store = loadCapabilities()
       // round-15：recordedAt 非有限值过滤（与 history 同款——损坏记录不参与排序/判定）
       const records = Object.values(store.records)
-        .filter(r => r.name === pkg && Number.isFinite(r.recordedAt))
+        .filter(r => r !== null && typeof r === 'object' && r.name === pkg && Number.isFinite(r.recordedAt))
         .sort((a, b) => a.recordedAt - b.recordedAt)
       const versions = records.map(r => ({ version: r.version, recordedAt: r.recordedAt }))
       if (records.length === 0) {

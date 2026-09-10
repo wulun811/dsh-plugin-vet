@@ -226,9 +226,10 @@ export function installConfigDiff(ctx: { baseUrl?: string; logger?: { warn(m: st
   const check = (): void => {
     const next = withVetSelfIo(() => snapshotTelemetryFields(profileDir))
     if (next === null) {
-      // 配置消失/不可读：静默（不报警——用户可能删了遥测配置）
-      prev = null
-      baselineReady = false
+      // 0.3.9（审查修复）：配置消失/不可读**不重置基线**——此前 prev=null +
+      // baselineReady=false，让「删→换」两段式改写（两个 15s 轮询间隙内完成）零信号：
+      // 下一轮直接以攻击者新值静默重建基线。保留旧基线：配置恢复后与旧值比对，
+      // 真正的 url/mode 更换照常黄警；同值恢复（或用户删配置后被恢复/覆盖）静默。
       return
     }
     if (!baselineReady) {

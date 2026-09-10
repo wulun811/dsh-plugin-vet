@@ -235,6 +235,10 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
                   esmNamedBuiltins: { type: 'boolean' },
                   ghostDeps: { type: 'array', items: { type: 'string' } },
                   zombieDeps: { type: 'array', items: { type: 'string' } },
+                  // C4（0.3.8）：原生二进制感知（文件面证据：.node/.so/.dll/.dylib/.exe/.wasm 等
+                  // 扩展名或 ELF/PE/Mach-O/wasm 魔数；预编译产物对 JS 规则面不可审）
+                  hasNativeBinary: { type: 'boolean' },
+                  nativeBinaries: { type: 'array', items: { type: 'string' } },
                 },
               },
             },

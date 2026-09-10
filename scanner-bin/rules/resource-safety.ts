@@ -36,52 +36,77 @@ function isEscapedCodePoint(pattern: string, idx: number): boolean {
   return bs % 2 === 1
 }
 
+/** R9 自分析工作预算（字符步数上限）：0.3.9（审查修复）——此前 findClose 对每个 '(' 全串
+ * 前扫、且 isEscapedCodePoint 逐位置回扫连续反斜杠，深嵌套/全反斜杠正则实测 O(n²)
+ * （64KB 嵌套 5.6s，文件内不可抢占 → 击穿宿主超时「R8-skip 恒先于 kill」的结构保证）。
+ * 预算保证最坏耗时上界；耗尽即保守返回（宁漏报不自伤）。 */
+const REDOS_WORK_BUDGET = 500_000
+
 export function isRedosPattern(pattern: string): boolean {
-  const findClose = (open: number): number => {
-    let depth = 0
-    for (let j = open; j < pattern.length; j++) {
-      const ch = pattern[j]
-      if (ch !== '(' && ch !== ')') continue
-      // round-9（0.1.16 加固）：转义括号不改变组深度
-      if (isEscapedCodePoint(pattern, j)) continue
-      if (ch === '(') depth++
-      else {
-        depth--
-        if (depth === 0) return j
-      }
+  const n = pattern.length
+  // 转义奇偶预计算（一次线性扫描）：等价于逐位置 isEscapedCodePoint，但不再是 O(n²)
+  const escaped = new Uint8Array(n)
+  {
+    let bs = 0
+    for (let j = 0; j < n; j++) {
+      escaped[j] = bs % 2 === 1 ? 1 : 0
+      if (pattern[j] === '\\') bs++
+      else bs = 0
     }
-    return -1
   }
-  for (let i = 0; i < pattern.length; i++) {
-    if (pattern[i] !== '(') continue
-    const close = findClose(i)
-    if (close === -1) return false
-    const inner = pattern.slice(i + 1, close)
-    let body = inner
-    if (body.startsWith('?:') || body.startsWith('?=') || body.startsWith('?!')) body = body.slice(2)
-    let hasInnerQuant = false
-    let depth = 0
-    for (let j = 0; j < body.length; j++) {
-      const ch = body[j]
-      if (ch === '(' || ch === ')') {
-        if (isEscapedCodePoint(body, j)) continue
-        if (ch === '(') depth++
-        else depth--
-        continue
-      }
-      if (depth === 0 && (ch === '*' || ch === '+' || ch === '?')) {
-        if (j === 0 || body[j - 1] !== '\\') { hasInnerQuant = true; break }
-      }
+  // 一次线性扫描：括号配对表 + 每个组「顶层」是否含量词/alternation 的累积器
+  // （顶层 = 相对该组深度 0，嵌套组只更新最内层——与旧实现的 depth 语义一致）
+  const closeOf = new Int32Array(n).fill(-1)
+  const topQuant = new Map<number, boolean>()
+  const topAlt = new Map<number, boolean>()
+  const stack: { open: number; quant: boolean; alt: boolean }[] = []
+  for (let j = 0; j < n; j++) {
+    if (escaped[j] === 1) continue
+    const ch = pattern[j]
+    if (ch === '(') {
+      stack.push({ open: j, quant: false, alt: false })
+      continue
     }
+    if (ch === ')') {
+      const g = stack.pop()
+      if (g === undefined) continue
+      closeOf[g.open] = j
+      topQuant.set(g.open, g.quant)
+      topAlt.set(g.open, g.alt)
+      continue
+    }
+    const top = stack[stack.length - 1]
+    if (top === undefined) continue
+    if (ch === '|') {
+      top.alt = true
+      continue
+    }
+    if (ch === '*' || ch === '+' || ch === '?') {
+      // 组前缀 (?: (?= (?! 的 '?' 不是量词（与旧实现 slice(2) 剥前缀同义）
+      if (ch === '?' && j === top.open + 1) continue
+      top.quant = true
+    }
+  }
+  let used = 0
+  for (let i = 0; i < n; i++) {
+    if (escaped[i] === 1 || pattern[i] !== '(') continue
+    const close = closeOf[i]
+    if (close === -1) return false
     const after = pattern[close + 1]
     // round-7（P3）：组后 '?'（(https?:)? 类）至多一次额外分支——回溯有界、最坏线性，
     // 不是 (a+)+ 类指数回溯（指数要求组后 */+ 可重复叠加）。外部实测 dsh-wechat-mp
     // markdown.js 的 /^(https?:)?\/\//i 常规 URL 探测误报 medium。
     if (after !== '*' && after !== '+') continue
     // 组内带量词 + 组后 */+：典型指数回溯
-    if (hasInnerQuant) return true
+    if (topQuant.get(i) === true) return true
     // 组内 alternation：分支互斥 → 线性不报；分支重叠 → 指数回溯报
-    if (hasAlternation(body) && !branchesDisjoint(body)) return true
+    if (topAlt.get(i) === true) {
+      let body = pattern.slice(i + 1, close)
+      used += body.length
+      if (used > REDOS_WORK_BUDGET) return false
+      if (body.startsWith('?:') || body.startsWith('?=') || body.startsWith('?!')) body = body.slice(2)
+      if (hasAlternation(body) && !branchesDisjoint(body)) return true
+    }
   }
   return false
 }

@@ -149,6 +149,13 @@ function DetailBody({ pal, dark, t, data }: { pal: ThemeTokens; dark: boolean; t
       hit: cap?.esmNamedBuiltins ?? false,
       detail: '',
     },
+    {
+      // C4（0.3.8）：原生二进制——预编译 .node/.so/.dll 等，JS 规则面不可审，必须显影
+      icon: '\ud83d\udd29', label: t('nut.native'),
+      value: (cap?.nativeBinaries?.length ?? 0) > 0 ? `${cap?.nativeBinaries?.length} bin` : (cap?.hasNativeBinary ?? false) ? 'native' : t('nut.none'),
+      hit: cap?.hasNativeBinary ?? false,
+      detail: cap?.nativeBinaries?.slice(0, 2).join('\n') || '',
+    },
   ]
 
   return (

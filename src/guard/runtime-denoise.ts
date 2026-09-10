@@ -5,6 +5,7 @@
 
 import type { HookConfig } from './runtime-ops.js'
 import { fileURLToPath } from 'node:url'
+import { normPath } from './path-utils.js'
 
 /**
  * T2 观测面单实参上限（round-22）：路径/命令实参超长按前缀截断。超长实参本身必然
@@ -203,7 +204,11 @@ export function isDshLockSiblingProbe(p: string): boolean {
  */
 /** DSH 安装树豁免：~/.dsh 下任意 profile 目录里的 node_modules 依赖树（判定见 isSensitivePath，round-17 去正则化）。 */
 export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'mutate' = 'mutate'): boolean {
-  const norm = p.replace(/\\/g, '/')
+  // 0.3.9（审查修复）：先做点段折叠（normPath 与 confirm-block/contract 同源）——
+  // 此前只换反斜杠，`…/.dsh/node_modules/x/../../.credentials.yaml` 这类**内核解析后**
+  // 指向凭据本体的别名路径会被 node_modules 豁免/后段不查的判定放行（实测返回 false）→
+  // T2 读侦察报警、N3 敏感台账、N1 隐藏能力差分对该路径全盲。
+  const norm = normPath(p)
   // DSH 安装树豁免：~/.dsh/**/node_modules/** 是平台自己装的公开依赖树（任意 profile 布局——
   // 本机 profiles/web/node_modules、用户机 .dsh/web/node_modules、顶层 hoisted node_modules）。
   // 插件加载期 require.resolve 触发 realpathSync（electron/install.js、dsh-traffic-light/package.json
