@@ -86,8 +86,9 @@ stdin/stdout are single-line JSON:
 // response
 { "ok": true, "report": { "engine", "sourceCount", "findings", "staticScore", "verdict", "capabilities" } }
 // capabilities (files mode, N1): { hosts[], fsPaths[], spawnCmds[], imports[], hasNetwork, hasExec, hasNativeBinary (0.3.8 C4) }
-// engine: 'static-v22' since 0.3.9（审查修复批次：缓存写入门控/单文件容错/环检测/限读等——规则
-// 判定语义沿用 static-v21 集，但缓存纪律与输出形态（R8-rule-error 元 finding）已变化，旧缓存失效）
+// engine: 'static-v23' since 0.3.10（R13 误报治理：端点形状/onion label 校验/守卫、测试与
+// 脱敏语境降 info——规则判定语义相对 v22 已变化，旧缓存失效；0.3.9 的 v22 为审查修复批次：
+// 缓存写入门控/单文件容错/环检测/限读，规则语义沿用 v21 但输出形态变化，旧缓存同样失效）
 ```
 
 ### 4.2 AST parsing

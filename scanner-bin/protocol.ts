@@ -112,8 +112,13 @@ export interface ScanReport {
    * ③ stringyValue/numberyValue 环检测 + 深度帽（自引用初始化器此前 RangeError → 整包 ok:false）；
    * ④ isExtensionlessJs 补 stat 守卫（无扩展名 FIFO 永久挂起）与 extOf 基名化（带点目录段下
    * 无扩展名入口判定的死代码）；⑤ R9 isRedosPattern 改线性配对 + 工作预算；⑥ 循环外
-   * package.json 读取改限量（大 manifest 不再绕开 8MB 预检）。规则行为与扫描面均变化。 */
-  engine: 'static-v22'
+   * package.json 读取改限量（大 manifest 不再绕开 8MB 预检）。规则行为与扫描面均变化。
+   * 0.3.10 起 static-v23（R13 误报治理，OSS 注册表 64 例反馈）——① 端点形状：整字面量
+   * 必须整体形如 host/IP/URL，散文/标签/说明串不再命中；② Tor 只认合法 label（v2 16 /
+   * v3 56 base32），action.onion 类垃圾不再命中；③ 守卫/拒绝名单语境（=== 比较操作数、
+   * new Set().has 消费、Object.freeze 表、容器绑定名守卫语义）与测试/CI 文件降 info；
+   * ④ [REDACTED]、***、xxxx 脱敏占位降 info。R13 判定语义变化，旧缓存作废。 */
+  engine: 'static-v23'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -162,11 +167,14 @@ export interface ScanResponse {
  * 原生扩展名命中或 ELF/PE/Mach-O/wasm 魔数命中；命中文件不解析、不入 sourceCount）。
  * 输出形状变化（且扫描面自 0.3.8 起含原生扩展文件，cacheKey 随之漂移），引擎版本递增失效旧缓存。
  * 0.3.9（审查修复）：缓存写入门控（预算耗尽不缓存）、单文件容错元 finding、ast 环检测/深度帽、
- * FIFO 守卫与 extOf 基名化、R9 线性化、循环外 package.json 限量读——规则行为与形状均有变化。 */
-export const ENGINE_VERSION = 'static-v22' as const
+ * FIFO 守卫与 extOf 基名化、R9 线性化、循环外 package.json 限量读——规则行为与形状均有变化。
+ * 0.3.10（R13 误报治理）：R13 判定收紧——端点形状（① 散文/标签不再命中）、Tor label 校验
+ * （② action.onion 不再命中）、守卫/拒绝名单与测试/CI 语境降 info（③⑤）、脱敏占位降 info
+ * （④）——规则行为变化，旧缓存作废。 */
+export const ENGINE_VERSION = 'static-v23' as const
 
-/** The rules of static-v22（规则集与 static-v21 一致；v22 为引擎健壮性/缓存纪律修复批次，
- * 规则判定语义未变，但新增 R8-rule-error 元 finding 形态）。 R8 is a meta finding emitted by the engine (scan timeout skip / per-file error skip);
+/** The rules of static-v23（规则集相对 v22 变化：R13 误报治理——端点形状/onion label 校验/
+ * 守卫、测试与脱敏语境降 info，真阳性通道保持 high）。 R8 is a meta finding emitted by the engine (scan timeout skip / per-file error skip);
  * R17/R18/R19 are surface-gated text/config rules (emitted by the engine, not per-file AST rules);
  * R20 is a per-file AST rule (exec/spawn-family argument download-and-exec, registry-driven);
  * OSV / OSV-T are engine-emitted data-source findings (OSV advisory board / transitive upstream-radar)
