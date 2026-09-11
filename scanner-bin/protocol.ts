@@ -117,8 +117,16 @@ export interface ScanReport {
    * 必须整体形如 host/IP/URL，散文/标签/说明串不再命中；② Tor 只认合法 label（v2 16 /
    * v3 56 base32），action.onion 类垃圾不再命中；③ 守卫/拒绝名单语境（=== 比较操作数、
    * new Set().has 消费、Object.freeze 表、容器绑定名守卫语义）与测试/CI 文件降 info；
-   * ④ [REDACTED]、***、xxxx 脱敏占位降 info。R13 判定语义变化，旧缓存作废。 */
-  engine: 'static-v23'
+   * 0.3.11 起 static-v24（R3 dev/ops 脚本中间态，OSS 注册站 329 样本反馈）——根级
+   * dev/ops 脚本（check-*、dev-*、docker-*、*-install 等明确动词名）里的 process.exit/reallyExit
+   * 从 critical 降为 high（仍在 verdict/评分内，不再推最高档）+ message 前缀标记 dev-script；
+   * getBuiltinModule/mainModule/module 与运行时文件名（transport/cli/desktop/start-*）、
+   * scripts/ 目录（0.3.9 立场）均不参与。R3 判定语义变化，旧缓存作废。
+   * 0.3.12 起 static-v25（审查修正）：根级判定改为**相对包根**（package.json 所在目录平铺、
+   * 深度 1）——首发版深度无关 basename 匹配会把 scripts/、lib/ 等嵌套运行时文件一并降档，
+   * 与「scripts/ 是产品代码、运行时文件名不参与」的立场矛盾；现仅包根平铺的明确 dev/ops
+   * 动词脚本降档，无 package.json 上下文保守不降。R3 判定语义变化，旧缓存作废。 */
+  engine: 'static-v25'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -170,11 +178,24 @@ export interface ScanResponse {
  * FIFO 守卫与 extOf 基名化、R9 线性化、循环外 package.json 限量读——规则行为与形状均有变化。
  * 0.3.10（R13 误报治理）：R13 判定收紧——端点形状（① 散文/标签不再命中）、Tor label 校验
  * （② action.onion 不再命中）、守卫/拒绝名单与测试/CI 语境降 info（③⑤）、脱敏占位降 info
- * （④）——规则行为变化，旧缓存作废。 */
-export const ENGINE_VERSION = 'static-v23' as const
+ * （④）——规则行为变化，旧缓存作废。
+ * 0.3.11（R3 dev/ops 中间态）：根级明确开发/运维动词脚本（check-pr-title.mjs /
+ * dev-install.mjs / uninstall.mjs / docker-init.mjs 等）内的 process.exit/reallyExit 从
+ * critical 降为 high + message 标记 dev-script；getBuiltinModule/mainModule/module、
+ * 运行时文件名（transport/cli/desktop/start-*）与 scripts/ 目录保持 critical——规则行为
+ * 变化，旧缓存作废。
+ * 0.3.12（审查修正）：上述「根级」改按 package.json 所在目录界定（仅深度 1 平铺）——
+ * 首发版按 basename 深度无关匹配把 scripts/、lib/ 等嵌套文件也降档，与「scripts/ 是产品
+ * 代码、运行时文件名不参与」立场矛盾；修正后嵌套文件一律不降，无 package.json 保守不降——
+ * 规则行为变化，旧缓存作废。 */
+export const ENGINE_VERSION = 'static-v25' as const
 
-/** The rules of static-v23（规则集相对 v22 变化：R13 误报治理——端点形状/onion label 校验/
- * 守卫、测试与脱敏语境降 info，真阳性通道保持 high）。 R8 is a meta finding emitted by the engine (scan timeout skip / per-file error skip);
+/** The rules of static-v25（规则集相对 v24 变化：R3 dev/ops 中间态改**相对包根**的根级判定——
+ * 0.3.11 首发的深度无关 basename 匹配会把 scripts/、lib/ 等嵌套的运行时文件一并降档（与
+ * 「scripts/ 是产品代码、运行时文件名不参与」的立场矛盾），审查修正为：仅包根平铺
+ * （相对 package.json 所在目录深度 1）的明确 dev/ops 动词脚本才降 critical→high+dev-script
+ * 标记，无 package.json 上下文保守不降；getBuiltinModule/mainModule/module 与运行时文件名
+ * 仍保持 critical）。 R8 is a meta finding emitted by the engine (scan timeout skip / per-file error skip);
  * R17/R18/R19 are surface-gated text/config rules (emitted by the engine, not per-file AST rules);
  * R20 is a per-file AST rule (exec/spawn-family argument download-and-exec, registry-driven);
  * OSV / OSV-T are engine-emitted data-source findings (OSV advisory board / transitive upstream-radar)
@@ -198,6 +219,10 @@ export interface RuleContext {
   /** N2：本文件静态可求值的解码字面量（base64/hex/charCode/常量拼接/模板串），
    * 引擎在规则执行前产出，R13/R7/R11/R20 并入匹配语料（规则判定逻辑不变，只是"看得更清楚"）。 */
   decodedLiterals?: DecodedLiteral[]
+  /** 包根目录（files 模式：文件列表中 package.json 所在目录，round-24/0.3.11 审查修正）——
+   * 供规则做**相对包根**的位置判定（如 R3 dev/ops 中间态只认根级平铺的 dev 脚本）。
+   * 无 package.json（code 模式 / 消费方未传清单）为 undefined → 规则保守不降。 */
+  pkgRoot?: string
 }
 
 export const SEVERITIES: readonly Severity[] = ['critical', 'high', 'medium', 'info']

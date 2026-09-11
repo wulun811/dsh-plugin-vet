@@ -553,6 +553,7 @@ function scanFiles(request: ScanRequest): ScanResponse {
         cliFiles: shape?.cliFiles,
         appShape: shape?.appShape,
         filePath: file,
+        pkgRoot: pkgJson === undefined ? undefined : dirname(pkgJson),
         decodedLiterals,
       })
       for (const f of fileFindings) {

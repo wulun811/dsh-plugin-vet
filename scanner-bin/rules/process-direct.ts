@@ -89,6 +89,45 @@ export function isTestOrCiFile(fileName: string): boolean {
 }
 
 /**
+ * round-24/25（0.3.11→0.3.12 修正）：dev/ops 脚本形态判定——**包根平铺**（相对 package.json
+ * 所在目录深度 1）且 basename 命中保守的开发/运维动词白名单（check-pr-title.mjs /
+ * dev-install.mjs / uninstall.mjs / docker-init.mjs / register-plugin.mjs 等）。
+ * 刻意窄，两处修正共同守住反漏报立场：
+ *  ① 根级 = 相对包根（engine 从 files 列表的 package.json 推导 pkgRoot）深度 1：
+ *     0.3.11 首发按 basename 深度无关匹配，把 scripts/、lib/ 等嵌套运行时文件一并降档——
+ *     与「scripts/ 是产品代码（integration-dsh-so #5）、运行时文件名不参与」的立场矛盾，
+ *     现修正为深度 1 才可能命中；无 package.json 上下文（code 模式/消费方未传清单）→
+ *     无法界定包根，保守不降。
+ *  ② 只认明确动词名——transport.js / cli.ts / desktop.ts / start-*.mjs /
+ *     session-drive.mjs 等运行时文件不命中（它们是真实产品面，escape 意图不能被
+ *     文件名伪装抹掉）；build.mjs 孤立名也不命中（须带分隔符 build-x.mjs）。
+ * 宁可少降：本判定只把 critical 降到 high（仍在 verdict/评分内），不是 info 级白名单。
+ */
+export function isDevOpsScriptFile(fileName: string, pkgRoot: string | undefined): boolean {
+  if (pkgRoot === undefined) return false // 无包根上下文 → 保守不降
+  const full = fileName.replace(/\\/g, '/')
+  let root = pkgRoot.replace(/\\/g, '/')
+  if (root.endsWith('/')) root = root.slice(0, -1)
+  let rel: string
+  if (root === '.') {
+    // 相对路径形态（消费方传相对路径）：文件路径本身即相对段
+    rel = full
+  } else {
+    if (!full.startsWith(root + '/')) return false
+    rel = full.slice(root.length + 1)
+  }
+  if (rel === '' || rel.includes('/')) return false // 仅包根平铺（深度 1）
+  const name = rel.replace(/\.[^.]+$/, '')
+  // 生命周期精确名（npm/tooling 约定文件）
+  if (/^(?:install|uninstall|preinstall|postinstall|prepare|prepublish|prepublishOnly|prepack|postpack|teardown)$/i.test(name)) return true
+  // 明确开发/运维动词前缀（须带分隔符：build.mjs 不命中，build-x.mjs 命中）
+  if (/^(?:check|verify|dev|docker|setup|build|make|gen|generate|register|sync|bump|release|deploy|validate|lint|fmt|format|migrate|clean|reset|install|uninstall)[._-]/i.test(name)) return true
+  // 带 install/uninstall/teardown 尾巴（dev-install 已由 dev- 命中；plugin-uninstall 形态）
+  if (/[-_.](?:install|uninstall|teardown)$/i.test(name)) return true
+  return false
+}
+
+/**
  * round-22：`const { exit, pid } = process` 解构绑定 → { 使用名: process 成员名 }。
  * 解构成员调用（exit(1) / getBuiltinModule('fs')）与 process.exit 同一条逃逸通道，
  * 旧遍历在调用点只见匿名标识符 → 全部落「裸 process 引用」info。
@@ -136,6 +175,22 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
     }
     return { severity, message }
   }
+  /**
+   * round-24/25（0.3.11→0.3.12 修正，OSS 注册站 R3 冲击反馈）：dev/ops 脚本中间态。
+   * 包根平铺的明确 dev/ops 脚本里的 process.exit/reallyExit 从 critical 降为 high——仍在
+   * verdict/评分内（decisive，至少 suspicious），只是不再把插件推到最高档；message 前缀带
+   * 可观测标记 dev-script（R13 context-marker 同款模式，下游按自己的政策分账）。刻意保守：
+   *  ① 只作用于 exit/reallyExit——getBuiltinModule/mainModule/module 是真实能力逃逸成员，
+   *     任何位置保持 critical；
+   *  ② 只认包根平铺（深度 1，相对 pkgRoot）的明确动词名——运行时文件名与 scripts/、lib/
+   *     等嵌套目录不命中，防用文件名做逃逸伪装（宁可少降，0.3.9 防漏报立场不变）；
+   *     无 package.json 上下文（pkgRoot 缺失）保守不降。
+   */
+  const devOpsCap = (severity: Severity, message: string, member: string | undefined): { severity: Severity; message: string } => {
+    if (severity !== 'critical' || (member !== 'exit' && member !== 'reallyExit')) return { severity, message }
+    if (!isDevOpsScriptFile(ctx.filePath ?? sf.fileName, ctx.pkgRoot)) return { severity, message }
+    return { severity: 'high', message: 'dev/ops 脚本语境（dev-script）：' + message }
+  }
   walk(sf, n => {
     if (!ts.isIdentifier(n) || n.text !== 'process') return
     if (isShadowed('process', n)) return
@@ -144,9 +199,10 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
     let severity: Severity = 'info'
     let message = '裸 process 引用（可能为 typeof 探测）'
     let evidence = n.getText(sf)
+    let member: string | undefined // 成员名（各分支赋值；round-24 dev/ops 中间态判定用）
 
     if (parent !== undefined && ts.isPropertyAccessExpression(parent) && parent.expression === n) {
-      const member = parent.name.text
+      member = parent.name.text
       evidence = parent.getText(sf)
       // round-5：process.on/once('SIG*', handler) 注册信号处理器是常驻插件正常操作面 → info
       if (SIGNAL_EVENTS.has(member) && ts.isCallExpression(parent.parent)) {
@@ -181,7 +237,7 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
       // process 是属性名而非表达式，旧检查（parent.expression === n）不成立 → 落默认 info 漏检。
       // 与标准形态同一成员口径：exit/mainModule/binding 等 critical，只读成员 info，副作用 high。
       const gp = parent.parent
-      const member = gp !== undefined && ts.isPropertyAccessExpression(gp) && gp.expression === parent ? gp.name.text : undefined
+      member = gp !== undefined && ts.isPropertyAccessExpression(gp) && gp.expression === parent ? gp.name.text : undefined
       evidence = member !== undefined && gp !== undefined ? gp.getText(sf) : parent.getText(sf)
       if (member === undefined) {
         severity = 'info'
@@ -204,7 +260,7 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
     } else if (parent !== undefined && ts.isElementAccessExpression(parent) && parent.expression === n) {
       // F4：process['exit'] 括号访问此前只报 info——同样致命，按属性访问口径判定
       const arg = parent.argumentExpression
-      const member = ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg) ? arg.text : undefined
+      member = ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg) ? arg.text : undefined
       evidence = parent.getText(sf)
       if (member !== undefined && CRITICAL_MEMBERS.has(member)) {
         severity = 'critical'
@@ -235,11 +291,12 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
       message = '能力触达面（' + why + '）：' + message
     }
 
+    const cap = devOpsCap(severity, message, member)
     found.push({
       rule: 'R3',
-      severity,
+      severity: cap.severity,
       confidence: 'certain',
-      message,
+      message: cap.message,
       evidence: evidence.slice(0, 300),
       line: lineOf(sf, n),
     })
@@ -281,11 +338,12 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
     }
     if (severity === 'critical' && ctx.runtime === 'sandbox') severity = 'high'
     const d = degrade(severity, message)
+    const cap = devOpsCap(d.severity, d.message, member)
     found.push({
       rule: 'R3',
-      severity: d.severity,
+      severity: cap.severity,
       confidence: 'certain',
-      message: d.message,
+      message: cap.message,
       evidence: evidence.slice(0, 300),
       line: lineOf(sf, n),
     })
@@ -312,11 +370,12 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
       }
       if (severity === 'critical' && ctx.runtime === 'sandbox') severity = 'high'
       const d = degrade(severity, message)
+      const cap = devOpsCap(d.severity, d.message, member)
       found.push({
         rule: 'R3',
-        severity: d.severity,
+        severity: cap.severity,
         confidence: 'certain',
-        message: d.message,
+        message: cap.message,
         evidence: n.getText(sf),
         line: lineOf(sf, n),
       })

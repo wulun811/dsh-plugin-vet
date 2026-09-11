@@ -86,9 +86,14 @@ stdin/stdout are single-line JSON:
 // response
 { "ok": true, "report": { "engine", "sourceCount", "findings", "staticScore", "verdict", "capabilities" } }
 // capabilities (files mode, N1): { hosts[], fsPaths[], spawnCmds[], imports[], hasNetwork, hasExec, hasNativeBinary (0.3.8 C4) }
-// engine: 'static-v23' since 0.3.10（R13 误报治理：端点形状/onion label 校验/守卫、测试与
-// 脱敏语境降 info——规则判定语义相对 v22 已变化，旧缓存失效；0.3.9 的 v22 为审查修复批次：
-// 缓存写入门控/单文件容错/环检测/限读，规则语义沿用 v21 但输出形态变化，旧缓存同样失效）
+// engine: 'static-v25' since 0.3.12（R3 dev/ops 根级判定审查修正：根级=相对 package.json
+// 所在目录平铺深度 1——0.3.11 首发的 basename 深度无关匹配会把 scripts/、lib/ 等嵌套运行时
+// 文件一并降档，与「scripts/ 是产品代码、运行时文件名不参与」立场矛盾，现修正；无
+// package.json 上下文保守不降——规则判定语义相对 v24 已变化，旧缓存失效；0.3.11 的 v24 为
+// R3 dev/ops 中间态首版：根级明确动词脚本的 exit 降 high+dev-script 标记；0.3.10 的 v23 为
+// R13 误报治理：端点形状/onion label 校验/守卫、测试与脱敏语境降 info——规则判定语义相对
+// v22 已变化，旧缓存失效；0.3.9 的 v22 为审查修复批次：缓存写入门控/单文件容错/环检测/
+// 限读，规则语义沿用 v21 但输出形态变化，旧缓存同样失效）
 ```
 
 ### 4.2 AST parsing

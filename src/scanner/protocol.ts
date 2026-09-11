@@ -74,8 +74,8 @@ export interface CapabilityManifest {
 }
 
 export interface ScanReport {
-  /** 与 scanner-bin/protocol.ts 同步；0.3.3 起 static-v19，round-22 起 static-v20，0.3.8（C4 原生二进制感知）起 static-v21，0.3.9（审查修复批次）起 static-v22，0.3.10（R13 误报治理）起 static-v23。 */
-  engine: 'static-v23'
+  /** 与 scanner-bin/protocol.ts 同步；0.3.3 起 static-v19，round-22 起 static-v20，0.3.8（C4 原生二进制感知）起 static-v21，0.3.9（审查修复批次）起 static-v22，0.3.10（R13 误报治理）起 static-v23，0.3.11（R3 dev/ops 脚本中间态）起 static-v24，0.3.12（R3 根级判定审查修正：相对包根平铺）起 static-v25。 */
+  engine: 'static-v25'
   sourceCount: number
   findings: Finding[]
   staticScore: number
