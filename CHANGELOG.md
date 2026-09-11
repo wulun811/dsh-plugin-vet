@@ -3,6 +3,97 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.3.12] - 2026-09-12
+
+Self-review correction of the 0.3.11 R3 dev/ops tier: the shipped v24 implementation matched
+the dev-verb **basename at any directory depth**, which capped nested runtime files too —
+contradicting both the published intent ("root-level only, `scripts/` excluded") and the
+0.3.9 line that `scripts/` is product code. Engine version bumped `static-v24 → static-v25`
+— all stale scanner caches are invalidated.
+
+### Fixed — R3 dev/ops tier is now genuinely package-root scoped
+
+- The tier now applies only to files **flat at the package root** — depth 1 relative to the
+  `package.json` location, which the engine derives from the file list (`RuleContext.pkgRoot`,
+  scanner-internal). Nested files (`scripts/check-*.mjs`, `lib/install.js`, `src/dev-*.mjs`)
+  never match, closing the "name a payload script dev-install.mjs to dodge the top tier"
+  window at nested depths; runtime filenames (`transport/cli/desktop/start-*`) still never
+  match. Without a `package.json` in the scan there is no root to anchor to, so the
+  downgrade is conservatively **not** applied (finding stays `critical`).
+- Everything else from 0.3.11 stands unchanged: `exit`/`reallyExit` only,
+  `getBuiltinModule`/`mainModule`/`module` stay `critical` anywhere, test/CI downgrade
+  precedence, `dev-script` marker, code mode and sandbox unaffected.
+
+### Tests
+
+- `test/r3-devtool-tier.test.ts` (rewritten): every tree now ships a `package.json` (the
+  realistic registry shape); +cases for the correction: `scripts/check-pr-title.mjs`,
+  `lib/install.js`, `src/dev-tool.mjs` stay `critical`; no-`package.json` scan → `critical`
+  (conservative). The reporter's 8-plugin baseline is reenacted with a package root.
+- `test/hardening-rules.test.ts`, `test/n5-dynamic-provenance.test.ts` —
+  `ENGINE_VERSION` assertions `v24 → v25`.
+- 80 test files, 1187 passed | 1 skipped.
+
+## [0.3.11] - 2026-09-12
+
+Follow-up release from the same registry partnership (zhousm666/dsh.so): wires their
+64-hit R13 corpus as regression fixtures (delivered in §7 of the issue thread) and adds
+an R3 (direct process access) mid-tier for dev/ops scripts, per their 329-plugin
+dual-engine (static-v20 vs static-v23) evaluation. Engine version bumped
+`static-v23 → static-v24` — all stale scanner caches are invalidated.
+
+### Added — regression fixtures for the 64-hit R13 corpus (§7)
+
+- `test/fixtures/r13-corpus-64.json` — the verbatim corpus as delivered: 64 findings /
+  35 plugins (53 × `static-v20`, 11 legacy `engine: null`), reconciled against the issue
+  body: 10 × `.onion` (0 valid addresses), 1 test-file hit, 1 redacted webhook template.
+- `test/r13-corpus.test.ts` (data-driven):
+  - ① 10 onion-marked entries → zero hits (all invalid labels);
+  - ② 17 prose-or-label entries → zero hits (whole-literal endpoint shape);
+  - ③ redacted entry → `info`;
+  - ④ test-file entry → `info`, verdict `clean`;
+  - ⑤ 9 source-verified deny-list/guard entries → `info` (evidence-faithful guard
+    reenactment per plugin);
+  - ⑥ shape-level guardrail: the corpus's bare endpoint literals still surface `high`
+    in a plain literal context (`discord.com/api/webhooks`, `hooks.slack.com/services`,
+    `http://169.254.169.254`) — no over-suppression; the sentence-cropped
+    `http://metadata.google.internal.` is a shape boundary → zero hits;
+  - ⑦ guard-context variants of ⑥ → `info`.
+
+### Changed — R3 dev/ops-script mid-tier (registry verdict inflation)
+
+Per their 329-plugin stratified sample: 8/329 plugins had their verdict pushed to
+`critical` solely by R3-`critical` on root-level dev/ops scripts (`check-pr-title.mjs`,
+`dev-install.mjs`, `uninstall.mjs`, `docker-init.mjs`, `cli.ts`, `transport.js`, …).
+
+- `process.exit`/`process.reallyExit` in files whose basename is a clear dev/ops verb
+  (`check-*`, `dev-*`, `docker-*`, `*-install`, exact lifecycle names, …) is downgraded
+  `critical → high` — still decisive (verdict `suspicious` at worst, no longer the top
+  banner) — with a greppable `dev-script` context marker in the message (same
+  observability pattern as the R13 guard/test/redacted markers).
+  - *Correction (0.3.12): the shipped v24 implementation matched the dev-verb basename
+    at any directory depth, which also capped nested runtime files (`scripts/check-*.mjs`,
+    `lib/install.js`). The v25 engine restricts the tier to package-root files
+    (depth 1 relative to the `package.json` location); without a `package.json` in the
+    scan the downgrade is conservatively not applied. See the 0.3.12 entry.*
+- Deliberately narrow, so the 0.3.9 anti-false-negative stance is untouched:
+  `getBuiltinModule`/`mainModule`/`module` stay `critical` anywhere; runtime-shaped
+  filenames (`transport.js`, `cli.ts`, `desktop.ts`, `start-*.mjs`, `session-drive.mjs`)
+  and `scripts/`-directory files (incl. `build.mjs`) are not matched
+  (integration-dsh-so #5 unchanged); code mode and sandbox runtime unaffected.
+
+### Tests
+
+- `test/r3-devtool-tier.test.ts` — +9 cases: dev five-some downgraded, runtime three-some
+  and `scripts/build.mjs` stay `critical`, `getBuiltinModule` in a dev script stays
+  `critical`, test/CI downgrade precedence, code-mode unaffected, the reporter's 8-plugin
+  baseline reenacted.
+- `test/r13-corpus.test.ts` + `test/fixtures/r13-corpus-64.json` — 64-entry corpus wired
+  (see above).
+- `test/hardening-rules.test.ts`, `test/n5-dynamic-provenance.test.ts` —
+  `ENGINE_VERSION` assertions `v23 → v24`.
+- 80 test files, 1185 passed | 1 skipped.
+
 ## [0.3.10] - 2026-09-11
 
 R13 (network-exfil) false-positive governance, based on an upstream bug report backed by a
