@@ -18,7 +18,7 @@ function r15sOf(report: { findings: Finding[] }): Finding[] {
 }
 
 describe('N5 R15 dynamic-string provenance (网络目标动态构造)', () => {
-  it('规则已注册：RULES 含 R15，RULE_IDS 含 R15/R16/R17/R18/R19/R20/OSV/OSV-T，ENGINE_VERSION 递增为 static-v23（缓存失效）', () => {
+  it('规则已注册：RULES 含 R15，RULE_IDS 含 R15/R16/R17/R18/R19/R20/OSV/OSV-T，ENGINE_VERSION 递增为 static-v25（缓存失效）', () => {
     expect(RULES.some(r => r.id === 'R15')).toBe(true)
     expect(RULES.some(r => r.id === 'R20')).toBe(true)
     expect(RULE_IDS).toContain('R15')
@@ -29,7 +29,7 @@ describe('N5 R15 dynamic-string provenance (网络目标动态构造)', () => {
     expect(RULE_IDS).toContain('R20')
     expect(RULE_IDS).toContain('OSV')
     expect(RULE_IDS).toContain('OSV-T')
-    expect(ENGINE_VERSION).toBe('static-v23')
+    expect(ENGINE_VERSION).toBe('static-v25')
   })
 
   it('fetch(动态拼接) → R15 info/heuristic', () => {

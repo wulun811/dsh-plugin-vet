@@ -22,8 +22,8 @@ function ofRule(fs: Finding[], rule: string): Finding[] {
 }
 
 describe('0.1.16 加固批次——scanner 规则补丁', () => {
-  it('ENGINE_VERSION 递增为 static-v23（缓存失效）', () => {
-    expect(ENGINE_VERSION).toBe('static-v23')
+  it('ENGINE_VERSION 递增为 static-v25（缓存失效）', () => {
+    expect(ENGINE_VERSION).toBe('static-v25')
   })
 
   describe('R2 间接/前缀 eval-Function', () => {
