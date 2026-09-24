@@ -15,7 +15,7 @@ import { resolvePackageRoot } from '../lib/scanner/package-sources.js'
 import { VetConfigSchema } from '../lib/config.js'
 import { VetStatus } from '../lib/guard/status.js'
 import { setArchiveDirForTest, hasAuditRecord, setArchiveIoWarn } from '../lib/audit/archive.js'
-import { setBaselineDirForTest } from '../lib/guards/content-baseline.js'
+import { computePackageHash, setBaselineDirForTest } from '../lib/guards/content-baseline.js'
 import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
 import { setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
 import { setCatalogAutoRefresh } from '../lib/guards/official-catalog.js'
@@ -332,6 +332,40 @@ describe('internal/plugin guard', () => {
       expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining('auto-scan @deepseek-ai/evil-official'))
     } finally {
       setBaselineDirForTest(undefined)
+      rmSync(profile, { recursive: true, force: true })
+      rmSync(bdir, { recursive: true, force: true })
+    }
+  })
+
+  it('0.3.13：catalog 内官方包的构建产物命中折 info（auto-scan verdict clean）；授权源码命中仍 critical', async () => {
+    setCatalogAutoRefresh(false)
+    const profile = mkdtempSync(join(tmpdir(), 'vet-ofscan-'))
+    const bdir = mkdtempSync(join(tmpdir(), 'vet-ofbl-'))
+    const official = join(profile, 'node_modules', '@deepseek-ai', 'dsh-tools')   // catalog 内真名
+    const authored = join(profile, 'node_modules', '@deepseek-ai', 'dsh-session') // 同样 catalog 内真名
+    mkdirSync(join(official, 'lib'), { recursive: true })
+    mkdirSync(authored, { recursive: true })
+    writeFileSync(join(official, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-tools', version: '9.9.9', main: 'lib/index.js' }))
+    writeFileSync(join(official, 'lib', 'index.js'), 'module.exports = ' + ESCAPE)   // 构建产物里的逃逸形态
+    writeFileSync(join(authored, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-session', version: '9.9.9', main: 'index.js' }))
+    writeFileSync(join(authored, 'index.js'), 'module.exports = ' + ESCAPE)          // 授权源码里的同一形态
+    setBaselineDirForTest(join(bdir, 'baseline'))
+    try {
+      const ctx = new FakeCtx()
+      ctx.baseUrl = profile
+      const status = new VetStatus()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'report', contentBaseline: true }), status)
+      const h = ctx.handlers.get('internal/plugin')![0]
+      h(fiber({ entry: { options: { name: '@deepseek-ai/dsh-tools' } } }))
+      h(fiber({ entry: { options: { name: '@deepseek-ai/dsh-session' } } }))
+      // report 模式为异步 spawn 扫描：两次 auto-scan 各自完成后才打日志（实测约 1-2s）
+      await vi.waitFor(() => {
+        expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining('auto-scan @deepseek-ai/dsh-tools → clean'))
+        expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining('auto-scan @deepseek-ai/dsh-session → critical'))
+      }, { timeout: 10_000 })
+    } finally {
+      setBaselineDirForTest(undefined)
+      setCatalogAutoRefresh(true)
       rmSync(profile, { recursive: true, force: true })
       rmSync(bdir, { recursive: true, force: true })
     }
@@ -737,6 +771,61 @@ describe('目标身份分级（targetKind，§14.3 边界落地）', () => {
       expect(r4).toBeDefined()
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // 0.3.13：官方包产物降噪位（officialFamily）只在「目录成员 + 字节未改动」时开启。
+  // 用临时基线目录隔离（setBaselineDirForTest），以真实目录名 @deepseek-ai/dsh-tools
+  // 走 first-seen → match → mismatch 三态。
+  it('officialFamily 四态：首见开（升级主场景）/ match 开 / mismatch 关（字节偏离）/ 已登记补丁开', () => {
+    const bdir = mkdtempSync(join(tmpdir(), 'vet-of-'))
+    setBaselineDirForTest(join(bdir, 'baseline'))
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: '@deepseek-ai/dsh-tools', version: '9.9.9', main: 'lib/index.js' }),
+      'lib/index.js': 'module.exports = () => process.kill(1, "SIGTERM")\n',
+    })
+    try {
+      const first = buildRequest({ target: 'package', packagePath: dir })
+      expect(first.request.officialFamily).toBe(true) // 首见：目录成员，享降噪
+      const match = buildRequest({ target: 'package', packagePath: dir })
+      expect(match.request.officialFamily).toBe(true) // 同字节 match：仍享
+      // 本机改动字节 → mismatch：不享降噪（且 targetKind 退回严格 plugin）
+      writeFileSync(join(dir, 'lib', 'index.js'), 'module.exports = () => process.kill(2, "SIGKILL")\n')
+      const tampered = buildRequest({ target: 'package', packagePath: dir })
+      expect(tampered.request.officialFamily).toBeUndefined()
+      expect(tampered.request.targetKind).toBe('plugin')
+      // 0.3.13（用户决策「纳入降噪」）：同一 mismatch，但当前字节的 hash 已在
+      // acknowledged-package-hashes 登记（用户认领本机合法补丁）→ 产物降噪照给；
+      // targetKind 仍是 plugin（身份层不因声明放松——登记只改规则档位，不改信任判定）
+      const acked = buildRequest(
+        { target: 'package', packagePath: dir },
+        { '@deepseek-ai/dsh-tools@9.9.9': [computePackageHash(dir)!.hash] },
+      )
+      expect(acked.request.officialFamily).toBe(true)
+      expect(acked.request.targetKind).toBe('plugin')
+      // 端到端：登记补丁的 mismatch 真扫一遍——产物命中折 info（verdict clean）；未登记仍严格
+      const ackedScan = scan(acked.request)
+      expect(ackedScan.report!.verdict).toBe('clean')
+      expect(ackedScan.report!.findings.find(f => f.rule === 'R3')!.message).toContain('构建产物（官方包降噪）：')
+      expect(scan(tampered.request).report!.verdict).toBe('suspicious')
+      // 登记的是别的内容（认领 hash ≠ 当前字节）→ 不降噪（防「登记一次终身免检」）
+      const staleAck = buildRequest(
+        { target: 'package', packagePath: dir },
+        { '@deepseek-ai/dsh-tools@9.9.9': ['0'.repeat(64)] },
+      )
+      expect(staleAck.request.officialFamily).toBeUndefined()
+      // 目录外的 @deepseek-ai/* 名字（冒充候选）：首见也不享降噪
+      const impostor = tmpPkg({
+        'package.json': JSON.stringify({ name: '@deepseek-ai/not-a-real-official-pkg', version: '1.0.0', main: 'index.js' }),
+        'index.js': 'export {}\n',
+      })
+      try {
+        expect(buildRequest({ target: 'package', packagePath: impostor }).request.officialFamily).toBeUndefined()
+      } finally { rmSync(impostor, { recursive: true, force: true }) }
+    } finally {
+      setBaselineDirForTest(undefined)
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(bdir, { recursive: true, force: true })
     }
   })
 

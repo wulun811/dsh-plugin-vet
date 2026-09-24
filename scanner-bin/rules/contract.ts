@@ -23,7 +23,9 @@ function existsWithinPkgRoot(pkgRoot: string, p: string): boolean {
  * 「这插件装上去能不能跑」，而不是等启动时崩溃。
  *
  * 确定性边界（低误报）：只查 manifest 里声明的路径存在性 + 必备字段，不做源码级推断。
- * - dsh.bundle.patch 声明的文件缺失 → high（插件声明自己是 DSH bundle，挂载必失败）
+ * - dsh.bundle.patch 声明的文件缺失 → high（插件声明自己是 DSH bundle，挂载必失败）；
+ *   0.3.13 起声明形态支持字符串或有序数组，形态非法（非字符串/空数组/非字符串项）同样 high
+ *   （DSH 0.1.7-rc.1 的 bundlePatchFiles 对这些形态直接抛错）
  * - 无任何可用入口（无 main、无 exports[.]、根也无 index.js 兜底）→ medium
  * - 声明的入口文件缺失 → high（加载抛 ERR_MODULE_NOT_FOUND）
  * - 插件意图包缺 name → medium（审计门槛/OSV 按名归档失效）
@@ -52,18 +54,29 @@ export function runContract(content: string, file: string, targetKind?: 'plugin'
 
   const pkgRoot = dirname(file)
 
-  // 1) dsh.bundle.patch 声明 vs 实际文件
+  // 1) dsh.bundle.patch 声明 vs 实际文件（字符串或有序数组，0.3.13）
   const patch = pickBundlePatch(dshField)
-  if (patch !== undefined) {
-    if (!existsWithinPkgRoot(pkgRoot, patch)) {
-      found.push({
-        rule: 'R12',
-        severity: 'high',
-        confidence: 'certain',
-        message: 'DSH bundle 声明的 patch 文件缺失（dsh.bundle.patch=' + patch + '）——插件将无法挂载',
-        evidence: patch,
-        file,
-      })
+  if (patch === 'invalid') {
+    found.push({
+      rule: 'R12',
+      severity: 'high',
+      confidence: 'certain',
+      message: 'dsh.bundle.patch 形态非法（DSH 要求字符串或字符串数组）——profile 挂载必失败',
+      evidence: JSON.stringify((dshField as Record<string, unknown>).bundle),
+      file,
+    })
+  } else if (patch !== undefined) {
+    for (const p of patch) {
+      if (!existsWithinPkgRoot(pkgRoot, p)) {
+        found.push({
+          rule: 'R12',
+          severity: 'high',
+          confidence: 'certain',
+          message: 'DSH bundle 声明的 patch 文件缺失（dsh.bundle.patch=' + p + '）——插件将无法挂载',
+          evidence: p,
+          file,
+        })
+      }
     }
   }
 
@@ -119,13 +132,24 @@ export function runContract(content: string, file: string, targetKind?: 'plugin'
   return found
 }
 
-/** dsh.bundle.patch（字符串相对路径）或 undefined。 */
-function pickBundlePatch(dshField: unknown): string | undefined {
+/**
+ * dsh.bundle.patch 声明的 patch 文件（按应用顺序）：
+ * 字符串 = 单文件；字符串数组 = 有序多层（0.3.13，DSH 0.1.7-rc.1 同步——rc.2 只支持字符串，
+ * 官方 @deepseek-ai/dsh-web-app 已在用 5 文件数组）。
+ * @returns 路径列表；未声明 → undefined；形态非法（非字符串/非字符串数组/空串项）→ 'invalid'
+ *   （DSH bundlePatchFiles 对这些形态直接抛错，profile 挂载必失败）。
+ */
+function pickBundlePatch(dshField: unknown): string[] | 'invalid' | undefined {
   if (dshField === undefined || typeof dshField !== 'object' || dshField === null) return undefined
   const bundle = (dshField as Record<string, unknown>).bundle
   if (bundle === undefined || typeof bundle !== 'object' || bundle === null) return undefined
   const patch = (bundle as Record<string, unknown>).patch
-  return typeof patch === 'string' && patch !== '' ? patch : undefined
+  if (patch === undefined) return undefined
+  if (typeof patch === 'string') return patch !== '' ? [patch] : 'invalid'
+  if (!Array.isArray(patch) || patch.length === 0 || !patch.every(p => typeof p === 'string' && p !== '')) {
+    return 'invalid'
+  }
+  return patch as string[]
 }
 
 /** 包入口：exports["."]（字符串/flat/条件对象）优先，其次 main；无则 undefined。 */

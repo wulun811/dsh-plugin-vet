@@ -3,6 +3,111 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.3.13] - 2026-09-24
+
+DSH `0.1.5-rc.2 → 0.1.7-rc.1` sync (the family grew 240 → 277 installed packages; the official
+tag diff is 7.5k files). Two adaptation items came out of it plus one noise policy the upgrade
+made urgent: after a family-wide version bump every official package is a *first-seen* strict
+scan, and the published build outputs (`lib/**`, minified bundles, `.d.ts`) made 27 of 277
+official packages non-clean (4 `critical`) — live auto-scan had already recorded 5 `suspicious`
+verdicts and held the shield yellow. Engine version bumped `static-v25 → static-v26` — all
+stale scanner caches are invalidated.
+
+### Added — official-package artifact grading (`request.officialFamily`, static-v26)
+
+- **Non-authored artifacts are graded as artifacts.** The engine classifies each scanned file:
+  `*.d.ts` declarations, files under a **package-root-relative** build-output directory
+  (`lib/dist/build/out/esm/cjs/umd`), and minified/bundled content (one line ≥1000 chars, or
+  ≥3 lines over 500). Findings in those files get a category prefix
+  (`构建产物：` / `压缩产物：` / `类型声明：`).
+- **For official catalog members whose bytes are trusted the decisive tiers fold to `info`**
+  (`critical`/`high` → `info`, message marked `（官方包降噪）`; first-seen and match both count,
+  which is the upgrade case), so a DSH upgrade no longer turns the shield yellow on
+  machine-generated output. Bytes count as trusted when they are unmodified, **or** when the
+  current package hash is listed in `acknowledged-package-hashes` (a local patch the user has
+  declared: the diff is claimed, the files are still machine-derived from official source). An
+  **undeclared** `mismatch` does **not** fold — the premise no longer holds, so it keeps the
+  strict scan; auto-scan goes further for declared patches (it skips scanning them entirely, so
+  there is no artifact noise at all), while the `scan_plugin` tool face is an explicit audit
+  request and therefore still scans and folds. Third-party packages keep full severity and only gain the
+  prefix. Authored source (`src/**`, `scripts/**`, root-level `*.mjs`/`*.js`, `package.json`,
+  `assets/**`) is never folded. Measured on the 0.1.7-rc.1 install: **27 → 4 non-clean**;
+  the 4 residuals are all findings in authored source (`cordis`/`cordis-plugin-loader`/
+  `schemastery` `src/**`, `libreoffice-kit-wasm` `sources/**/build.mjs`).
+- **Identity verification is untouched** — the fold changes rule tiers only. Official identity
+  is still established by the content-hash baseline, the registry reconciliation and the
+  `official-not-in-catalog` yellow card; the host sets `officialFamily` from the official
+  catalog (seed ∪ registry overlay), and the flag enters the cache key so a folded report can
+  never be served to a third-party scan of the same bytes.
+- **Official install hooks use the rule's own generic manifest semantics** (`R10` postinstall
+  → `info` "capability surface: legitimate official install step") instead of the strict
+  `high`, which auto-scan previously produced because it never passed `targetKind`.
+
+### Fixed — R12 now understands array-form `dsh.bundle.patch`
+
+- DSH 0.1.7-rc.1 accepts `dsh.bundle.patch` as a string **or an ordered array of files**
+  (rc.2 only accepted a string; official `@deepseek-ai/dsh-web-app` already ships a 5-file
+  array). The old check only understood strings, so an array declaration was skipped entirely
+  — reproduced: an array with a missing file produced **zero findings and `clean`**. Now every
+  declared path is checked (`high` naming the missing one), and a malformed declaration
+  (empty array, non-string entries, non-string/non-array) is `high` — DSH's own
+  `bundlePatchFiles` throws on exactly those shapes.
+
+### Fixed — the DSH 0.1.7 type surface
+
+- `@deepseek-ai/dsh-tools` no longer re-exports `JsonValue` (it moved to the new
+  `@deepseek-ai/dsh-util-values` in the 0.1.7 family). vet's three tool modules imported it
+  from `dsh-tools` → TS2614 against the new family. They now use a local structural mirror
+  (`src/json-value.ts`) — zero new dependencies, nothing host-private in vet's public types,
+  and immune to further host package splits.
+- Dev dependencies bumped to the family vet is verified against (`cordis ^4.0.4`,
+  `dsh-* ^0.1.7-rc.1`, `schemastery ^3.18.4`) so CI typechecks the real API. **Peer ranges stay
+  wide** (`dsh-* ^0.1.1-rc.1`) — npm `latest` is still `0.1.5-rc.3`, and narrowing them would
+  make DSH 0.1.7's new plugin peer preflight disable vet on older installs (the preflight
+  evaluates with `includePrerelease`, which vet's ranges satisfy).
+- Official catalog seed regenerated against the 0.1.7-rc.1 install tree: **278 → 319 names**
+  (41 additions, no removals) — without it every newly split official package would raise an
+  `official-not-in-catalog` yellow.
+
+### Changed — declared local patches are an observation, not an alarm
+
+- A hit in `acknowledged-package-hashes` now records `baseline-patch-ack` as **`info`** instead of
+  `yellow` (all three sites: official mismatch, official first-seen-suspected, third-party P7).
+  The declaration is the user's own act and the state is known and non-actionable, so it no longer
+  counts toward `alarmCount` or the shield level — it stays visible in the panel's logged section,
+  dismissible and restorable, and the "verify the patch origin" suggestion is still rendered.
+  Sticky semantics are untouched: the ack is keyed to a specific `name@version` **hash**, so any
+  further byte change stops matching and falls back to the undeclared-mismatch path (yellow, plus
+  a strict scan on the tool face).
+- Declared patches now also count as trusted bytes for artifact grading (see above): auto-scan
+  skips them entirely, and `scan_plugin` folds their machine-generated artifacts to `info` while
+  keeping every finding as evidence.
+
+### Tests
+
+- New `test/artifact-grading.test.ts` (14 cases): classifier units (including the regression
+  that an **absolute** path containing the npm-global `lib/` prefix must not classify the whole
+  package as build output), official fold vs third-party annotation, authored-source
+  non-folding, `.d.ts` and minified bundles, cache separation between the two gradings, and the
+  install-hook generic path.
+- `test/scanner.test.ts` R12 block: array patch complete → clean, array with a missing file →
+  `high` with the missing path as evidence, malformed shapes → `high`.
+- `test/plugin.test.ts`: `officialFamily` four states (first-seen / match / undeclared mismatch /
+  declared mismatch, the last one end-to-end through `scan()` — clean with the fold prefix);
+  `test/baseline-reconcile.test.ts`: a declared patch is not scanned at all on the auto-scan path
+  (deny runs `scanSync`, so an absent `lastScan` is a deterministic proof) and its alarm is `info`.
+
+### Notes
+
+- Verified against DSH `0.1.7-rc.1`: vet's API surface (`defineTool`, `ToolExecution`,
+  `ToolExecutionResult`, cordis `Context`/`Fiber`, client `slots.inject/register`,
+  `locale.register`, `WebRoute`, `dsh.client`/`dsh.bundle` manifests) is source-compatible;
+  the code-execution guard targets (`run_code`/`cordis_define`/`cordis_run`/`workflow`) are
+  unchanged in 0.1.7; the new peer preflight accepts vet's ranges.
+- Boundary: the fold is a rule-tier policy, not a trust decision — an official-name package
+  whose *authored source* carries a payload still scans decisively, and the host's hash/registry
+  layer remains the authority on whether the bytes are the official ones.
+
 ## [0.3.12] - 2026-09-12
 
 Self-review correction of the 0.3.11 R3 dev/ops tier: the shipped v24 implementation matched

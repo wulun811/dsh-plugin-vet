@@ -86,7 +86,11 @@ stdin/stdout are single-line JSON:
 // response
 { "ok": true, "report": { "engine", "sourceCount", "findings", "staticScore", "verdict", "capabilities" } }
 // capabilities (files mode, N1): { hosts[], fsPaths[], spawnCmds[], imports[], hasNetwork, hasExec, hasNativeBinary (0.3.8 C4) }
-// engine: 'static-v25' since 0.3.12（R3 dev/ops 根级判定审查修正：根级=相对 package.json
+// engine: 'static-v26' since 0.3.13（DSH 0.1.7-rc.1 同步：R12 支持 dsh.bundle.patch 有序数组
+// 并对非法形态报 high；新增 request.officialFamily——官方目录成员包的非授权源码产物
+// （lib/dist/build/out 等构建输出路径、压缩内容、.d.ts 声明）里的 critical/high 折 info 并加
+// 类别前缀，第三方只加前缀不降档；官方包 install 钩子走 generic 清单语义——输出形状变化，
+// 旧缓存失效；0.3.12 的 v25 为 R3 dev/ops 根级判定审查修正：根级=相对 package.json
 // 所在目录平铺深度 1——0.3.11 首发的 basename 深度无关匹配会把 scripts/、lib/ 等嵌套运行时
 // 文件一并降档，与「scripts/ 是产品代码、运行时文件名不参与」立场矛盾，现修正；无
 // package.json 上下文保守不降——规则判定语义相对 v24 已变化，旧缓存失效；0.3.11 的 v24 为
@@ -143,6 +147,7 @@ otherwise → clean. **Heuristic confidence never upgrades the verdict** (R6 adv
 - `generic` (ordinary npm package / official runtime): capability-surface downgrade (info/medium), not into the
   verdict.
 - Auto-scan runs with plugin semantics (strict); `scan_plugin` judges by the package.json dependencies.
+  Official catalog members additionally get artifact grading and the generic manifest semantics — see §4.5b.
 - **Self-exemption via realpath (round-7.1 P-3)**: vet itself (name match) must verify via realpath that the
   target is the current vet instance before being judged generic — local file: installs have no registry
   validation, and a name-only match can be impersonated (a malicious tarball posing as @jieai/dsh-plugin-vet to
@@ -152,6 +157,34 @@ otherwise → clean. **Heuristic confidence never upgrades the verdict** (R6 adv
   to info as a whole; bin entry files (`cliFiles`, CLI scripts that always run standalone) judge R2/R3 as
   generic code and drop R9 dead loops to medium. package.json content is in the cache hash, so shape changes
   invalidate caches naturally.
+
+### 4.5b Artifact grading and official-family noise (0.3.13, static-v26)
+
+- **Why**: after a DSH family-wide version bump every official package is a first-seen *strict* scan
+  (round-16 anti-spoof doctrine). Published build outputs are machine products — `lib/**` compiled by
+  tsc/tsdown, minified bundles, `.d.ts` declarations — where `new Function`, `process.kill` or
+  `process.exit` are ordinary library/toolchain shapes. Measured on the 0.1.7-rc.1 install: 27 of 277
+  official packages non-clean (4 critical), and live auto-scan had recorded 5 `suspicious` verdicts,
+  holding the shield yellow.
+- **Classifier** (`artifactKind`, deterministic file-surface only): `*.d.ts`; files under a
+  **package-root-relative** build-output directory (`lib/dist/build/out/esm/cjs/umd`); minified/bundled
+  content (one line ≥1000 chars or ≥3 lines over 500). ⚠ The relative anchor matters — an absolute path
+  under the npm global prefix contains `lib/`, which would classify whole packages as build output.
+- **Grading**: findings in artifacts get a category prefix (`构建产物：`/`压缩产物：`/`类型声明：`). With
+  `request.officialFamily` the decisive tiers fold to `info` and are marked `（官方包降噪）`; third-party
+  packages keep full severity. The host sets the flag only for official-catalog members (seed ∪ registry
+  overlay) whose bytes are trusted — `first-seen`/`match` qualify (the DSH-upgrade case), and so does a
+  `mismatch` whose current hash is listed in `acknowledged-package-hashes` (a local patch the user has
+  declared: the diff is claimed, the files are still machine-derived from official source). An undeclared
+  `mismatch` does not fold, because the machine-derived premise fails there. The two host paths differ in
+  reach: auto-scan returns early for a declared patch (no scan at all — zero artifact noise), while the
+  `scan_plugin` tool face is an explicit audit request and still scans, folding only the artifact tiers.
+  Authored source (`src/**`, `scripts/**`, root scripts, `package.json`, `assets/**`) is never folded.
+  Official install hooks use the `R10` generic manifest semantics (info "capability surface") instead of
+  the strict `high` that auto-scan produced while passing no `targetKind`.
+- **Boundary**: this is a rule-tier policy, not a trust decision. Official identity is still established by
+  the content-hash baseline + registry reconciliation + `official-not-in-catalog` yellow; `officialFamily`
+  enters the cache key, so a folded report is never served to a third-party scan of the same bytes.
 
 ### 4.6 Cache
 
@@ -484,9 +517,14 @@ Trust-relevant highlights:
    - deny 模式：同步记红 fail-closed（零网络，P2-7 同款约束）
 
 2. **已声明本机补丁**：配置 `acknowledged-package-hashes`（键 `name@version`，值 sha256 hex 数组）：
-   - 命中 → 豁免基线比对 + 一次性 yellow「已声明的本机补丁状态」
-   - 未命中 → 走 registry 对账路径
+   - 命中 → 豁免基线比对 + `info` 观察「已声明的本机补丁状态」（0.3.13：声明是用户自己的动作、
+     状态已知且不可行动 → 面板 logged 区可见、可 dismiss，但不计 `alarmCount`/盾牌；官方侧与
+     第三方 P7 侧同档）
+   - 未命中 → 走 registry 对账路径；**字节再变**即 hash 不再命中登记表 → 回到未登记的黄牌路径
+     （登记的粘滞语义不受影响——登记的是具体 hash，不是包名）
    - 用途：LAN 信任补丁等合法修改，登记后消除红警，透明不静默
+   - 降噪口径（0.3.13）：登记的 hash 视同官方家族——自动扫描对该包直接不扫描（零产物噪音），
+     `scan_plugin` 显式审计时照常严格扫描、产物命中折 `info`（§4.5b）
 
 **配置示例**：
 ```yaml

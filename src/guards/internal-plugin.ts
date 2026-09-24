@@ -146,7 +146,8 @@ type OfficialVerdict =
  * 官方包判定（P-5，0.1.21 重构）：内容哈希基线 + 已声明本机补丁。
  * - first-seen 自动信任并记录基线（v5 方案）→ 但仍跑扫描（决策 1，deny 升级豁免）；
  * - match 豁免 → 同样仍跑扫描（内容与记录一致，扫描结果留档/差分）；
- * - mismatch 且 hash 在 acknowledged-package-hashes 登记 → 豁免 + 一次性 yellow（透明不静默）；
+ * - mismatch 且 hash 在 acknowledged-package-hashes 登记 → 豁免 + info 观察（0.3.13：降为观察档，
+ *   面板可见、不计盾牌；声明是用户动作，且字节再变即不再命中登记表）；
  * - 其余 mismatch 不豁免：report 由调用方异步对账 registry 后定性（0.3.5：统一黄牌观察——
  *   用户决策「哈希对不上也只是黄，别红了——误报比漏报更消耗信任」；deny 模式零网络记黄）。
  * 0.3.5（M2，官方全集判据）：新增 inCatalog——官方目录（official-catalog）成员判定。
@@ -196,14 +197,17 @@ function classifyOfficial(packageName: string, packageRoot: string | undefined, 
     // 0.3.5（审查加固）：首见 registry 校验不一致的疑标（suspected）持久化后，本地自证
     // match 不再自动入锚——「哈希对不上只是黄」的黄必须粘滞，否则伪造包第二载即获运行时
     // 全域静默（首见黄牌一次性 + match 自证入锚 = 洞）。已登记 hash 的补丁 = 用户声明负责，
-    // 照常入锚并黄牌提示；未登记 → 不入锚 + 每次会话黄牌，直到 ack 或字节更新为官方。
+    // 照常入锚 + info 观察（0.3.13 用户决策「已声明补丁纳入降噪」：声明是用户自己的动作，
+    // 状态已知且不可行动——面板 logged 区仍可见、可 dismiss，但不再计 alarmCount/盾牌；
+    // 字节再变即 hash 不再命中登记表 → 回到未登记路径的黄牌，粘滞语义不受影响）；
+    // 未登记 → 不入锚 + 每次会话黄牌，直到 ack 或字节更新为官方。
     if (inCatalog && isRecordSuspected(packageName, version)) {
       const ackList = config.acknowledgedPackageHashes[`${packageName}@${version}`] ?? []
       if (ackList.includes(hash)) {
         markOfficialTrusted(packageName)
         status?.record({
           id: `baseline-patch-ack:${packageName}`,
-          severity: 'yellow',
+          severity: 'info',
           source: 'scan',
           kind: 'baseline-patch-ack',
           message: `官方包 ${packageName}@${version} 内容与官方 registry 不一致但已在 acknowledged-package-hashes 登记补丁（hash ${hash.slice(0, 12)}…）——内容信任锚按用户声明授予，请确保补丁来源可信`,
@@ -253,7 +257,8 @@ function recordMismatchAlarm(status: VetStatus | undefined, name: string, versio
 /**
  * round-13（Phase 4）：第三方安装后完整性基线（P7 强化，默认关）。
  * 对非官方包记录首装内容哈希，后续加载同版本内容变化（字节不一致）→ red。
- * 复用 P-5 的 content-baseline 存储与 acknowledgedPackageHashes 豁免（用户本地 patch 零误报）。
+ * 复用 P-5 的 content-baseline 存储与 acknowledgedPackageHashes 豁免（用户本地 patch 零误报；
+ * 0.3.13 起登记命中记 info 观察——与官方侧同档，面板可见、不计盾牌）。
  * 定位是"变更检测"而非信任锚：first-seen 自动信任仍有窗口（PLAN §5.2 明示），
  * 与 deny/requireAudit 叠加才有完整语义。无论结果如何都**不跳过静态扫描**（与官方包
  * exempt 语义不同——第三方包仍要过 verdict）。
@@ -287,7 +292,8 @@ export function checkThirdPartyBaseline(packageName: string, packageRoot: string
   if (ackList.includes(hashResult.hash)) {
     status?.record({
       id: `third-party-patch-ack:${packageName}`,
-      severity: 'yellow',
+      // 0.3.13：与官方侧同档——已登记补丁 = 用户声明负责，info 观察（面板可见、不计盾牌）
+      severity: 'info',
       source: 'scan',
       kind: 'baseline-patch-ack',
       message: `第三方包 ${packageName}@${v} 内容与首装基线不同但已在 acknowledged-package-hashes 登记（hash ${hashResult.hash.slice(0, 12)}…）——豁免基线比对，请确保变更来源可信`,
@@ -615,9 +621,12 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
         // round-15 review（持久化忽略跨 session 可恢复修复）：不再前置短路——
         // 照常 record，由 VetStatus 按 isDismissed 折叠进「已忽略」区（旧行为：
         // 被忽略后干脆不入列 → 跨 session 彻底消失且无恢复入口）
+        // 0.3.13（用户决策「已声明补丁纳入降噪」）：yellow → info——登记是用户自己的声明
+        // 动作，状态已知且不可行动（已登记 hash 精确匹配当前字节，字节再变即回到 mismatch
+        // 黄牌 + 严格扫描）；面板 logged 区仍可见、可 dismiss，只是不再计 alarmCount/盾牌。
         status?.record({
           id: alertId,
-          severity: 'yellow',
+          severity: 'info',
           source: 'scan',
           kind: 'baseline-patch-ack',
           message: `官方包 ${entryName}@${official.version} 处于已声明的本机补丁状态（hash ${official.hash.slice(0, 12)}… 已在配置 acknowledged-package-hashes 登记）——豁免基线比对；请确保补丁来源可信`,
@@ -873,6 +882,17 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       kind: 'files' as const,
       files: surfaceFiles,
       osv: config.osvCheck === true,
+      // 0.3.13（DSH 0.1.7-rc.1 同步）：官方目录成员 + **字节未被本机改动**（first-seen/match）
+      // → 非授权源码产物（lib/dist/压缩/.d.ts）里的 critical/high 折 info——官方家族整体换
+      // 版本时（首见严格扫描）不再把盾牌压成黄色（实测 0.1.7-rc.1 首扫：277 官方包 27 个
+      // non-clean、live 记 5 个 suspicious）。
+      // 走到这里只可能是 exempt（mismatch 已在上方分流：已登记补丁 → 提前 return 不扫描 =
+      // 零产物噪音，比降档更彻底；未登记 → registry 对账/黄牌，不降噪）。
+      // 身份核验不受影响：内容哈希基线 + registry 对账 + official-not-in-catalog 黄牌照旧。
+      // 工具面（scan_plugin）对已登记补丁的 hash 照常严格扫描但按官方家族降噪——见
+      // classifyTarget 的 officialFamily 注释（显式审计请求仍给全量证据，只是机器产物降档）。
+      ...(inCatalog && official.kind === 'exempt'
+        && (official.reason === 'first-seen' || official.reason === 'match') ? { officialFamily: true } : {}),
       // surface 显式传入（与缓存 key 联动）：关闭的面不参与扫描也不命中旧形状缓存
       ...(config.scanSurface !== undefined ? { surface: { configFiles: config.scanSurface.configFiles, instructionFiles: config.scanSurface.instructionFiles } } : {}),
     }

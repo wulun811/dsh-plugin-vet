@@ -95,7 +95,10 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 > (validation results are reused).
 
 > **Compatibility**: vet targets DSH 0.1.0-rc.6+ (peers: `@deepseek-ai/cordis ^4.0.1`, dsh-* `^0.1.1-rc.1`;
-> verified against npm-public `0.1.1-rc.2` in round-15 and re-verified in the follow-up review). pnpm may warn about unmet peer
+> verified against npm-public `0.1.1-rc.2` in round-15 and re-verified against `0.1.5-rc.1`/`0.1.5-rc.2`/`0.1.7-rc.1`
+> since — the 0.1.7 sync added R12 array-form `dsh.bundle.patch` support and official-package artifact grading).
+> DSH 0.1.7-rc.1's plugin peer preflight accepts vet's ranges (prereleases participate via `includePrerelease`).
+> pnpm may warn about unmet peer
 > dependencies — this is expected: profile templates set `autoInstallPeers: false`, and at runtime the packages
 > resolve from the DSH install closure (`$DSH_HOME/profiles/node_modules` fallback layer); you neither need nor
 > should install another copy of the cordis family in the profile.
@@ -351,6 +354,18 @@ verdict (the single authoritative judgment; heuristics never upgrade): critical 
 high ≥ 1 → `suspicious`; otherwise → `clean`. **The verdict is produced only by the static layer**: staticScore
 and verdict are shown separately and never merged into a single total.
 
+**Artifact grading (0.3.13)**: files that are not authored source — `*.d.ts` declarations, files under a
+package-root-relative build-output directory (`lib/dist/build/out/esm/cjs/umd`), minified/bundled content —
+are labelled in the finding message (`构建产物：` / `压缩产物：` / `类型声明：`). For **official catalog
+members whose bytes are trusted** (first-seen/match — the DSH-upgrade case — or a `mismatch` whose hash is
+listed in `acknowledged-package-hashes`, i.e. a declared local patch) those findings' decisive tiers fold to
+`info` (marked `（官方包降噪）`), because official identity is established by the content-hash/registry layer
+and a family-wide version bump would otherwise turn machine-generated output into shield-wide noise; an
+**undeclared** `mismatch` keeps the strict scan (auto-scan goes further for declared patches: it skips
+scanning them entirely and records the "declared local patch" note as `info` — visible in the panel,
+excluded from `alarmCount`/the shield, while an explicit `scan_plugin` audit still scans and folds). Third-party packages keep full severity and only gain the
+label; authored source (`src/**`, `scripts/**`, root-level scripts, `package.json`) is never folded.
+
 ## Capability boundary (honest list)
 
 > Static scanning is a "speed bump + forensics layer", not a security boundary. The following is split by
@@ -369,7 +384,7 @@ and verdict are shown separately and never merged into a single total.
 | R9 | Resource safety: `new Array(2**31)` / `Buffer.alloc(1GB)` unbounded allocation (≥1e8), `while(true)`/`for(;;)` exit-less **synchronous** loops (freezes the host; round-7.2: a labeled break whose label wraps the loop — `outer: for(;;){ ... break outer }` — counts as an exit signal), `spawn`/`exec`/`fork`/`new Worker` in exit-less loops (fork bomb) | high → suspicious; ReDoS nested quantifiers `(a+)+`-class and overlapping alternation branches `(a|aa)+` → medium (first-char-disjoint branches like `(?:[^']|'')*` and group-then-`?` like `(https?:)?` are linear and not reported, round-7), non-terminating recursion (for-of/for-in collection traversal and self-calls inside conditional loops not reported, round-7), `Map.set` in loops → medium (not into verdict); resident `await` loops only info (§14.1 doesn't shortcut review) | matrix + round-7/7.2 regression ✓ |
 | R10 | Supply chain: `preinstall`/`install`/`postinstall`/`prepare`/`uninstall`/`preuninstall` hooks in package.json scripts (arbitrary code execution at install time) → high; dependency manifest → info (known-vulnerability check: OSV exact-version query, osvCheck can be disabled) | high → suspicious (install hooks) | matrix ✓ |
 | R11 | Destructive file operations: `fs.unlink/rm/rmdir(+Sync)` deleting sensitive paths (/etc/root/.ssh etc.) → high, plain deletes → medium; `fs.writeFile` etc. writing sensitive paths → high; `fs.readdir` traversing sensitive directories → medium | high → suspicious (sensitive paths); medium not into verdict | matrix ✓ |
-| R12 | Cordis/DSH contract: missing declared `dsh.bundle.patch` file → high; no entry (no main/exports["."] and no root index.js) → medium; declared entry file missing → high; plugin-intent package missing name → medium; `engines.node` major < 22 → info | high → suspicious (declared mount point/entry missing means guaranteed failure); medium/info not into verdict | matrix ✓ |
+| R12 | Cordis/DSH contract: missing declared `dsh.bundle.patch` file (string or ordered array since 0.1.7-rc.1; malformed shapes → high) → high; no entry (no main/exports["."] and no root index.js) → medium; declared entry file missing → high; plugin-intent package missing name → medium; `engines.node` major < 22 → info | high → suspicious (declared mount point/entry missing means guaranteed failure); medium/info not into verdict | matrix ✓ |
 | R13 | Network exfil: hardcoded Discord/Telegram/Slack webhooks, cloud-metadata endpoints (169.254.169.254 / metadata.*.internal / 100.100.100.200) and .onion destinations in string literals | high → suspicious | matrix + R13 tests ✓ |
 | R14 | Non-JS scripts: curl\|sh, wget\|sh, PowerShell download-pipe / -enc / IEX, certutil/bitsadmin/mshta/regsvr32/rundll32 in .sh/.bash/.ps1/.cmd/.bat/.psm1/.zsh (python -c / ruby -e / perl -e download-exec also covered; generic → info) | high → suspicious (plugin); info not into verdict (generic) | matrix + R14 tests ✓ |
 | R20 | Hardcoded download-and-exec in exec/spawn-family arguments (0.3.2): curl\|sh / wget\|sh / PowerShell -enc/IEX/DownloadString / system download primitives / interpreter -c-style — checked in **literal arguments of exec/spawn/execFile/fork** (array form and N2-decoded args included; child_process binding required) | high → suspicious (pipe/encoded/primitive); medium not into verdict (`curl -o` — download ≠ exec); generic/test-CI → info | matrix + R20 tests ✓ |

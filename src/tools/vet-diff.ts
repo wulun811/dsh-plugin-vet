@@ -5,7 +5,7 @@
  * 只报"能力变了"，不报"代码变了"；完全本地，不触发扫描、不联网。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '../json-value.js'
 import { history, type VersionDiffHistory } from '../guard/version-diff.js'
 
 export interface VetDiffArgs {

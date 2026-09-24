@@ -18,6 +18,11 @@ export interface ScanRequest {
   rules?: Record<string, boolean>
   /** 扫描目标身份：'plugin'（DSH 插件包，严格逃逸判定，默认）| 'generic'（通用代码审计，R3 降级为能力触达面 info）。 */
   targetKind?: 'plugin' | 'generic'
+  /** 官方目录成员包（宿主按官方全集判定，0.3.13/static-v26）：非授权源码产物（构建输出路径、
+   * 压缩/打包文件、.d.ts 声明）里的 critical/high 折为 info（加「…（官方包降噪）」前缀）；
+   * 缺省 false = 第三方语义（只加产物标注，不动 severity/verdict）。身份核验仍由哈希基线 +
+   * registry 对账负责——本字段只做规则面降噪，不参与信任判定。 */
+  officialFamily?: boolean
   /** 扫描基础（接入 dsh.so 静态注册站）：'npm' = registry tarball 真实发布物（入口/patch 声明对照发布物有效）；
    * 'git' = 仅源码仓（通常不提交 lib/ 等构建产物），此时 R12 入口/patch 缺失降 info 不误报。缺省按 npm 语义。 */
   scanBasis?: 'git' | 'npm'
@@ -125,8 +130,13 @@ export interface ScanReport {
    * 0.3.12 起 static-v25（审查修正）：根级判定改为**相对包根**（package.json 所在目录平铺、
    * 深度 1）——首发版深度无关 basename 匹配会把 scripts/、lib/ 等嵌套运行时文件一并降档，
    * 与「scripts/ 是产品代码、运行时文件名不参与」的立场矛盾；现仅包根平铺的明确 dev/ops
-   * 动词脚本降档，无 package.json 上下文保守不降。R3 判定语义变化，旧缓存作废。 */
-  engine: 'static-v25'
+   * 动词脚本降档，无 package.json 上下文保守不降。R3 判定语义变化，旧缓存作废。
+   * 0.3.13 起 static-v26（DSH 0.1.7-rc.1 同步）：① R12 支持 dsh.bundle.patch 的有序数组形态
+   * （rc.2 只支持字符串）并对非法形态报 high；② 新增 request.officialFamily——官方目录成员包
+   * 的**非授权源码产物**（构建输出 lib/dist/build/out 等路径、压缩/打包文件、.d.ts 声明）里的
+   * critical/high 折为 info 并加「构建产物/压缩产物/类型声明」前缀，第三方包只标注不降档
+   * （身份核验仍由哈希基线 + registry 对账负责，本降噪不改判定权属）。输出形状变化，旧缓存作废。 */
+  engine: 'static-v26'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -188,9 +198,11 @@ export interface ScanResponse {
  * 首发版按 basename 深度无关匹配把 scripts/、lib/ 等嵌套文件也降档，与「scripts/ 是产品
  * 代码、运行时文件名不参与」立场矛盾；修正后嵌套文件一律不降，无 package.json 保守不降——
  * 规则行为变化，旧缓存作废。 */
-export const ENGINE_VERSION = 'static-v25' as const
+export const ENGINE_VERSION = 'static-v26' as const
 
-/** The rules of static-v25（规则集相对 v24 变化：R3 dev/ops 中间态改**相对包根**的根级判定——
+/** The rules of static-v26（规则集相对 v25 变化：0.3.13 新增 request.officialFamily——官方目录成员包的
+ * 非授权源码产物（构建输出路径/压缩内容/.d.ts）里 critical/high 折 info 并加类别前缀（第三方只加
+ * 前缀）；R12 支持 dsh.bundle.patch 有序数组并对非法形态报 high。前序 v25（相对 v24）变化：R3 dev/ops 中间态改**相对包根**的根级判定——
  * 0.3.11 首发的深度无关 basename 匹配会把 scripts/、lib/ 等嵌套的运行时文件一并降档（与
  * 「scripts/ 是产品代码、运行时文件名不参与」的立场矛盾），审查修正为：仅包根平铺
  * （相对 package.json 所在目录深度 1）的明确 dev/ops 动词脚本才降 critical→high+dev-script

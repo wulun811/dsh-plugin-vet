@@ -8,7 +8,7 @@
  * 本工具给出的是**声明能力**（静态清单）营养标签；运行时观测能力由运行中的盾牌/告警体现。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '../json-value.js'
 import { label, type CapabilityLabel, isSensitiveFsPath } from '../guard/version-diff.js'
 
 export interface VetLabelArgs {

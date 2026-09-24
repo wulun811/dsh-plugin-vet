@@ -120,7 +120,7 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
     vi.unstubAllGlobals()
   })
 
-  it('已登记补丁 → 豁免 + yellow baseline-patch-ack，无红警', async () => {
+  it('已登记补丁 → 豁免 + info baseline-patch-ack（0.3.13 降为观察档：不计 alarmCount/盾牌），无红警', async () => {
     makePkg()
     const realHash = computePackageHash(OFFICIAL_PKG)!.hash
     preloadStaleBaseline()
@@ -130,9 +130,31 @@ describe('baseline-mismatch 定性（0.1.21：registry 对账 + 已声明补丁�
       acknowledgedPackageHashes: { [`${NAME}@${VERSION}`]: [realHash] },
     }), status)
     ctx.handlers.get('internal/plugin')![0]({ uid: 'f1', entry: { options: { name: NAME } } })
-    const kinds = status.snapshot().alarms.map(a => a.kind)
+    const snap = status.snapshot()
+    const kinds = snap.alarms.map(a => a.kind)
     expect(kinds).toContain('baseline-patch-ack')
     expect(kinds).not.toContain('baseline-mismatch')
+    // 0.3.13（用户决策）：声明是用户自己的动作、状态已知且不可行动 → info 观察档
+    expect(snap.alarms.find(a => a.kind === 'baseline-patch-ack')?.severity).toBe('info')
+    expect(snap.alarms.filter(a => a.severity !== 'info').map(a => a.kind)).not.toContain('baseline-patch-ack')
+  })
+
+  it('已登记补丁：自动扫描路径不扫描（零产物噪音，比「产物降档」更彻底）——deny 同步路径下 lastScan 缺席即证明', async () => {
+    makePkg()
+    const realHash = computePackageHash(OFFICIAL_PKG)!.hash
+    preloadStaleBaseline()
+    const status = new VetStatus()
+    const ctx = new FakeCtx()
+    installInternalPluginGuard(ctx as never, cfg({
+      mode: 'deny',
+      acknowledgedPackageHashes: { [`${NAME}@${VERSION}`]: [realHash] },
+    }), status)
+    ctx.handlers.get('internal/plugin')![0]({ uid: 'f1b', entry: { options: { name: NAME } } })
+    const snap = status.snapshot()
+    expect(snap.alarms.map(a => a.kind)).toContain('baseline-patch-ack')
+    // deny 走同步 scanSync：若真扫了，noteScan 会在 handler 返回前就位 → 缺席 = 未扫描。
+    // 工具面（scan_plugin）是显式审计请求，照常扫描但对已登记 hash 按官方家族降噪。
+    expect(snap.lastScan).toBeUndefined()
   })
 
   it('deny 模式未登记 → 黄牌（零网络；0.3.5 降黄不红——用户决策「哈希对不上也只是黄」），消息含登记指引', async () => {

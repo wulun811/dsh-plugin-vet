@@ -42,7 +42,8 @@ export interface VetConfig {
   contentBaseline: boolean
   /** P-5 补充（0.1.21）：已声明的本机补丁哈希。键为 `name@version`，值为该版本被允许的内容哈希
    * （sha256 hex，可用 computePackageHash 或红警消息里的短 hash 全量获取）。命中 → 豁免基线比对
-   * 并记一次性 yellow 提示（透明不静默）；未登记的差异仍按篡改处理。 */
+   * 并记 info 观察（0.3.13：声明是用户自己的动作、状态已知且不可行动 → 面板可见、可 dismiss，
+   * 不计 alarmCount/盾牌；字节再变即 hash 不再命中 → 回到未登记的黄牌路径）；未登记的差异仍按篡改处理。 */
   acknowledgedPackageHashes: Record<string, string[]>
   /** P1：运行时网络出口观测（默认开启）：包装 http/https/net/http2/tls/dgram/fetch，观测插件发起的网络请求。 */
   networkEgress: boolean

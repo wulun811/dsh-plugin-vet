@@ -70,7 +70,9 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 
 
 > **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer：`@deepseek-ai/cordis ^4.0.1`、dsh-* `^0.1.1-rc.1`；
-> round-15 对 npm-public `0.1.1-rc.2` 完成适配并复查）。安装时 pnpm 可能提示
+> round-15 对 npm-public `0.1.1-rc.2` 完成适配，其后对 `0.1.5-rc.1`/`0.1.5-rc.2`/`0.1.7-rc.1` 逐一复验
+> ——0.1.7 同步新增 R12 的 `dsh.bundle.patch` 有序数组支持与官方包产物降噪）。0.1.7-rc.1 新增的插件
+> peer 兼容性预检接受 vet 的声明范围（预检用 `includePrerelease` 语义，预发布版本参与匹配）。安装时 pnpm 可能提示
 > unmet peer dependency——这是预期的：profile 模板 `autoInstallPeers: false`，运行期从 DSH 安装闭包
 > （`$DSH_HOME/profiles/node_modules` 回退层）解析，无需也不能在 profile 里另装一份 cordis 全家桶。
 >
@@ -222,6 +224,8 @@ GUI 按 OBSIDIAN MOSS GOLD 设计稿换肤并重构为**层栈交互**（次级�
 
 verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `critical`；否则 high ≥ 1 → `suspicious`；其余 → `clean`。**verdict 只由静态层产出**：staticScore 与 verdict 分开呈现，不合成单一总分。
 
+**产物档位（0.3.13）**：非授权源码产物——`*.d.ts` 声明、**包根相对**构建输出目录（`lib/dist/build/out/esm/cjs/umd`）下的文件、压缩/打包内容——命中会在 message 里带类别前缀（`构建产物：` / `压缩产物：` / `类型声明：`）。**官方目录成员且字节可信**（first-seen/match，即 DSH 升级主场景；或 mismatch 但该 hash 已在 `acknowledged-package-hashes` 登记 = 用户认领的本机补丁）的这类命中的决定性档折为 `info`（标 `（官方包降噪）`）：官方身份由内容哈希/registry 对账层负责，否则每次 DSH 家族整体换版本都会把机器产物变成盾牌级噪音。**未登记**的 mismatch（疑似篡改）保持严格判定；自动扫描路径对已登记补丁更彻底——直接不扫描（零产物噪音），且「已声明的本机补丁状态」只记 `info` 观察（面板可见、可 dismiss，不计 alarmCount/盾牌），`scan_plugin` 显式审计时才照常严格扫描 + 产物降档。第三方包 severity 全量保留、只加前缀；授权源码（`src/**`、`scripts/**`、根级脚本、`package.json`）永不降档。
+
 ## 能力边界（诚实清单）
 
 > 静态扫描是"减速带 + 取证层"，不是安全边界。以下按**判定影响**分两档，
@@ -239,7 +243,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 | R9 | 资源安全：`new Array(2**31)` / `Buffer.alloc(1GB)` 无界分配（≥1e8）、`while(true)`/`for(;;)` 无出口**同步**循环（卡死宿主；round-7.2：带标签 break 跳出外层循环算出口——`outer: for(;;){ ... break outer }` 不再误报）、无出口循环内 `spawn`/`exec`/`fork`/`new Worker`（fork 炸弹） | high → suspicious；ReDoS 嵌套量词 `(a+)+` 类与 alternation 分支重叠 `(a|aa)+` → medium（分支首字符互斥的 `(?:[^']|'')*` 类、组后 `?` 的 `(https?:)?` 类线性回溯不报，round-7）、递归无终止（for-of/for-in 集合遍历与带条件循环内的自调用不报，round-7）、循环内 `Map.set` → medium（不进 verdict）；含 `await` 常驻循环仅 info（§14.1 不短路审查） | 矩阵 + round-7/7.2 回归 ✓ |
 | R10 | 供应链：`package.json` scripts 的 preinstall/install/postinstall/prepare/uninstall/preuninstall 钩子（安装期任意代码执行）→ high；依赖清单 → info（已知漏洞核对：OSV 精确版本查询，osvCheck 可关） | high → suspicious（install 钩子） | 矩阵 ✓ |
 | R11 | 破坏性文件操作：`fs.unlink/rm/rmdir(+Sync)` 删除敏感路径（/etc/root/.ssh 等）→ high，普通删除 → medium；`fs.writeFile` 等写入敏感路径 → high；`fs.readdir` 遍历敏感目录 → medium | high → suspicious（敏感路径）；medium 不进 verdict | 矩阵 ✓ |
-| R12 | Cordis/DSH 契约：`dsh.bundle.patch` 声明的文件缺失 → high；无 入口（无 main/exports["."] 且根无 index.js）→ medium；声明的入口文件缺失 → high；插件意图包缺 name → medium；`engines.node` 主版本低于 22 → info | high → suspicious（声明即挂载点/入口，缺失必失败）；medium/info 不进 verdict | 矩阵 ✓ |
+| R12 | Cordis/DSH 契约：`dsh.bundle.patch` 声明的文件缺失（0.1.7-rc.1 起支持字符串或有序数组，形态非法同样 high）→ high；无 入口（无 main/exports["."] 且根无 index.js）→ medium；声明的入口文件缺失 → high；插件意图包缺 name → medium；`engines.node` 主版本低于 22 → info | high → suspicious（声明即挂载点/入口，缺失必失败）；medium/info 不进 verdict | 矩阵 ✓ |
 | R13 | 网络外联：字符串字面量中硬编码 Discord/Telegram/Slack webhook、云元数据端点、.onion 目标 | high → suspicious | 矩阵 + R13 测试 ✓ |
 | R14 | 非 JS 脚本：.sh/.bash/.ps1/.cmd/.bat/.psm1/.zsh 中 curl\|sh、wget\|sh、PowerShell 下载管道/-enc/IEX、certutil/bitsadmin/mshta/regsvr32/rundll32（含 python -c / ruby -e / perl -e 下载即执行；generic → info） | high → suspicious（plugin）；info 不进 verdict（generic） | 矩阵 + R14 测试 ✓ |
 | R20 | exec/spawn 族实参硬编码下载即执行（0.3.2）：curl\|sh / wget\|sh / PowerShell -enc/IEX/DownloadString / 系统下载原语 / 解释器 -c——检查 **exec/spawn/execFile/fork 的字面量实参**（数组形态与 N2 解码实参均含；需 child_process 绑定） | high → suspicious（管道/编码/系统原语）；medium 不进 verdict（`curl -o`——下载≠执行）；generic/测试-CI → info | 矩阵 + R20 测试 ✓ |

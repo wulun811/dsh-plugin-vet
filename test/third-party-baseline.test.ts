@@ -61,7 +61,7 @@ describe('Phase 4.2 第三方安装后完整性基线（P7 强化，round-13）'
     expect(status.records.some((rec: { kind: string; severity: string }) => rec.kind === 'baseline-mismatch' && rec.severity === 'red')).toBe(true)
   })
 
-  it('acknowledgedPackageHashes 豁免：登记哈希 → acknowledged yellow，不红', () => {
+  it('acknowledgedPackageHashes 豁免：登记哈希 → acknowledged info 观察（0.3.13 降为观察档），不红', () => {
     const pkg = makePkg('third-test-pkg2')
     dirs.push(pkg)
     const status = fakeStatus()
@@ -74,6 +74,6 @@ describe('Phase 4.2 第三方安装后完整性基线（P7 强化，round-13）'
     const ack = cfg({ acknowledgedPackageHashes: { 'third-test-pkg2@1.0.0': [hash] } })
     const r = checkThirdPartyBaseline('third-test-pkg2', pkg, '1.0.0', ack as never, status)
     expect(r).toBe('acknowledged')
-    expect(status.records.some((rec: { kind: string; severity: string }) => rec.kind === 'baseline-patch-ack' && rec.severity === 'yellow')).toBe(true)
+    expect(status.records.some((rec: { kind: string; severity: string }) => rec.kind === 'baseline-patch-ack' && rec.severity === 'info')).toBe(true)
   })
 })

@@ -429,6 +429,44 @@ describe('R12：Cordis/DSH bundle 契约（P-2 计划项）', () => {
     expect(res.ok).toBe(true)
     expect(res.report!.findings.find(f => f.rule === 'R12' && f.severity === 'medium')).toBeUndefined()
   })
+  // 0.3.13（DSH 0.1.7-rc.1 同步）：dsh.bundle.patch 支持「字符串或有序数组」——rc.2 只支持
+  // 字符串，官方 @deepseek-ai/dsh-web-app 已用 5 文件数组；旧实现只认字符串 → 数组声明整段
+  // 漏检（实测：数组 + 文件缺失 → 0 finding、verdict clean）。
+  it('patch 为有序数组且文件齐全 → 无 R12 finding（0.3.13）', () => {
+    const res = scanPkg({
+      'package.json': JSON.stringify({ name: 'x', main: 'index.js', dsh: { bundle: { patch: ['./cordis.patch.yml', './presets/ptc.patch.yml'] } } }),
+      'cordis.patch.yml': '- id: x',
+      'presets/ptc.patch.yml': '- id: ptc',
+      'index.js': 'export {}',
+    })
+    expect(res.ok).toBe(true)
+    expect(res.report!.findings.filter(f => f.rule === 'R12')).toHaveLength(0)
+  })
+  it('patch 数组中有文件缺失 → high，且证据指向缺失的那一个（0.3.13）', () => {
+    const res = scanPkg({
+      'package.json': JSON.stringify({ name: 'x', main: 'index.js', dsh: { bundle: { patch: ['./cordis.patch.yml', './missing.patch.yml'] } } }),
+      'cordis.patch.yml': '- id: x',
+      'index.js': 'export {}',
+    })
+    expect(res.ok).toBe(true)
+    expect(res.report!.verdict).toBe('suspicious')
+    const r12 = res.report!.findings.filter(f => f.rule === 'R12')
+    expect(r12).toHaveLength(1)
+    expect(r12[0]!.severity).toBe('high')
+    expect(r12[0]!.evidence).toBe('./missing.patch.yml')
+  })
+  it('patch 形态非法（空数组/非字符串项）→ high（DSH bundlePatchFiles 会抛错）', () => {
+    for (const bad of [[], ['./a.yml', 42], { a: 1 }]) {
+      const res = scanPkg({
+        'package.json': JSON.stringify({ name: 'x', main: 'index.js', dsh: { bundle: { patch: bad } } }),
+        'index.js': 'export {}',
+      })
+      const r12 = res.report!.findings.find(f => f.rule === 'R12')
+      expect(r12, JSON.stringify(bad) + ' 应判 high').toBeDefined()
+      expect(r12!.severity).toBe('high')
+      expect(r12!.message).toContain('形态非法')
+    }
+  })
 })
 
 describe('round-5（实测评估）回归：R1 元素访问、R3 信号处理、R9 ReDoS 误报', () => {

@@ -4,7 +4,7 @@
  * @module dsh-plugin-vet/scanner-engine
  */
 import { readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs'
-import { basename, dirname, join, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { createRequire, builtinModules } from 'node:module'
 import { parseSource } from './ast.js'
 import { extractCapabilities, aggregateCapabilities } from './capability.js'
@@ -349,6 +349,120 @@ function sizeWithinBudget(file: string): boolean {
   }
 }
 
+/**
+ * 非授权源码产物分类（0.3.13，DSH 0.1.7-rc.1 同步；官方包降噪的判据）。
+ *
+ * 背景：官方包发布物里绝大部分是**机器产物**——`lib/**`（tsc/tsdown 编译输出）、
+ * `dist/**` 打包产物、压缩单行 bundle、`.d.ts` 类型声明。规则面（R1/R2/R3/R7…）是为
+ * **人写的源码**设计的：压缩产物里 `new Function`、`process.kill`、`process.exit` 是
+ * 库/工具链的常规形态，逐条判决定性档只会在每次 DSH 升级（官方家族整体换版本 → 首见
+ * 严格扫描）时把盾牌压成黄色（实测 0.1.7-rc.1：277 个官方包 27 个 non-clean，live 自动
+ * 扫描已记 5 个 suspicious）。
+ *
+ * 判据（确定性、纯文件面，不看包名/不看网络）：
+ *  1. `.d.ts` —— 类型声明，永不参与运行时；
+ *  2. **包根相对路径**的目录段含构建输出目录（lib/dist/build/out/esm/cjs/umd）——DSH 官方包
+ *     约定源码在 src/、发布物在 lib/。⚠ 必须相对包根：绝对路径里 npm 全局前缀本身含
+ *     `lib`（~/.npm-global/lib/node_modules/…），按绝对路径判会把整包误判成产物；
+ *  3. 压缩/打包内容特征——单行 ≥1000 字符，或 ≥3 行超 500 字符（超长行 + 无源码结构）。
+ * 其余（src/**、scripts/**、根级 *.mjs/*.js、package.json、assets/**）都算授权源码，不降噪。
+ *
+ * 边界（诚实记录）：本分类只决定**规则面档位**，不参与信任判定——官方身份仍由内容哈希
+ * 基线 + registry 对账 + official-not-in-catalog 黄牌负责；第三方包只加标注、severity 不变。
+ * @param filePath 文件路径（files 模式为绝对路径）。
+ * @param content 文件内容（调用方已读取）。
+ * @param pkgRoot 包根目录（files 模式含 package.json 时由调用方给出）。
+ * @returns 产物类别标签；授权源码返回 undefined。
+ */
+export function artifactKind(filePath: string, content: string, pkgRoot?: string): '构建产物' | '压缩产物' | '类型声明' | undefined {
+  const base = basename(filePath)
+  // .d.ts 声明（纯类型面，永不参与运行时）。⚠ 只有 .d.ts 可达：SCANNABLE_EXT 是
+  // {js,ts,mjs,cjs}，.d.mts/.d.cts 的 extOf='mts'/'cts' 压根不进扫描面（既有覆盖缺口，
+  // 不在本次降噪范围内——写在这里免得读者以为它们已被处理）。
+  if (base.endsWith('.d.ts')) return '类型声明'
+  const rel = packageRelative(filePath, pkgRoot)
+  if (rel !== undefined && rel.split(/[\\/]/).slice(0, -1).some(s => BUILD_OUTPUT_SEGMENTS.has(s.toLowerCase()))) {
+    return '构建产物'
+  }
+  if (isMinifiedContent(content)) return '压缩产物'
+  return undefined
+}
+
+/**
+ * 包根相对路径：pkgRoot 已知且文件在其内 → 直接相对化；否则退化为最后一个 `node_modules`
+ * 之后的部分（单文件扫描/无 package.json 场景）；都不适用 → undefined（路径判据不参与，
+ * 只剩内容判据——保守方向：不降噪）。
+ */
+function packageRelative(filePath: string, pkgRoot?: string): string | undefined {
+  if (pkgRoot !== undefined && pkgRoot !== '') {
+    const rel = relative(pkgRoot, filePath)
+    if (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)) return rel
+  }
+  const parts = filePath.split(/[\\/]/)
+  const idx = parts.lastIndexOf('node_modules')
+  if (idx >= 0 && idx < parts.length - 1) return parts.slice(idx + 1).join('/')
+  return undefined
+}
+
+/** 构建输出目录段（官方包发布物约定：src 授权源码 → lib/dist 产物）。 */
+const BUILD_OUTPUT_SEGMENTS = new Set(['lib', 'dist', 'build', 'out', 'esm', 'cjs', 'umd'])
+
+/** 压缩/打包内容特征：超长行（单行 ≥1000）或长行密集（≥3 行超 500 字符）。 */
+function isMinifiedContent(content: string): boolean {
+  let long = 0
+  let start = 0
+  for (let i = 0; i <= content.length; i++) {
+    if (i === content.length || content.charCodeAt(i) === 10) {
+      const len = i - start
+      if (len >= 1000) return true
+      if (len > 500 && ++long >= 3) return true
+      start = i + 1
+    }
+  }
+  return false
+}
+
+/**
+ * 非授权源码产物的 finding 后处理（0.3.13）：命中落在构建输出/压缩产物/类型声明里时，
+ * 加类别前缀；官方目录成员包（request.officialFamily）额外把 critical/high 折为 info
+ * （message 带「（官方包降噪）」），第三方包只标注、severity/verdict 全量保留。
+ * 只处理 decisive 档（critical/high/medium）——info 观测不加前缀，避免噪音。
+ *
+ * 归因键：规则落 finding.file 时可能给**完整路径**也可能给 **basename**（AST 路径统一补
+ * basename）。完整路径键总是精确；basename 键仅在本次扫描里该 basename **唯一**时才启用
+ * ——否则同包 `index.js`（授权源码）与 `lib/index.js`（构建产物）会互相串味，把授权源码
+ * 的命中误折（实测自审发现的窄口径误判窗口）。
+ * 原地修改 findings，必须在 computeScore/computeVerdict 之前调用。
+ */
+function applyArtifactGrading(findings: Finding[], artifacts: ArtifactScan, officialFamily: boolean): void {
+  if (artifacts.files.length === 0) return
+  const keys = new Map<string, string>()
+  for (const { path, base, kind } of artifacts.files) {
+    keys.set(path, kind)
+    // basename 键：仅当该 basename 在本次扫描里**类别唯一**（同 basename 的文件全是产物且同类，
+    // 或只有它一个）时启用——只要掺进一个授权源码文件（'' 档），归因就有歧义，退回路径键。
+    if (artifacts.basenameKinds.get(base)?.size === 1) keys.set(base, kind)
+  }
+  for (const f of findings) {
+    if (f.file === undefined) continue
+    const kind = keys.get(f.file)
+    if (kind === undefined) continue
+    if (f.severity === 'info') continue
+    if (officialFamily && (f.severity === 'critical' || f.severity === 'high')) {
+      f.severity = 'info'
+      f.message = kind + '（官方包降噪）：' + f.message
+    } else {
+      f.message = kind + '：' + f.message
+    }
+  }
+}
+
+/** 产物扫描台账：每个已判类文件的（路径、basename、类别）+ basename → 类别集合（歧义闸门；'' = 授权源码）。 */
+interface ArtifactScan {
+  files: { path: string; base: string; kind: string }[]
+  basenameKinds: Map<string, Set<string>>
+}
+
 /** Assemble the final report (score + verdict) for a request. */
 function buildReport(
   request: ScanRequest,
@@ -416,6 +530,9 @@ function scanFiles(request: ScanRequest): ScanResponse {
       deps: request.rules?.['R16'] === false ? undefined : depsInfo?.fingerprint,
       // round-12（R17/R18）：surface 改变输出形状 → 入 key，开关切换不命中旧形状缓存
       surface: request.surface,
+      // 0.3.13：officialFamily 改变 severity（产物降噪）→ 入 key，否则官方扫描的降噪报告
+      // 会被同字节的第三方扫描命中（反向亦然）
+      officialFamily: request.officialFamily,
     },
   )
   // C3（0.1.16 加固）：目录与 nonce 均来自宿主注入（cacheDirFor 缺省回退 env/tmpdir）
@@ -427,6 +544,8 @@ function scanFiles(request: ScanRequest): ScanResponse {
   const manifests: CapabilityManifest[] = []
   /** C4（0.3.8）：命中的原生二进制文件（basename，去重）。 */
   const nativeBinaries: string[] = []
+  /** 0.3.13：非授权源码产物台账（路径键精确；basename 键仅在无同名歧义时启用）。 */
+  const artifacts: ArtifactScan = { files: [], basenameKinds: new Map() }
   let sourceCount = 0
   /** 0.3.9（审查修复）：本轮是否因预算耗尽提前 break——决定能不能写缓存（见下方 writeCached）。 */
   let budgetExceeded = false
@@ -449,7 +568,11 @@ function scanFiles(request: ScanRequest): ScanResponse {
       const json = readOrDefault(file)
       if (json === '') continue
       if (request.rules?.['R10'] !== false) {
-        findings.push(...runPackageJson(json, 'package.json', request.targetKind))
+        // 0.3.13：官方目录成员按 generic 语义做清单观测——R10 的 install 钩子对官方包是
+        // native 编译等合法安装步骤（规则自带 generic 文案 + info 档），而 auto-scan 不传
+        // targetKind（缺省严格）→ 官方包此前常驻 suspicious。只影响清单观测，不动 R12/R19。
+        const manifestKind = request.officialFamily === true ? 'generic' : request.targetKind
+        findings.push(...runPackageJson(json, 'package.json', manifestKind))
       }
       // R12: Cordis/DSH bundle 契约（P-2 计划项）——入口/patch 声明等确定性检查
       if (request.rules?.['R12'] !== false) {
@@ -543,6 +666,13 @@ function scanFiles(request: ScanRequest): ScanResponse {
     try {
       const code = readOrDefault(file)
       if (code === '') continue
+      // 0.3.13：产物分类（构建输出路径/压缩内容/类型声明）——供报告前统一加标注与官方降噪
+      const artifact = artifactKind(file, code, pkgJson === undefined ? undefined : dirname(pkgJson))
+      const base = basename(file)
+      const kinds = artifacts.basenameKinds.get(base) ?? new Set<string>()
+      kinds.add(artifact ?? '')
+      artifacts.basenameKinds.set(base, kinds)
+      if (artifact !== undefined) artifacts.files.push({ path: file, base, kind: artifact })
       const language = ext === 'ts' ? 'ts' : 'js'
       const sf = parseSource(code, basename(file), language)
       // N2：解码预处理（每文件独立采集，结果并入 R13/R7/R11 语料）
@@ -595,6 +725,8 @@ function scanFiles(request: ScanRequest): ScanResponse {
     if (zombie.length > 0) capabilities.zombieDeps = zombie
     findings.push(...depsFindings(ghost, zombie))
   }
+  // 0.3.13：产物标注 + 官方包降噪——必须在 buildReport（评分/verdict）之前生效
+  applyArtifactGrading(findings, artifacts, request.officialFamily === true)
   const report = buildReport(request, findings, sourceCount, capabilities)
   // 0.3.9（审查修复）：预算耗尽的部分结果**不写缓存**——此前无条件 writeCached，首轮在
   // deadline 下跳过的尾部文件（payload 常被故意放到枚举末尾）会把假 clean 永久固化：

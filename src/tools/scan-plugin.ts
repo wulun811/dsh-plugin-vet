@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '../json-value.js'
 import { scan, scanBudget } from '../scanner/client.js'
 import { listSourceFiles, listInstructionFiles } from '../scanner/package-sources.js'
 import type { ScanRequest } from '../scanner/protocol.js'
@@ -11,6 +11,7 @@ import { PACKAGE_NAME } from '../package-meta.js'
 import { isVetSelfPath } from '../pkg-root.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
 import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline } from '../guards/content-baseline.js'
+import { isOfficialPackageName } from '../guards/official-catalog.js'
 import { annotateSelfScan, type SelfScanInfo } from '../report/self-scan.js'
 import { hashScanFiles, pinStateFor, loadSelfPins } from '../report/self-pin.js'
 import { listShippedFiles } from '../report/self-scope.js'
@@ -40,21 +41,49 @@ function isSelfPackage(packagePath: string): boolean {
  * 骗过 generic 降级（R3/R4 全降级、deny 放行）；同名冒名包按最严格 plugin 判定。
  */
 export function detectTargetKind(packagePath: string): 'plugin' | 'generic' {
+  return classifyTarget(packagePath).targetKind
+}
+
+/** 已声明本机补丁表（config.acknowledgedPackageHashes）：`name@version` → 认领的包内容哈希列表。 */
+export type AcknowledgedPackageHashes = Record<string, string[]>
+
+/** 目标分类结果（0.3.13）：规则档位 + 官方产物降噪位。 */
+export interface TargetClass {
+  targetKind: 'plugin' | 'generic'
+  /**
+   * 官方产物降噪位（0.3.13）：仅当「官方目录成员 **且** 字节可信」时开启——
+   * first-seen/match（字节未改动；首见由 registry 对账补锚，是 DSH 升级的主场景），
+   * 以及 mismatch 但该 hash 已在 acknowledged-package-hashes 登记（用户声明为本机合法补丁：
+   * 差异已被认领，文件仍是官方源码的机器派生）→ 同享降噪。
+   * 未登记的 mismatch（疑似篡改）与目录外名字（冒充候选）不开启。
+   * 注：自动扫描路径对已登记补丁**提前 return（不扫描）**——零产物噪音，比降噪更彻底；
+   * 本工具面是 agent 显式审计请求，照常严格扫描，只是产物命中按官方家族降档。
+   */
+  officialFamily: boolean
+}
+
+/**
+ * 一次读盘完成 targetKind 与 officialFamily 判定（哈希只算一次）。
+ * 语义与旧 detectTargetKind 完全一致（首见记录基线、match 降 generic、mismatch 严格）。
+ * acknowledged 缺省 = 无补丁声明（mismatch 一律不降噪，与旧行为一致）。
+ */
+export function classifyTarget(packagePath: string, acknowledged?: AcknowledgedPackageHashes): TargetClass {
   return withVetSelfIo(() => {
     let pkg: Record<string, unknown>
     try {
       pkg = JSON.parse(readFileSync(join(packagePath, 'package.json'), 'utf8')) as Record<string, unknown>
     } catch {
-      return 'generic' // 无 package.json：无插件形态证据，保守走通用审计
+      return { targetKind: 'generic', officialFamily: false } // 无 package.json：无插件形态证据，保守走通用审计
     }
     if (pkg.name === PACKAGE_NAME) {
       // vet 自身（信任锚工具包，process 为子进程实现）→ generic；同名冒名包 → 最严格 plugin
-      return isSelfPackage(packagePath) ? 'generic' : 'plugin'
+      return { targetKind: isSelfPackage(packagePath) ? 'generic' : 'plugin', officialFamily: false }
     }
     // 官方包：P-5 内容哈希校验（v5 修订：信任内容而非名字；预算参数取默认，B-A4）
     if (typeof pkg.name === 'string' && pkg.name.startsWith('@deepseek-ai/')) {
+      const official = isOfficialPackageName(pkg.name)
       const hashResult = computePackageHash(packagePath)
-      if (hashResult === null) return 'plugin'  // 超限/超时：严格判定
+      if (hashResult === null) return { targetKind: 'plugin', officialFamily: false }  // 超限/超时：严格判定
       const hash = hashResult.hash
       const version = typeof pkg.version === 'string' ? pkg.version : 'unknown'
       const store = getBaseline()
@@ -70,11 +99,15 @@ export function detectTargetKind(packagePath: string): 'plugin' | 'generic' {
           // （基线不落盘 = 每次加载都按首见严格扫，安全方向，只是性能退化）
           console.error(`vet: baseline 保存失败（${pkg.name}@${version}）——后续加载将重复全量扫描`)
         }
-        return 'plugin'
+        // 0.3.13：目录成员的首见享产物降噪（升级主场景）；目录外名字不享
+        return { targetKind: 'plugin', officialFamily: official }
       }
-      if (result === 'match') return 'generic'  // 内容一致，信任
-      // mismatch：同名但内容变了 → 严格判定
-      return 'plugin'
+      if (result === 'match') return { targetKind: 'generic', officialFamily: official }  // 内容一致，信任
+      // mismatch：同名但内容变了 → targetKind 维持最严格 plugin（身份层不因声明放松）；
+      // 0.3.13（用户决策「纳入降噪」）：hash 已在 acknowledged-package-hashes 登记 = 用户认领
+      // 本机补丁 → 官方家族降噪照给（差异已声明，文件仍是官方源码的机器派生）；未登记不降噪。
+      const ackList = acknowledged?.[`${pkg.name}@${version}`] ?? []
+      return { targetKind: 'plugin', officialFamily: official && ackList.includes(hash) }
     }
     const deps: Record<string, unknown> = {
       ...(pkg.dependencies as Record<string, unknown> | undefined),
@@ -82,7 +115,7 @@ export function detectTargetKind(packagePath: string): 'plugin' | 'generic' {
     }
     const hasDshDep = Object.keys(deps).some(k => k.startsWith('@deepseek-ai/'))
     const hasBundleDecl = pkg.dsh !== undefined || pkg.cordis !== undefined
-    return hasDshDep || hasBundleDecl ? 'plugin' : 'generic'
+    return { targetKind: hasDshDep || hasBundleDecl ? 'plugin' : 'generic', officialFamily: false }
   })
 }
 
@@ -137,7 +170,7 @@ function readPackageVersion(root: string): string | undefined {
   })
 }
 
-export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; pluginName: string; pluginVersion?: string } {
+export function buildRequest(args: ScanPluginArgs, acknowledged?: AcknowledgedPackageHashes): { request: ScanRequest; pluginName: string; pluginVersion?: string } {
   if (args.target === 'dynamic-code') {
     if (typeof args.source !== 'string') throw new Error('vet: dynamic-code 需要 source')
     return {
@@ -153,16 +186,26 @@ export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; plug
     // 4 层，覆盖包内嵌套子目录），找到则按包判定（插件文件的逃逸判定不再恒降级 generic）；
     // 找不到则 generic。detectTargetKind 内部已 vetSelfIo 直通。
     let targetKind: 'plugin' | 'generic' = 'generic'
+    let officialFamily = false
     const pkgRoot = nearestPackageRoot(args.source)
     try {
-      if (pkgRoot !== undefined) targetKind = detectTargetKind(pkgRoot)
+      if (pkgRoot !== undefined) {
+        const cls = classifyTarget(pkgRoot, acknowledged)
+        targetKind = cls.targetKind
+        officialFamily = cls.officialFamily
+      }
     } catch {
       targetKind = 'generic'
     }
     return {
       pluginName: basename(args.source),
       pluginVersion: targetKind === 'plugin' && pkgRoot !== undefined ? readPackageVersion(pkgRoot) : undefined,
-      request: { kind: 'files', files: [args.source], targetKind },
+      request: {
+        kind: 'files',
+        files: [args.source],
+        targetKind,
+        ...(officialFamily ? { officialFamily: true } : {}),
+      },
     }
   }
   if (args.target === 'package') {
@@ -179,17 +222,25 @@ export function buildRequest(args: ScanPluginArgs): { request: ScanRequest; plug
       ? listShippedFiles(packagePath)
       : [...listSourceFiles(packagePath), ...listInstructionFiles(packagePath)])
     if (files.length === 0) throw new Error('vet: ' + packagePath + ' 下没有可扫描的源码')
+    // 0.3.13：官方目录成员 + 字节可信（first-seen/match，或 mismatch 但已声明补丁）→ 非授权源码
+    // 产物降噪；未登记 mismatch / 第三方不加此位
+    const cls = classifyTarget(packagePath, acknowledged)
     return {
       pluginName: basename(packagePath),
       pluginVersion: readPackageVersion(packagePath),
-      request: { kind: 'files', files, targetKind: detectTargetKind(packagePath) },
+      request: {
+        kind: 'files',
+        files,
+        targetKind: cls.targetKind,
+        ...(cls.officialFamily ? { officialFamily: true } : {}),
+      },
     }
   }
   throw new Error('vet: 未知 target ' + String(args.target))
 }
 
 /** scan_plugin：确定性静态扫描工具（verdict 只来自静态层，LLM 不参与）。 */
-export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeoutMs?: number; transitiveDeps?: boolean } = {}): ReturnType<typeof defineTool> {
+export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeoutMs?: number; transitiveDeps?: boolean; acknowledgedPackageHashes?: AcknowledgedPackageHashes } = {}): ReturnType<typeof defineTool> {
   return defineTool({
     name: 'scan_plugin',
     description: 'Static-scan plugin code or an installed package for escape patterns (constructor-chain, direct process access), dynamic execution, hardcoded secrets, and Cordis/DSH bundle contract. Deterministic rule engine in an isolated process; returns a scorecard with verdict (critical/suspicious/clean) and staticScore. 静态层为确定性判定，LLM 不参与。',
@@ -262,7 +313,7 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
       render: (_args, value) => [{ type: 'text', text: renderScorecard(value as unknown as PluginScorecard) }],
     },
     async execute(args) {
-      const { request, pluginName, pluginVersion } = buildRequest(args as unknown as ScanPluginArgs)
+      const { request, pluginName, pluginVersion } = buildRequest(args as unknown as ScanPluginArgs, config.acknowledgedPackageHashes)
       request.osv = config.osvCheck === true
       request.transitiveDeps = config.transitiveDeps === true
       // P0-3：scanBasis 接线（协议已支持——git 源码仓回扫不误报 R12 入口缺失）

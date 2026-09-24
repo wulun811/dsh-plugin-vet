@@ -313,7 +313,9 @@ describe('official-catalog × internal-plugin（M2 扫描侧接线）', () => {
     installInternalPluginGuard(ctx2 as never, cfg({ acknowledgedPackageHashes: { [`${IN_CATALOG}@9.9.9`]: [localHash] } }), status2)
     ctx2.handlers.get('internal/plugin')![0]({ uid: 'f6', entry: { options: { name: IN_CATALOG } } })
     expect(isOfficialTrusted(IN_CATALOG)).toBe(true)
-    expect(status2.snapshot().alarms.some(a => a.kind === 'baseline-patch-ack')).toBe(true)
+    const ackAlarm = status2.snapshot().alarms.find(a => a.kind === 'baseline-patch-ack')
+    expect(ackAlarm).toBeDefined()
+    expect(ackAlarm?.severity).toBe('info') // 0.3.13：已声明补丁降为观察档
     expect(status2.snapshot().alarms.some(a => a.kind === 'official-match-suspected')).toBe(false)
     rmSync(profile, { recursive: true, force: true })
   })

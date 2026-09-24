@@ -72,15 +72,17 @@ function validReport(report: unknown): report is ScanReport {
 }
 
 /**
- * Cache key covers engine version, rules config, target kind, runtime, and full
- * content of every file. targetKind/runtime change verdict semantics (R2/R3/R9/R10
- * downgrade for generic) — omitting them lets one context's cached verdict poison
- * another (F1: deny gate used a strict scan that hit a generic-cached report).
+ * Cache key covers engine version, rules config, target kind, runtime, official-family
+ * grading, and full content of every file. targetKind/runtime change verdict semantics
+ * (R2/R3/R9/R10 downgrade for generic) — omitting them lets one context's cached verdict
+ * poison another (F1: deny gate used a strict scan that hit a generic-cached report).
+ * officialFamily likewise changes severities (0.3.13 artifact fold) → must enter the key,
+ * or an official scan's folded report would be served to a third-party scan of the same bytes.
  */
 export function cacheKey(
   files: CachedFile[],
   rules: Record<string, boolean> | undefined,
-  context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm'; deps?: string; surface?: { configFiles?: boolean; instructionFiles?: boolean } } = {},
+  context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm'; deps?: string; surface?: { configFiles?: boolean; instructionFiles?: boolean }; officialFamily?: boolean } = {},
 ): string {
   // round-15 review：哈希改为增量 update + 每段长度前缀——
   // 1) 旧实现先 map+join 出整条 body（全量文件内容的第二份拷贝）再整体 update，
@@ -101,7 +103,7 @@ export function cacheKey(
   // surface 改变输出形状（R17/R18 是否参与）→ 必须入 key，否则开关切换会命中旧形状缓存
   const sf = context.surface
   const surface = sf !== undefined ? `cf:${sf.configFiles !== false ? 1 : 0}|if:${sf.instructionFiles !== false ? 1 : 0}` : 'cf:1|if:1'
-  const ctx = `tk:${context.targetKind ?? ''}|rt:${context.runtime ?? ''}|sb:${context.scanBasis ?? ''}|deps:${context.deps ?? ''}|${surface}`
+  const ctx = `tk:${context.targetKind ?? ''}|rt:${context.runtime ?? ''}|sb:${context.scanBasis ?? ''}|deps:${context.deps ?? ''}|of:${context.officialFamily === true ? 1 : 0}|${surface}`
   h.update(`${ENGINE_VERSION}|${ctx}|${JSON.stringify(rules ?? {})}|`)
   return 'sha256:' + h.digest('hex')
 }
