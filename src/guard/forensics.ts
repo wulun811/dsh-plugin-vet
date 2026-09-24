@@ -10,9 +10,9 @@
  * @module dsh-plugin-vet/forensics
  */
 import { appendFileSync, mkdirSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
+import { vetStoreRoot } from './store-root.js'
 
 /** ForensicsEvent：一条取证记录（操作形状 + 目标；不落会话内容）。 */
 export interface ForensicsEvent {
@@ -34,8 +34,9 @@ const SNAPSHOT_DIR: string | undefined = (() => {
 let dirOverride: string | undefined
 
 /** C3（第二轮补漏）：默认取证目录在模块加载时定值——homedir() 随 $HOME 变，运行时
- * 回退可被进程内插件改 env 重定向（伪造取证存储）。与 archive.ts 同款纪律。 */
-const SNAPSHOT_DEFAULT_DIR = join(homedir(), '.dsh', 'vet', 'forensics')
+ * 回退可被进程内插件改 env 重定向（伪造取证存储）。与 archive.ts 同款纪律。
+ * 0.3.15：目录统一由 store-root 解析（测试运行时默认落进程私有临时目录）。 */
+const SNAPSHOT_DEFAULT_DIR = join(vetStoreRoot(), 'forensics')
 
 /** 取证目录根（快照 env + homedir）。 */
 export function forensicsRoot(): string {

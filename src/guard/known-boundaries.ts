@@ -25,13 +25,14 @@
  */
 import { existsSync, readFileSync, renameSync, mkdirSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
+import { vetStoreRoot } from './store-root.js'
 
 /** C3 同款纪律：默认目录在模块加载时定值——homedir() 随 $HOME 变，运行时回退可被
- * 进程内插件改 env 重定向（伪造 known-boundaries.json 预植静默）。 */
-const SNAPSHOT_DEFAULT_DIR = join(homedir(), '.dsh', 'vet')
+ * 进程内插件改 env 重定向（伪造 known-boundaries.json 预植静默）。
+ * 0.3.15：目录统一由 store-root 解析（测试运行时默认落进程私有临时目录）。 */
+const SNAPSHOT_DEFAULT_DIR = vetStoreRoot()
 
 let boundariesDirOverride: string | undefined
 

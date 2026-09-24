@@ -17,9 +17,9 @@
  */
 import { mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
-import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
+import { vetStoreRoot } from './store-root.js'
 
 /** 单包扫描摘要（每包保留最新一条）。 */
 export interface ScanSummary {
@@ -54,8 +54,9 @@ function safeRecordKey(name: string): string {
 
 let summariesDirOverride: string | undefined
 
-/** C3 同款纪律：默认目录模块加载时定值（homedir() 随 $HOME 变，防运行时 env 重定向）。 */
-const SNAPSHOT_DEFAULT_DIR = join(homedir(), '.dsh', 'vet')
+/** C3 同款纪律：默认目录模块加载时定值（homedir() 随 $HOME 变，防运行时 env 重定向）。
+ * 0.3.15：目录统一由 store-root 解析（测试运行时默认落进程私有临时目录）。 */
+const SNAPSHOT_DEFAULT_DIR = vetStoreRoot()
 
 /** 存储路径：~/.dsh/vet/scan-summaries.json（测试可用 setSummariesDirForTest 覆盖）。 */
 export function summariesPath(): string {

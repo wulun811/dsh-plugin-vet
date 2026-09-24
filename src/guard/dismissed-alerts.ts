@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, renameSync, mkdirSync, unlinkSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
+import { vetStoreRoot } from './store-root.js'
 
 /**
  * 持久化忽略警报存储（0.2.1 新增）：用户点击"忽略"后，警报 ID 写入此存储，
@@ -19,7 +19,8 @@ import { withVetSelfIo } from './runtime-hooks.js'
  * 下次 dismiss/restore 写盘时以磁盘为准融合（loadDismissed 每次写前重读）。
  */
 
-let DISMISSED_FILE: string = join(homedir(), '.dsh', 'vet', 'dismissed-alerts.json')
+/** 0.3.15：默认路径由 store-root 解析（测试运行时默认落进程私有临时目录）。 */
+let DISMISSED_FILE: string = join(vetStoreRoot(), 'dismissed-alerts.json')
 
 /** 内存缓存：已加载的忽略 id 集合（热路径 O(1) 查询，避免每次 record 都同步读盘）。 */
 let cachedIds: Set<string> | undefined

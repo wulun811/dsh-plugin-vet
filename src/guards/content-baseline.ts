@@ -7,12 +7,15 @@ import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, lstatSync, renameSync, mkdirSync } from 'node:fs'
 import { writeTmpExclusive } from '../guard/path-utils.js'
 
-/** M7（0.1.16 加固）：基线自写 hash 记录 + 篡改标志（进程内插件改写 baseline.json 的检测）。 */
-const writtenBaselineHashes = new Map<string, string>()
-let baselineTampered = false
-import { homedir } from 'node:os'
 import { join, dirname, relative } from 'node:path'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
+import { vetStoreRoot } from '../guard/store-root.js'
+import { currentWriter, readWriter, type StoreTamper, type StoreWriter } from '../guard/store-stamp.js'
+
+/** M7（0.1.16 加固）：基线自写 hash 记录 + 篡改标志（进程内插件改写 baseline.json 的检测）。
+ * 0.3.15：标志带证据（文件 + 改写方 writer 戳），归因分流见 internal-plugin。 */
+const writtenBaselineHashes = new Map<string, string>()
+let baselineTamper: StoreTamper | null = null
 
 /** 基线记录。 */
 export interface BaselineRecord {
@@ -32,6 +35,8 @@ export interface BaselineRecord {
 /** 基线存储：key = `${packageName}@${version}`，支持多版本共存。 */
 export interface BaselineStore {
   records: Record<string, BaselineRecord>
+  /** 0.3.15（M7 归因）：本次落盘的 writer 戳（见 store-stamp.ts）。 */
+  writer?: StoreWriter
 }
 
 /** 哈希计算选项（v5 修订：防 DoS）。 */
@@ -66,8 +71,9 @@ let baselineDirOverride: string | undefined
 
 /** C3（第二轮补漏）：默认基线目录同样在模块加载时定值——homedir() 在 POSIX 优先 $HOME，
  * 仅快照 env 不够：进程内插件改 process.env.HOME 后，未快照的默认回退仍会被重定向（与
- * confirm-block/archive 同款纪律，覆盖 memory 面而非存储面）。 */
-const SNAPSHOT_DEFAULT_BASELINE_DIR = join(homedir(), '.dsh', 'vet')
+ * confirm-block/archive 同款纪律，覆盖 memory 面而非存储面）。
+ * 0.3.15：目录统一由 store-root 解析（测试运行时默认落进程私有临时目录）。 */
+const SNAPSHOT_DEFAULT_BASELINE_DIR = vetStoreRoot()
 
 /** 基线文件路径：~/.dsh/vet/baseline.json（快照 env + homedir；测试用 setBaselineDirForTest 覆盖）。 */
 export function baselinePath(): string {
@@ -239,24 +245,26 @@ export function loadBaseline(): BaselineStore {
       const path = baselinePath()
       const content = readFileSync(path, 'utf8')
       const recorded = writtenBaselineHashes.get(path)
-      if (recorded !== undefined && hashOf(content) !== recorded) baselineTampered = true
-      const parsed = JSON.parse(content) as { records?: Record<string, BaselineRecord> }
+      const parsed = JSON.parse(content) as { records?: Record<string, BaselineRecord>; writer?: unknown }
+      if (recorded !== undefined && hashOf(content) !== recorded) {
+        baselineTamper = { file: path, foreign: readWriter(parsed.writer) }
+      }
       if (parsed.records !== undefined && typeof parsed.records === 'object') {
         return { records: parsed.records }
       }
       return { records: {} }
     } catch {
-      if (writtenBaselineHashes.has(baselinePath())) baselineTampered = true
+      if (writtenBaselineHashes.has(baselinePath())) baselineTamper = { file: baselinePath(), foreign: null }
       // 文件不存在或损坏：返回空 store，所有包视为首次见到
       return { records: {} }
     }
   })
 }
 
-/** 读取并复位篡改标志（internal/plugin 完成时上报 yellow）。 */
-export function consumeBaselineTamper(): boolean {
-  const t = baselineTampered
-  baselineTampered = false
+/** 读取并复位篡改证据（一次消费；internal/plugin 完成时按归因分流上报 info/yellow）。 */
+export function consumeBaselineTamper(): StoreTamper | null {
+  const t = baselineTamper
+  baselineTamper = null
   return t
 }
 
@@ -285,6 +293,8 @@ export function saveBaseline(store: BaselineStore): boolean {
 
       // 原子写：临时文件 + rename（round-16 SEC-5：tmp 排他 'wx'，拒绝预置符号链接盲写）
       const tmpPath = path + '.tmp.' + process.pid
+      // 0.3.15（M7 归因）：落盘前盖 writer 戳，读回时据此区分「另一个 vet 进程」与「进程内篡改」
+      store.writer = currentWriter()
       const serialized = JSON.stringify(store, null, 2)
       writeTmpExclusive(tmpPath, serialized, 0o600)
       renameSync(tmpPath, path)

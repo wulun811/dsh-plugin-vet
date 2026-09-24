@@ -43,6 +43,10 @@ function expandFilesField(filesField) {
     if (statSync(abs).isDirectory()) walk(abs, ROOT)
     else out.add(pattern)
   }
+  // npm 隐式包含：package.json / LICENSE / README 永远入包（files 字段无法排除它们）。
+  // 门禁的发布集推导必须与之对齐，否则「运行时从包根读 package.json」这类正确代码
+  // （0.3.15 store-stamp 读自身版本号）会被误判为缺文件。
+  for (const implicit of ['package.json', 'LICENSE', 'README.md']) out.add(implicit)
   return out
 }
 

@@ -13,6 +13,7 @@ import { hasAuditRecord, auditRequiredMessage, setArchiveIoWarn } from '../audit
 import { withVetSelfIo, markOfficialTrusted } from '../guard/runtime-hooks.js'
 import { capabilityDiff } from '../guard/capability-diff.js'
 import { recordScan as recordVersionScan, isEmptyManifest, consumeCapabilitiesTamper } from '../guard/version-diff.js'
+import { classifyStoreRewrite } from '../guard/store-stamp.js'
 import { recordScanSummary } from '../guard/scan-summaries.js'
 import { isKnownBoundary, markKnownBoundary } from '../guard/known-boundaries.js'
 import type { VetStatus } from '../guard/status.js'
@@ -784,17 +785,39 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           at: Date.now(),
         })
       }
-      // M7（0.1.16 加固）：vet 存储被进程内插件改写（capabilities/baseline hash 与自写不符）→ yellow
-      if (consumeCapabilitiesTamper() || consumeBaselineTamper()) {
-        status?.record({
-          id: 'vet-store-tamper',
-          severity: 'yellow',
-          source: 'scan',
-          kind: 'vet-store-tamper',
-          message: 'vet 存储文件被外部改写（capabilities.json/baseline.json 与 vet 自写内容不一致）——疑似进程内插件篡改 vet 状态，升级差分/基线保护可能已失效（M7）',
-          target: '~/.dsh/vet',
-          at: Date.now(),
-        })
+      // M7（0.1.16 加固；0.3.15 归因分流）：vet 存储被外部改写（capabilities/baseline 与自写
+      // 字节不符）。0.3.15 实测事故（用户 live 报 vet-store-tamper 黄牌）：改写者其实是 vet 自己的
+      // 测试进程（vitest 夹具写进 ~/.dsh/vet），旧口径一律报「疑似进程内插件篡改」属误判。
+      // 现按改写方留在文件里的 writer 戳分流：
+      // - 另一个 vet 进程（CLI / 测试 / 第二个 DSH 实例）写的 → info 观察：多进程共享同一份
+      //   存储是已知写路径（消息点名 pid/版本/时间，供用户自查；未跑过这些进程则按篡改处置）
+      // - 无戳 / 戳为本进程 pid → 本进程写过的字节被改：进程内篡改，yellow 保持（M7 真正要抓的形态）
+      // 边界：戳是归因而非鉴权（可被蓄意伪造），M7 本就是报警型绊线。
+      const tamper = consumeCapabilitiesTamper() ?? consumeBaselineTamper()
+      if (tamper !== null) {
+        const rewrite = classifyStoreRewrite(tamper.foreign, process.pid)
+        if (rewrite.kind === 'foreign-vet') {
+          const w = rewrite.writer
+          status?.record({
+            id: 'vet-store-foreign-write',
+            severity: 'info',
+            source: 'scan',
+            kind: 'vet-store-foreign-write',
+            message: `vet 存储被另一个 vet 进程改写（${tamper.file}；写入方 pid ${w.pid}，vet ${w.version}，${new Date(w.at).toLocaleString()}）——多进程写路径（vet CLI / 测试 / 第二个 DSH 实例）会接管同一份存储，已按当前内容重新接管基线；若你并未运行过上述进程，请按篡改处置（M7）`,
+            target: '~/.dsh/vet',
+            at: Date.now(),
+          })
+        } else {
+          status?.record({
+            id: 'vet-store-tamper',
+            severity: 'yellow',
+            source: 'scan',
+            kind: 'vet-store-tamper',
+            message: `vet 存储文件被外部改写（${tamper.file} 与 vet 自写内容不一致，且改写方未留下「另一个 vet 进程」的自写标记）——疑似进程内插件篡改 vet 状态，升级差分/基线保护可能已失效（M7）`,
+            target: '~/.dsh/vet',
+            at: Date.now(),
+          })
+        }
       }
       // C2（0.1.16 加固）：插件使用内建模块的 ESM 具名导入 → T2 钩子对该绑定不生效（Node 快照互操作），
       // 运行时防线仅剩 T1 哨兵——显式提示边界，不静默

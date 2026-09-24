@@ -238,8 +238,8 @@ describe('round-4：deny 模式扫描失败 fail-closed（M3，与 internal-plug
 describe('round-4：C3 homedir 快照簇（改 process.env.HOME 无法重定向默认存储路径）', () => {
   it('stats/baseline/capabilities/forensics 默认目录在模块加载时定值', async () => {
     const oldHome = process.env.HOME
-    const defaultHome = oldHome ?? '/home/real'
     // 先加载模块（快照真实 HOME），再改 HOME 验证路径不变
+    const { vetStoreRoot } = await import('../lib/guard/store-root.js')
     const { statsPath } = await import('../lib/guard/stats.js')
     const { baselinePath } = await import('../lib/guards/content-baseline.js')
     const { capabilitiesPath } = await import('../lib/guard/version-diff.js')
@@ -248,20 +248,27 @@ describe('round-4：C3 homedir 快照簇（改 process.env.HOME 无法重定向�
       stats: statsPath(), baseline: baselinePath(), caps: capabilitiesPath(), fx: forensicsRoot(),
     }
     try {
-      // 模块加载后改 HOME：所有默认路径必须仍指向模块加载时的真实家目录
+      // 模块加载后改 HOME：所有默认路径必须仍指向模块加载时解析出的根（0.3.15 起由 store-root 统一解析）
       process.env.HOME = join(tmpdir(), '.r4-fake-home-')
+      const root = vetStoreRoot()
       expect(statsPath()).toBe(before.stats)
-      expect(statsPath()).toBe(join(defaultHome, '.dsh', 'vet', 'stats.json'))
+      expect(statsPath()).toBe(join(root, 'stats.json'))
       expect(baselinePath()).toBe(before.baseline)
-      expect(baselinePath()).toBe(join(defaultHome, '.dsh', 'vet', 'baseline.json'))
+      expect(baselinePath()).toBe(join(root, 'baseline.json'))
       expect(capabilitiesPath()).toBe(before.caps)
-      expect(capabilitiesPath()).toBe(join(defaultHome, '.dsh', 'vet', 'capabilities.json'))
+      expect(capabilitiesPath()).toBe(join(root, 'capabilities.json'))
       expect(forensicsRoot()).toBe(before.fx)
-      expect(forensicsRoot()).toBe(join(defaultHome, '.dsh', 'vet', 'forensics'))
+      expect(forensicsRoot()).toBe(join(root, 'forensics'))
     } finally {
       if (oldHome === undefined) delete process.env.HOME
       else process.env.HOME = oldHome
     }
+  })
+
+  it('生产口径（纯解析）：默认根 = <home>/.dsh/vet，与测试运行时无关', async () => {
+    const { resolveStoreRoot } = await import('../lib/guard/store-root.js')
+    // Windows 兼容：期望值用 join（resolveStoreRoot 内部用 join，win32 分隔符为 \）
+    expect(resolveStoreRoot({ env: {}, home: '/home/real', isTestRuntime: false })).toBe(join('/home/real', '.dsh', 'vet'))
   })
 })
 

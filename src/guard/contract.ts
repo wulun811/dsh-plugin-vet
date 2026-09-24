@@ -19,8 +19,8 @@
  * 报警面/拦截面（N7 相永不参与）。
  */
 
-import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { vetStoreRoot } from './store-root.js'
 
 // ── 类型 ─────────────────────────────────────────────
 
@@ -398,7 +398,8 @@ const SNAPSHOT_CONTRACTS_DIR = process.env.DSH_PLUGIN_VET_CONTRACTS_DIR
 let contractsDir: string | undefined = SNAPSHOT_CONTRACTS_DIR
 // C3 加固：默认契约目录在模块加载时定值——homedir() 在 POSIX 优先 $HOME，进程内插件此后
 // 改 env 会把契约目录整体重定向（契约校验层静默降级为 no-contract）。与其余存储模块一致。
-const DEFAULT_CONTRACTS_DIR = join(homedir(), '.dsh', 'vet', 'contracts')
+// 0.3.15：目录统一由 store-root 解析（测试运行时默认落进程私有临时目录）。
+const DEFAULT_CONTRACTS_DIR = join(vetStoreRoot(), 'contracts')
 
 /** 单测覆写契约存储目录（生产不调用；undefined 恢复默认）。 */
 export function setContractsDirForTest(dir: string | undefined): void {

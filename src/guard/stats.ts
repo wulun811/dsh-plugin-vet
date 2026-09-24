@@ -6,9 +6,9 @@
  */
 import { readFileSync, renameSync, mkdirSync, existsSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
-import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
+import { vetStoreRoot } from './store-root.js'
 
 export interface VetStats {
   /** 累计扫描插件次数（recordScan 调用次数） */
@@ -43,8 +43,9 @@ const SNAPSHOT_STATS_DIR: string | undefined = (() => {
 let statsDirOverride: string | undefined
 
 /** C3（第二轮补漏）：默认目录在模块加载时定值——homedir() 随 $HOME 变，运行时回退
- * 可被进程内插件改 env 重定向。与 archive.ts 同款纪律。 */
-const SNAPSHOT_DEFAULT_DIR = join(homedir(), '.dsh', 'vet')
+ * 可被进程内插件改 env 重定向。与 archive.ts 同款纪律。
+ * 0.3.15：目录统一由 store-root 解析（测试运行时默认落进程私有临时目录）。 */
+const SNAPSHOT_DEFAULT_DIR = vetStoreRoot()
 
 /** 持久化计数器的进程内镜像：避免每次报警记录都同步读写 stats.json（sink 在热路径逐 fs/net 事件调用
  *  incrementAlarmsRecorded）。仅由 getStats()（盾牌 5s 轮询）落盘，最多丢失约一个轮询周期；stats 仅为展示，fail-open。

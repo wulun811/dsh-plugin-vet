@@ -13,11 +13,14 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { generateKeyPairSync } from 'node:crypto'
 import { generateCanary, canaryStore, integrityCanaryContent } from './canary.js'
+import { vetIntegrityRoot } from './store-root.js'
 
 export const DEFAULT_HONEYPOT_DIR = join(homedir(), '.dsh', '.local')
 // C3 加固：默认金丝雀根在模块加载时定值（homedir() 在 POSIX 优先 $HOME——进程内插件此后
 // 改 env 会把热重载后的金丝雀登记到新家，真实 ~/.dsh 金丝雀失保护；蜜罐默认目录同上款）。
-const DEFAULT_INTEGRITY_ROOT = join(homedir(), '.dsh')
+// 0.3.15：改由 store-root 派生（生产 = ~/.dsh 不变；测试运行时随存储根落临时目录，
+// 不再把 vet-integrity-* 写进真实家目录）。
+const DEFAULT_INTEGRITY_ROOT = vetIntegrityRoot()
 
 const ALNUM = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 const UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'

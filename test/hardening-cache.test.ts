@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs'
-import { tmpdir, homedir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { scan } from '../lib/scanner-bin/engine.js'
 import { cacheKey, readCached, writeCached } from '../lib/scanner-bin/cache.js'
 import { ENGINE_VERSION } from '../lib/scanner-bin/protocol.js'
 import { setCapabilitiesDirForTest, capabilitiesPath } from '../lib/guard/version-diff.js'
+import { vetStoreRoot } from '../lib/guard/store-root.js'
 import type { ScanRequest } from '../lib/scanner-bin/protocol.js'
 
 const FIX = join(import.meta.dirname, 'fixtures')
@@ -69,7 +70,8 @@ describe('0.1.16 加固——缓存反投毒与 env 快照（C3）', () => {
         expect(capabilitiesPath()).toBe(join(dir, 'capabilities.json'))
         setCapabilitiesDirForTest(undefined)
         expect(capabilitiesPath()).not.toContain('attacker-controlled')
-        expect(capabilitiesPath()).toBe(join(homedir(), '.dsh', 'vet', 'capabilities.json'))
+        // 0.3.15：默认根由 store-root 统一解析（测试运行时 = 进程私有临时目录）
+        expect(capabilitiesPath()).toBe(join(vetStoreRoot(), 'capabilities.json'))
       } finally {
         delete process.env.DSH_PLUGIN_VET_BASELINE_DIR
         rmSync(dir, { recursive: true, force: true })

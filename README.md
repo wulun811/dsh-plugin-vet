@@ -190,9 +190,13 @@ writes trigger the `watchUserPatches` hot-reload).
 All `DSH_PLUGIN_VET_*` paths are **snapshotted at module load** (vet loads before third-party
 plugins — a plugin changing `process.env` afterwards cannot redirect vet's storage). Set them in
 the host environment (i.e. in the DSH profile/weekly launch script), not from inside a plugin.
+Since 0.3.15 every store path derives from a single root (`DSH_PLUGIN_VET_STORE_DIR`, default
+`~/.dsh/vet`), and a **test runtime** (`VITEST` / `NODE_ENV=test`) defaults to a process-private temp
+directory — running vet's own test suite can no longer write your real store.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `DSH_PLUGIN_VET_STORE_DIR` | `~/.dsh/vet` | **Base root (0.3.15)** for every store file below (capabilities / baseline / stats / scan-summaries / known-boundaries / official-catalog / forensics / contracts / audits / dismissed-alerts). Per-file variables below still win when set |
 | `DSH_PLUGIN_VET_CACHE_DIR` | `<tmpdir>/dsh-plugin-vet-cache` | Static-scanner report cache (sha-256 keyed, 0600 files) |
 | `DSH_PLUGIN_VET_BASELINE_DIR` | `~/.dsh/vet` | Content-baseline store (`baseline.json`) + N6 capability history (`capabilities.json`) + version snapshots |
 | `DSH_PLUGIN_VET_ARCHIVE_DIR` | `~/.dsh/vet/audits` | Audit health records — where `requireAudit` looks for `<plugin>-<version>-<ts>.md` |
@@ -474,8 +478,11 @@ Fixes from the full code review (C1–C4 critical, M5–M9 major/minor, rule pat
 - **M5** — T2 now wraps `symlink/link/chmod/chown/mkdir/mkdtemp/utimes/lutimes` (+Sync, write surface) and
   `lstat/lstatSync` (probe surface).
 - **M6/M7/M8/M9** — R9 fork-bomb covers sync spawn variants · capability/baseline stores self-check for
-  external overwrite (`vet-store-tamper` yellow) · `isSensitiveFsPath` matches path segments instead of
-  substrings · sidecar kill verifies `/proc/<pid>/cmdline` before SIGTERM (PID-reuse protection).
+  external overwrite: every write carries a `writer` stamp (tool/version/pid/time), so a rewrite by *another vet
+  process* (CLI / tests / a second DSH instance) is an info `vet-store-foreign-write` naming that pid, while a
+  stamp-less or own-pid rewrite stays yellow `vet-store-tamper` (0.3.15) · `isSensitiveFsPath` matches path
+  segments instead of substrings · sidecar kill verifies `/proc/<pid>/cmdline` before SIGTERM (PID-reuse
+  protection).
 - **Rule patches** — R2 global/indirect eval forms + require-concat folding, R3 `globalThis.process.*` member
   policy, R4 `Reflect.defineProperty`, R9 escaped-paren ReDoS counting, R10 `prepare` hook, R14 python/ruby/perl
   download-exec, R15 undici sinks (see Static rule table).

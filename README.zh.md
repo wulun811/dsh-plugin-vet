@@ -147,10 +147,11 @@ P15/P16/P17/G-2/G-5 一族在零用户操作下回到报警面。
 
 ## 环境变量
 
-所有 `DSH_PLUGIN_VET_*` 路径均在**模块加载时快照**（vet 先于第三方插件加载——插件之后改 `process.env` 无法重定向 vet 的存储）。请在宿主环境设置（DSH profile / 启动脚本），不要由插件内部设置。
+所有 `DSH_PLUGIN_VET_*` 路径均在**模块加载时快照**（vet 先于第三方插件加载——插件之后改 `process.env` 无法重定向 vet 的存储）。请在宿主环境设置（DSH profile / 启动脚本），不要由插件内部设置。0.3.15 起所有存储路径统一派生自一个根（`DSH_PLUGIN_VET_STORE_DIR`，默认 `~/.dsh/vet`）；**测试运行时**（`VITEST` / `NODE_ENV=test`）默认落进程私有临时目录——跑 vet 自己的测试套件不再会写你的真实存储。
 
 | 变量 | 默认值 | 用途 |
 |---|---|---|
+| `DSH_PLUGIN_VET_STORE_DIR` | `~/.dsh/vet` | **存储根（0.3.15）**：下列所有存储文件（capabilities / baseline / stats / scan-summaries / known-boundaries / official-catalog / forensics / contracts / audits / dismissed-alerts）都在其下；单独设了下面的分项变量时以分项为准 |
 | `DSH_PLUGIN_VET_CACHE_DIR` | `<tmpdir>/dsh-plugin-vet-cache` | 静态扫描报告缓存（sha-256 键，0600 文件） |
 | `DSH_PLUGIN_VET_BASELINE_DIR` | `~/.dsh/vet` | 内容基线存储（`baseline.json`）+ N6 能力历史（`capabilities.json`）+ 版本快照 |
 | `DSH_PLUGIN_VET_ARCHIVE_DIR` | `~/.dsh/vet/audits` | 审计健康档案目录——`requireAudit` 在此查找 `<plugin>-<version>-<ts>.md` |
@@ -299,8 +300,7 @@ verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `c
 - **C4** — 检测 `Error.prepareStackTrace`/`stackTraceLimit` 篡改：归因不可信 → 敏感操作报 red
   `attribution-tampered`，且 N7 族 2 凭据破坏经哨兵身份照样拦截（此前 hint 缺失会绕开唯一拦截）。
 - **M5** — T2 补 `symlink/link/chmod/chown/mkdir/mkdtemp/utimes/lutimes`(+Sync) 写面与 `lstat/lstatSync` 侦察面。
-- **M6/M7/M8/M9** — R9 fork-bomb 覆盖 sync 变体 · 能力/基线存储自检外部改写（`vet-store-tamper` 黄灯）·
-  `isSensitiveFsPath` 段级匹配（不再子串误抬）· 侧车终止前核对 `/proc/<pid>/cmdline`（PID 复用防误杀）。
+- **M6/M7/M8/M9** — R9 fork-bomb 覆盖 sync 变体 · 能力/基线存储自检外部改写：每次落盘带 `writer` 戳（工具/版本/pid/时间），改写方是**另一个 vet 进程**（CLI / 测试 / 第二个 DSH 实例）时降为 info `vet-store-foreign-write` 并点名该 pid，无戳或戳为本进程 pid 则保持 yellow `vet-store-tamper`（0.3.15）· `isSensitiveFsPath` 段级匹配（不再子串误抬）· 侧车终止前核对 `/proc/<pid>/cmdline`（PID 复用防误杀）。
 - **规则补丁** — R2 全局/间接 eval 形态 + require 拼接折叠、R3 `globalThis.process.*` 成员口径、
   R4 `Reflect.defineProperty`、R9 转义括号组深度、R10 `prepare` 钩子、R14 python/ruby/perl 下载即执行、
   R15 undici sink（见静态规则表）。

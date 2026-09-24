@@ -99,22 +99,23 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
     let dir: string
     beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'vet-tamper-')); setCapabilitiesDirForTest(dir); setBaselineDirForTest(dir) })
     afterEach(() => { setCapabilitiesDirForTest(undefined); setBaselineDirForTest(undefined); rmSync(dir, { recursive: true, force: true }) })
-    it('自写后读取 → 无篡改；外部改写 → consumeCapabilitiesTamper true（一次性）', () => {
+    it('自写后读取 → 无篡改；外部改写 → consumeCapabilitiesTamper 返回证据（一次性）', () => {
       saveCapabilities({ records: { a: { name: 'a', version: '1', recordedAt: 1, capabilities: manifestV() } } })
       loadCapabilities()
-      expect(consumeCapabilitiesTamper()).toBe(false)
+      expect(consumeCapabilitiesTamper()).toBeNull()
       writeFileSync(join(dir, 'capabilities.json'), JSON.stringify({ records: { evil: { name: 'evil', version: '9', recordedAt: 2, capabilities: manifestV() } } }))
       loadCapabilities()
-      expect(consumeCapabilitiesTamper()).toBe(true)
-      expect(consumeCapabilitiesTamper()).toBe(false)
+      // 0.3.15：返回证据对象（file + 改写方 writer 戳）而非 boolean；无戳 = 进程内篡改形态
+      expect(consumeCapabilitiesTamper()).toMatchObject({ file: join(dir, 'capabilities.json'), foreign: null })
+      expect(consumeCapabilitiesTamper()).toBeNull()
     })
     it('baseline 同款自检', () => {
       saveBaseline({ records: { 'x@1': { name: 'x', version: '1', hash: 'h', recordedAt: 1 } } })
       loadBaseline()
-      expect(consumeBaselineTamper()).toBe(false)
+      expect(consumeBaselineTamper()).toBeNull()
       writeFileSync(join(dir, 'baseline.json'), JSON.stringify({ records: { 'evil@9': { name: 'evil', version: '9', hash: 'evil', recordedAt: 9 } } }))
       loadBaseline()
-      expect(consumeBaselineTamper()).toBe(true)
+      expect(consumeBaselineTamper()).toMatchObject({ file: join(dir, 'baseline.json'), foreign: null })
     })
   })
 

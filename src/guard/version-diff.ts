@@ -21,10 +21,11 @@
 import { readFileSync, renameSync, mkdirSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
 import { createHash } from 'node:crypto'
-import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import type { CapabilityManifest } from '../scanner/protocol.js'
 import { withVetSelfIo } from './runtime-hooks.js'
+import { vetStoreRoot } from './store-root.js'
+import { currentWriter, readWriter, type StoreTamper, type StoreWriter } from './store-stamp.js'
 import { hasAuditRecord } from '../audit/archive.js'
 
 export interface CapabilityRecord {
@@ -36,6 +37,8 @@ export interface CapabilityRecord {
 
 export interface CapabilityStore {
   records: Record<string, CapabilityRecord>
+  /** 0.3.15（M7 归因）：本次落盘的 writer 戳（见 store-stamp.ts）。 */
+  writer?: StoreWriter
 }
 
 /** 差分只关心"新增"（能力收窄是良性，报警只用 added）；布尔字段 = 该能力是否新增。 */
@@ -103,8 +106,9 @@ const SNAPSHOT_BASELINE_DIR: string | undefined = (() => {
 let baselineDirOverride: string | undefined
 
 /** C3（第二轮补漏）：默认目录在模块加载时定值——homedir() 随 $HOME 变，运行时回退可被
- * 进程内插件改 env 重定向（伪造 capabilities.json 预植 N6 基线）。与 archive.ts 同款纪律。 */
-const SNAPSHOT_DEFAULT_DIR = join(homedir(), '.dsh', 'vet')
+ * 进程内插件改 env 重定向（伪造 capabilities.json 预植 N6 基线）。与 archive.ts 同款纪律。
+ * 0.3.15：目录统一由 store-root 解析（测试运行时默认落进程私有临时目录，不写用户真实存储）。 */
+const SNAPSHOT_DEFAULT_DIR = vetStoreRoot()
 
 /** 存储文件路径：~/.dsh/vet/capabilities.json（快照 env + homedir；测试可用 setCapabilitiesDirForTest 覆盖）。 */
 export function capabilitiesPath(): string {
@@ -118,10 +122,11 @@ export function setCapabilitiesDirForTest(dir?: string): void {
 }
 
 /** M7（0.1.16 加固）：vet 自写 store 的内容哈希——进程内插件若直接改写 capabilities.json（
- * 中和升级差分/投毒基线），load 时 hash 与自写记录不符 → 记篡改标志。多进程写路径（另一 vet
- * 实例）会误标，DSH 单 profile 单实例场景可接受（注释为边界）。 */
+ * 中和升级差分/投毒基线），load 时 hash 与自写记录不符 → 记篡改标志。
+ * 0.3.15：标志带证据（文件 + 改写方 writer 戳），由 internal/plugin 分流——别的 vet 进程
+ * 写的 = 合法多进程写路径（info 观察）；无戳 / 戳为本进程 pid = 进程内篡改（yellow）。 */
 const writtenStoreHashes = new Map<string, string>()
-let storeTampered = false
+let storeTamper: StoreTamper | null = null
 
 /** 加载存储；文件不存在/损坏 → 空存储。文件被外部（非 vet 自写）改写 → 置篡改标志（可消费）。
  * 说明：单条记录损坏（capabilities 缺/非对象，如旧布局残留/手工编辑）**不在此丢弃**——
@@ -133,25 +138,27 @@ export function loadCapabilities(): CapabilityStore {
       const path = capabilitiesPath()
       const content = readFileSync(path, 'utf8')
       const recorded = writtenStoreHashes.get(path)
-      if (recorded !== undefined && sha256Of(content) !== recorded) storeTampered = true
-      const parsed = JSON.parse(content) as { records?: Record<string, CapabilityRecord> }
+      const parsed = JSON.parse(content) as { records?: Record<string, CapabilityRecord>; writer?: unknown }
+      if (recorded !== undefined && sha256Of(content) !== recorded) {
+        storeTamper = { file: path, foreign: readWriter(parsed.writer) }
+      }
       if (parsed.records !== undefined && typeof parsed.records === 'object') {
         return { records: parsed.records as Record<string, CapabilityRecord> }
       }
       return { records: {} }
     } catch {
-      // 自写过但文件读不到（被删除/损坏）→ 同样是篡改信号
+      // 自写过但文件读不到（被删除/损坏）→ 同样是篡改信号（无 writer 可归因）
       const path = capabilitiesPath()
-      if (writtenStoreHashes.has(path)) storeTampered = true
+      if (writtenStoreHashes.has(path)) storeTamper = { file: path, foreign: null }
       return { records: {} }
     }
   })
 }
 
-/** 读取并复位篡改标志（一次消费；internal/plugin 完成时上报 yellow）。 */
-export function consumeCapabilitiesTamper(): boolean {
-  const t = storeTampered
-  storeTampered = false
+/** 读取并复位篡改证据（一次消费；internal/plugin 完成时按归因分流上报 info/yellow）。 */
+export function consumeCapabilitiesTamper(): StoreTamper | null {
+  const t = storeTamper
+  storeTamper = null
   return t
 }
 
@@ -170,6 +177,8 @@ export function saveCapabilities(store: CapabilityStore): void {
         // 目录已存在
       }
       const tmpPath = path + '.tmp.' + process.pid
+      // 0.3.15（M7 归因）：落盘前盖 writer 戳，读回时据此区分「另一个 vet 进程」与「进程内篡改」
+      store.writer = currentWriter()
       const serialized = JSON.stringify(store, null, 2)
       writeTmpExclusive(tmpPath, serialized, 0o600)
       renameSync(tmpPath, path)

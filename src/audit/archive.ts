@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
+import { vetStoreRoot } from '../guard/store-root.js'
 
 /**
  * 审计档案检查（D30 强制层）：agent 按 AUDIT_PROTOCOL 审查后落盘健康档案到
@@ -12,8 +12,9 @@ import { withVetSelfIo } from '../guard/runtime-hooks.js'
 /** 档案目录（可用 DSH_PLUGIN_VET_ARCHIVE_DIR 覆盖，测试友好）。
  * M2：快照 env——vet 是插件 bundle，加载早于第三方插件；vet 模块加载后 env 值固定，
  * 恶意插件无法再通过设 DSH_PLUGIN_VET_ARCHIVE_DIR 重定向门槛（deny 门禁 bypass）。
- * 测试需要改目录时用 setArchiveDirForTest（只在测试路径暴露）。 */
-let ARCHIVE_DIR: string = process.env.DSH_PLUGIN_VET_ARCHIVE_DIR ?? join(homedir(), '.dsh', 'vet', 'audits')
+ * 测试需要改目录时用 setArchiveDirForTest（只在测试路径暴露）。
+ * 0.3.15：默认目录由 store-root 解析（测试运行时默认落进程私有临时目录，不写用户真实档案）。 */
+let ARCHIVE_DIR: string = process.env.DSH_PLUGIN_VET_ARCHIVE_DIR ?? join(vetStoreRoot(), 'audits')
 
 export function archiveDir(): string {
   return ARCHIVE_DIR

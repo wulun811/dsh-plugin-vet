@@ -519,7 +519,10 @@ Trust-relevant highlights:
 - C3 使缓存/存储目录不可被进程内改 env 重定向；缓存条目带宿主注入 nonce，伪造干净缓存被忽略。
 - C4 使归因文本不可被全局静音/伪造滥用：prepareStackTrace/stackTraceLimit 篡改 → attribution-tampered
   red + 族 2 凭据破坏照拦（哨兵身份）。
-- M7 使 capabilities/baseline 存储被外部改写可观测（vet-store-tamper 黄灯）。
+- M7 使 capabilities/baseline 存储被外部改写可观测。0.3.15 起落盘带 `writer` 戳（工具/版本/pid/时间）：
+  改写方为**另一个 vet 进程**（CLI / 测试 / 第二个 DSH 实例）→ info `vet-store-foreign-write`（消息点名
+  pid/版本/时间），无戳或戳为本进程 pid → yellow `vet-store-tamper`（进程内篡改形态，M7 真正要抓的）；
+  归因不是鉴权（戳可伪造），M7 始终只是报警型绊线。详见 §5.16。
 
 ### 5.12 Baseline-mismatch 定性重构（0.1.21）
 
@@ -619,6 +622,33 @@ plugins:
 识别伪造官方名 tarball 的唯一确定性检查，自生哈希基线首见即记录挡不住伪装）；allowlist/cordis builtin/
 内容基线关闭（用户显式选择）才完全跳过。测试：`test/self-scan.test.ts`（27）、`test/self-pin.test.ts`（11）；
 端到端实测本体自扫 pinned-match + clean，224 findings 全分类。
+
+### 5.16 存储根统一解析 + 测试隔离（0.3.15）
+
+**问题（用户 live 实测）**：M7 报 `vet-store-tamper` 黄牌「疑似进程内插件篡改 vet 状态」——查实改写者是
+**vet 自己的测试套件**：`vitest run` 把 6 条夹具能力记录写进真实 `~/.dsh/vet/capabilities.json`、8 条写进
+`scan-summaries.json`，另有 `stats.json` 与 `forensics/evil-plugin-*.jsonl`。根因两条：(a) 存储目录逐测试
+用 `setXDirForTest` 隔离，漏一处就直写用户生产状态（0.3.3/round-4 已补过两轮，仍在 `plugin.test.ts` /
+`runtime-guard.test.ts` / `review-round4.test.ts` / `review-fixes.test.ts` 复发）；(b) M7 的自写 hash 是
+**进程内** Map，任何外部改写一律被叙述成「进程内插件篡改」。
+
+**修复**：
+
+1. `src/guard/store-root.ts` 成为唯一真源：capabilities / baseline / stats / scan-summaries /
+   known-boundaries / official-catalog / forensics / contracts / audits / dismissed-alerts 与完整性金丝雀根全部
+   由它派生。优先级：显式 setter > `DSH_PLUGIN_VET_STORE_DIR` > **测试运行时**（`VITEST` / `NODE_ENV=test`）
+   进程私有临时目录 > `~/.dsh/vet`。测试运行时的默认根永远不是真实家目录——漏写 setter 从「破坏用户状态」
+   降级为「无害」；生产语义（家目录快照、运行期不可重定向）未变。
+2. `src/guard/store-stamp.ts`：每次落盘在存储文件里盖 `writer` 戳；读回字节不符时按戳归因（见 §5.9）。
+3. 归因分层：外来 vet 进程 → info `vet-store-foreign-write`；无戳 / 本进程 pid → yellow `vet-store-tamper`。
+   照抄旧戳只改记录（进程内篡改的典型形态）**仍留在 yellow**——戳里是本进程 pid，与「另一个进程写的」
+   判据不符。
+
+**边界**：戳是归因而非鉴权（可伪造）；自写 hash 仍是进程内的，进程启动后**首次**写入之前不设防，
+DSH 停机期间的改写不可见（跨重启持久化自写摘要未做，见 §8）。
+
+**验证**：`test/store-root.test.ts`（7）钉住 fail-closed 不变量与「所有路径同根」；全量套件在真实 `HOME`
+下跑完 `~/.dsh/vet/*` mtime 零变化（修复前会写 4 个文件）。
 
 ## 6. Audit protocol (vet-audit-protocol skill)
 
@@ -746,8 +776,11 @@ RingSparkCard/FoldSection/RadarChart/SubPanel…）+ `panels/`（主面板编排
   non-loopback address, LAN clients can read scan conclusions — keep loopback binding if you care.
 - **0.1.16 hardening honest boundaries**: C1's closure privacy holds for the *published* bundle — the per-file
   `lib/**` used by tests is developer-only and not shipped · C3's store self-check (M7) compares against
-  in-process write hashes, so a *second vet instance* writing the same store is reported as tamper (DSH runs
-  one instance per profile; accepted) · C4 treats `Error.stackTraceLimit < 2` or a replaced
+  in-process write hashes: it only arms after this process has written the store once, so a rewrite made while
+  DSH was down is invisible (no cross-restart digest is persisted), and a *second vet instance* writing the same
+  store used to be reported as tamper — since 0.3.15 it is attributed instead (another vet process → info
+  `vet-store-foreign-write`; no stamp / own pid → yellow `vet-store-tamper`), the stamp being attribution rather
+  than authentication · C4 treats `Error.stackTraceLimit < 2` or a replaced
   `prepareStackTrace` as tampered — a host framework that legitimately changes them *after* vet loads would
   trip `attribution-tampered` (snapshot is taken at vet load; report as integration note) · M9's cmdline check
   is Linux-only (`/proc`); other platforms keep the old kill-on-alive behavior.

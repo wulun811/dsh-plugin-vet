@@ -27,13 +27,14 @@
  * @module dsh-plugin-vet/official-catalog
  */
 import { existsSync, readFileSync, statSync, renameSync, mkdirSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { writeTmpExclusive } from '../guard/path-utils.js'
+import { vetStoreRoot } from '../guard/store-root.js'
 import { OFFICIAL_CATALOG_SEED } from './official-catalog-seed.js'
 
-/** C3 同款纪律：默认目录在模块加载时定值（进程内插件改 $HOME 无法重定向存储）。 */
-const SNAPSHOT_DEFAULT_DIR = join(homedir(), '.dsh', 'vet')
+/** C3 同款纪律：默认目录在模块加载时定值（进程内插件改 $HOME 无法重定向存储）。
+ * 0.3.15：目录统一由 store-root 解析（测试运行时默认落进程私有临时目录）。 */
+const SNAPSHOT_DEFAULT_DIR = vetStoreRoot()
 
 let catalogDirOverride: string | undefined
 

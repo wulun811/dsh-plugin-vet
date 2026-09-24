@@ -3,6 +3,59 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.3.15] - 2026-09-25
+
+Live regression while validating 0.3.14: the panel reported `vet-store-tamper` (yellow) —
+"vet 存储文件被外部改写 … 疑似进程内插件篡改 vet 状态". Investigation showed the rewriter was **vet's own test
+suite**: `vitest run` had written six fixture capability records into the real `~/.dsh/vet/capabilities.json`
+(plus eight fixture summaries, `stats.json` and `forensics/evil-plugin-*.jsonl`), and the live host then honestly
+reported the byte mismatch — with the wrong attribution. Two defects, both fixed here. No engine-version bump:
+static rules and verdicts are unchanged.
+
+### Fixed — tests can no longer write the user's production store
+
+- **Reproduced** with a sandboxed `HOME`: a full suite run created `$HOME/.dsh/vet/{capabilities,scan-summaries,stats}.json`,
+  `forensics/evil-plugin-*.jsonl` and `~/.dsh/vet-integrity-{1,2}`. Culprits: `plugin.test.ts` (capabilities +
+  summaries), `runtime-guard.test.ts` (stats + integrity canaries), `review-round4.test.ts` (forensics),
+  `review-fixes.test.ts` (canaries) — each missed one of the per-test `setXDirForTest` calls the store modules
+  require.
+- **Fix**: new `src/guard/store-root.ts` is the single source of truth for the store root. All eleven store paths
+  (capabilities / baseline / stats / scan-summaries / known-boundaries / official-catalog / forensics / contracts /
+  audits / dismissed-alerts) and the integrity-canary root derive from it. Under a test runtime (`VITEST` /
+  `NODE_ENV=test`) the default root is a **process-private temp directory**, never the real home — forgetting a
+  setter is now harmless instead of destructive. Explicit setters and the new `DSH_PLUGIN_VET_STORE_DIR` override
+  still win; production resolution (`<home>/.dsh/vet`) and the load-time snapshot (C3: an in-process plugin cannot
+  redirect the store at runtime) are unchanged.
+
+### Changed — the store self-check attributes the rewrite instead of over-claiming
+
+- `saveCapabilities` / `saveBaseline` stamp every write with a `writer` record (`tool` / `version` / `pid` / `at`).
+  On a byte mismatch the guard now distinguishes:
+  - another **vet** process (CLI / tests / a second DSH instance) wrote the file → **info**
+    `vet-store-foreign-write`, naming the writer's pid, version and time, and stating that a process the user did
+    not run should still be treated as tampering;
+  - no stamp, or a stamp carrying **our own** pid → **yellow** `vet-store-tamper` (the in-process shape M7 exists
+    for — copying the file and editing records keeps the old stamp, so it stays yellow).
+- `consumeCapabilitiesTamper` / `consumeBaselineTamper` now return the evidence (`{ file, foreign }`) instead of a
+  boolean. Attribution is not authentication: the stamp can be forged, and M7 remains an alarm-only tripwire. The
+  cross-restart gap (a rewrite made while DSH is down is invisible, since no digest is persisted) is unchanged and
+  now documented in ARCHITECTURE §8.
+- Client suggestions for the new kind (`suggest.vet-store-foreign-write`, zh + en).
+
+### Tests
+
+- `test/store-root.test.ts` (7) — pure resolution, the fail-closed invariant (`vetStoreRoot()` is never the real
+  home under vitest), every store path under one root, override/snapshot semantics.
+- `test/store-tamper-attribution.test.ts` (11) — stamp on every write, foreign / no-stamp / own-pid / corrupt
+  attribution, and the host-side tiers end-to-end (foreign → info + green shield, no stamp → yellow + alarmCount 1,
+  untouched store → silent).
+- `hardening-ops` / `hardening-cache` / `review-round4` updated for the new evidence API and the unified root.
+
+### Verified
+
+- Full suite green (84 files); a full-suite run under the real `HOME` leaves `~/.dsh/vet/*` and
+  `~/.dsh/vet-integrity-*` byte-identical — the pollution that triggered the alarm cannot recur.
+
 ## [0.3.14] - 2026-09-24
 
 Live regression after the 0.3.13 release: a restart scan reported
