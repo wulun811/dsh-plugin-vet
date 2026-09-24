@@ -224,7 +224,7 @@ GUI 按 OBSIDIAN MOSS GOLD 设计稿换肤并重构为**层栈交互**（次级�
 
 verdict（唯一权威判定，heuristic 永不升级）：critical ≥ 1 → `critical`；否则 high ≥ 1 → `suspicious`；其余 → `clean`。**verdict 只由静态层产出**：staticScore 与 verdict 分开呈现，不合成单一总分。
 
-**产物档位（0.3.13）**：非授权源码产物——`*.d.ts` 声明、**包根相对**构建输出目录（`lib/dist/build/out/esm/cjs/umd`）下的文件、压缩/打包内容——命中会在 message 里带类别前缀（`构建产物：` / `压缩产物：` / `类型声明：`）。**官方目录成员且字节可信**（first-seen/match，即 DSH 升级主场景；或 mismatch 但该 hash 已在 `acknowledged-package-hashes` 登记 = 用户认领的本机补丁）的这类命中的决定性档折为 `info`（标 `（官方包降噪）`）：官方身份由内容哈希/registry 对账层负责，否则每次 DSH 家族整体换版本都会把机器产物变成盾牌级噪音。**未登记**的 mismatch（疑似篡改）保持严格判定；自动扫描路径对已登记补丁更彻底——直接不扫描（零产物噪音），且「已声明的本机补丁状态」只记 `info` 观察（面板可见、可 dismiss，不计 alarmCount/盾牌），`scan_plugin` 显式审计时才照常严格扫描 + 产物降档。第三方包 severity 全量保留、只加前缀；授权源码（`src/**`、`scripts/**`、根级脚本、`package.json`）永不降档。
+**产物档位（0.3.13）**：非授权源码产物——`*.d.ts` 声明、**包根相对**构建输出目录（`lib/dist/build/out/esm/cjs/umd`）下的文件、压缩/打包内容——命中会在 message 里带类别前缀（`构建产物：` / `压缩产物：` / `类型声明：`）。**官方目录成员且字节可信**（first-seen/match，即 DSH 升级主场景；或 mismatch 但该 hash 已在 `acknowledged-package-hashes` 登记 = 用户认领的本机补丁）的这类命中的决定性档折为 `info`（标 `（官方包降噪）`）：官方身份由内容哈希/registry 对账层负责，否则每次 DSH 家族整体换版本都会把机器产物变成盾牌级噪音。**未登记**的 mismatch（疑似篡改）保持严格判定；自动扫描路径对已登记补丁更彻底——直接不扫描（零产物噪音），且「已声明的本机补丁状态」只记 `info` 观察（面板可见、可 dismiss，不计 alarmCount/盾牌），`scan_plugin` 显式审计时才照常严格扫描 + 产物降档。第三方包 severity 全量保留、只加前缀；授权源码（`src/**`、`scripts/**`、根级脚本、`package.json`）永不降档。**同档口径（0.3.14）**：官方家族的 `scan-fail`（扫描器超时/故障）也是 `info` 观察——身份与完整性由哈希/registry 层负责，工具侧事件不该压盾牌（面板可见、可 dismiss，`logger.error` 照旧）；第三方仍黄，deny 模式照旧 fail-closed 拦截。
 
 ## 能力边界（诚实清单）
 

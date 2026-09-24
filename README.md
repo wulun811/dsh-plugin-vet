@@ -363,7 +363,11 @@ listed in `acknowledged-package-hashes`, i.e. a declared local patch) those find
 and a family-wide version bump would otherwise turn machine-generated output into shield-wide noise; an
 **undeclared** `mismatch` keeps the strict scan (auto-scan goes further for declared patches: it skips
 scanning them entirely and records the "declared local patch" note as `info` — visible in the panel,
-excluded from `alarmCount`/the shield, while an explicit `scan_plugin` audit still scans and folds). Third-party packages keep full severity and only gain the
+excluded from `alarmCount`/the shield, while an explicit `scan_plugin` audit still scans and folds). **Same
+tier (0.3.14)**: an official-family `scan-fail` (scanner timeout/fault) is an `info` observation too — identity
+and integrity belong to the hash/registry layer, and a tool-side event must not level the shield (still visible
+and dismissible in the panel, `logger.error` unchanged); third-party failures stay yellow and deny mode still
+fail-closes on them. Third-party packages keep full severity and only gain the
 label; authored source (`src/**`, `scripts/**`, root-level scripts, `package.json`) is never folded.
 
 ## Capability boundary (honest list)

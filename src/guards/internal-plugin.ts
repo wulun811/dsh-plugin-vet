@@ -615,6 +615,10 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // 语义（first-seen/match 豁免 deny 升级），用户口径「本来就不拦」：冒充由「不入内容信任锚
     // + 黄牌观察 + 静态扫描」暴露，不靠运行时拦截。
     const officialDenyExempt = official.kind === 'exempt'
+    // 官方家族（0.3.13）：官方目录成员 + 字节可信（first-seen/match）。两处共用同一判据——
+    // 产物降噪位（request.officialFamily，见下方扫描请求）与扫描失败降噪（scan-fail 档位）。
+    const officialTrustedFamily = inCatalog && official.kind === 'exempt'
+      && (official.reason === 'first-seen' || official.reason === 'match')
     if (official.kind === 'mismatch') {
       if (official.acknowledged) {
         const alertId = `baseline-patch-ack:${entryName}`
@@ -696,7 +700,12 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
         ctx.logger.error(msg)
         status?.record({
           id: `scan-fail:${entryName}`,
-          severity: 'yellow',
+          // 0.3.14（用户实测：官方包 OSV 相位挂死 → scan-fail 黄牌压盾牌）：官方家族降为
+          // info 观察——官方身份与完整性由内容哈希基线 + registry 对账负责，扫描器自身的
+          // 超时/故障是工具侧事件，不该与「插件有风险」同档计价（面板可见、可 dismiss，
+          // 不计 alarmCount/盾牌；ctx.logger.error 照旧）。第三方保持 yellow：扫描失败 =
+          // 覆盖缺口，deny 模式仍 fail-closed 拦截（下方，不受档位影响）。
+          severity: officialTrustedFamily ? 'info' : 'yellow',
           source: 'scan',
           kind: 'scan-fail',
           message: msg,
@@ -891,8 +900,8 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       // 身份核验不受影响：内容哈希基线 + registry 对账 + official-not-in-catalog 黄牌照旧。
       // 工具面（scan_plugin）对已登记补丁的 hash 照常严格扫描但按官方家族降噪——见
       // classifyTarget 的 officialFamily 注释（显式审计请求仍给全量证据，只是机器产物降档）。
-      ...(inCatalog && official.kind === 'exempt'
-        && (official.reason === 'first-seen' || official.reason === 'match') ? { officialFamily: true } : {}),
+      // 同一判据（officialTrustedFamily）也决定 scan-fail 的档位（见 finish）。
+      ...(officialTrustedFamily ? { officialFamily: true } : {}),
       // surface 显式传入（与缓存 key 联动）：关闭的面不参与扫描也不命中旧形状缓存
       ...(config.scanSurface !== undefined ? { surface: { configFiles: config.scanSurface.configFiles, instructionFiles: config.scanSurface.instructionFiles } } : {}),
     }

@@ -82,4 +82,39 @@ describe('OSV budget bounding (P2-10)', () => {
     expect(res.ok).toBe(true)
     expect(calls()).toBe(0) // osv!==true 不触发 OSV 查询
   })
+
+  // 0.3.14（用户实测回归：@deepseek-ai/dsh-mcp-client 重启首扫报
+  // 「scanner timeout after 15000ms」scan-fail 黄牌）：P2-10 的预算算术默认 fetch 会响应
+  // AbortSignal——DNS 卡在 threadpool / 代理吞连接 / 半开 socket 时 await 永不 settle，
+  // 引擎挂死到宿主 kill。硬护栏（withHardTimeout）必须让引擎无论底层是否响应 abort 都在预算内返回。
+  it('回归：fetch 永不 settle（abort 不生效）→ 硬护栏仍在预算内返回静态报告，不挂死', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-osv-'))
+    const files = makePkg(dir, 3)
+    const neverSettles = (() => new Promise(() => {})) as unknown as typeof fetch
+    const req: ScanRequest = { kind: 'files', files, osv: true, timeoutMs: 60_000 }
+    const t0 = Date.now()
+    const res = await scanWithOsv(req, { fetchImpl: neverSettles, osvBudgetMs: 300 })
+    const dt = Date.now() - t0
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(res.ok).toBe(true)
+    expect(res.report).toBeDefined()
+    expect(res.report!.verdict).toBe('clean') // 静态结果照常给出（OSV 静默降级）
+    expect(dt).toBeLessThan(3000) // 旧行为：25s+ 不返回 → 宿主 SIGKILL → 整个扫描丢失
+  })
+
+  it('余量不足（宿主超时太小）→ 整段跳过 OSV：零网络调用，静态报告照常返回', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-osv-'))
+    const files = makePkg(dir, 3)
+    const { impl, calls } = slowFetch(5)
+    const req: ScanRequest = { kind: 'files', files, osv: true, timeoutMs: 2000 }
+    const t0 = Date.now()
+    const res = await scanWithOsv(req, { fetchImpl: impl })
+    const dt = Date.now() - t0
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(res.ok).toBe(true)
+    expect(calls()).toBe(0) // 余量 < OSV_MIN_BUDGET_MS → 不冒险贴 kill 线
+    expect(dt).toBeLessThan(2000)
+  })
 })

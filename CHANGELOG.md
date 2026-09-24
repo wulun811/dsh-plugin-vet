@@ -3,6 +3,52 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.3.14] - 2026-09-24
+
+Live regression after the 0.3.13 release: a restart scan reported
+`vet: 扫描失败 @deepseek-ai/dsh-mcp-client：scanner timeout after 15000ms` (`scan-fail`, yellow) for an
+official package. Root cause was **not** the package (7 source files, 50 KB): the OSV network phase had no
+guard for a `fetch` that ignores `AbortSignal`, and the scanner bin did not exit after writing its report.
+No engine-version bump: the cache stores only the static report, the OSV phase is queried live on every scan
+and no rule/verdict-producing code changed, so a bump would have invalidated 277 cached reports for nothing.
+
+### Fixed — the OSV phase could hang past the host kill timeout
+
+- **Reproduced**: injecting a `fetch` that never settles left `scanWithOsv` silent for **25s+** — the host
+  SIGKILLs at its 15s budget, so the whole scan (verdict included) is lost and `scan-fail` is recorded. The
+  P2-10 budget arithmetic assumed `fetch` honours the abort signal; a DNS lookup stuck in the threadpool, a
+  proxy swallowing the connection or a half-open socket breaks that assumption.
+- **Hard guard**: every OSV query is now raced against `perQuery + 250ms` (`withHardTimeout`), and the whole
+  supply-chain phase is raced against its budget — whatever the transport does, the engine returns in time
+  and degrades to the static report (OSV is an enhancement; network failure was always meant to degrade
+  silently). Verified: the same never-settling fetch now returns in **8.5s** with `clean`.
+- **No more last-second budgets**: if the remaining host budget is below `OSV_MIN_BUDGET_MS` (2000ms) the OSV
+  phase is skipped outright. The old code floored the budget at 1000ms, which could leave as little as 0.5s
+  of slack — exactly the `scan-fail` window.
+- **The scanner bin now exits once the response is flushed**
+  (`process.stdout.write(payload, () => process.exit(0))`). The host decides success by child `close`, so a
+  lingering handle could previously delay `close` past the kill timeout *even though a valid report had
+  already been written* — a second, intermittent route to the same false alarm.
+
+### Changed — official-family scan failures are an observation, not an alarm
+
+- `scan-fail` for the official family (official catalog member + trusted bytes — the same
+  `officialTrustedFamily` predicate that drives the 0.3.13 artifact fold) is recorded as **`info`**: the
+  package's identity/integrity is the content-hash + registry layer's job, and a scanner timeout is a
+  tool-side event that should not price as "this plugin is risky". It stays visible in the panel
+  (dismissible, restorable) and `logger.error` is unchanged; it no longer counts toward `alarmCount` or the
+  shield level. Third-party failures stay `yellow` (a scan failure is a coverage gap) and deny mode still
+  fail-closes on them.
+
+### Tests
+
+- `test/osv-budget.test.ts`: regression for the never-settling fetch (returns within the budget with a static
+  verdict instead of hanging), and the skip-when-tight path (zero network calls, static report still
+  returned).
+- New `test/scan-fail-tier.test.ts` (scanner client mocked — a real scan is hard to force into failure):
+  official family → `info` and a green shield, third-party → `yellow`, deny mode unchanged
+  (official: no block; third-party: fail-closed + dispose).
+
 ## [0.3.13] - 2026-09-24
 
 DSH `0.1.5-rc.2 → 0.1.7-rc.1` sync (the family grew 240 → 277 installed packages; the official

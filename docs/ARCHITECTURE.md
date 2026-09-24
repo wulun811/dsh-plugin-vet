@@ -182,6 +182,12 @@ otherwise → clean. **Heuristic confidence never upgrades the verdict** (R6 adv
   Authored source (`src/**`, `scripts/**`, root scripts, `package.json`, `assets/**`) is never folded.
   Official install hooks use the `R10` generic manifest semantics (info "capability surface") instead of
   the strict `high` that auto-scan produced while passing no `targetKind`.
+- **Scan failures follow the same tier (0.3.14)**: `scan-fail` for the official family (catalog member +
+  trusted bytes, the same `officialTrustedFamily` predicate) is recorded as `info` — official identity and
+  integrity are the hash/registry layer's job, and a scanner timeout is a tool-side event that should not
+  price as "this plugin is risky" (visible in the panel, dismissible, excluded from `alarmCount`/the shield,
+  `logger.error` unchanged). Third-party failures stay `yellow` (a coverage gap) and deny mode still
+  fail-closes on them.
 - **Boundary**: this is a rule-tier policy, not a trust decision. Official identity is still established by
   the content-hash baseline + registry reconciliation + `official-not-in-catalog` yellow; `officialFamily`
   enters the cache key, so a folded report is never served to a third-party scan of the same bytes.
@@ -201,6 +207,17 @@ Check surface = the plugin itself + direct dependencies (cap 8, official `@deeps
 `*`/`>=`/`^`/`~` ranges and version-less main packages skip the query (P3-1/P3-3, avoiding stale full-history
 false positives; round-7 fix: ranges no longer strip their prefix to query as exact lower bounds — the lower
 bound being affected while the actually installed version is already fixed would false-positive).
+**Budget & hard guard (P2-10, hardened in 0.3.14)**: the host passes its planned timeout into the request, and
+the OSV phase is bounded by `timeout − staticScan − 1500ms margin − 500ms`. Two 0.3.14 fixes came out of a live
+`scan-fail` on `@deepseek-ai/dsh-mcp-client` ("scanner timeout after 15000ms"): (1) the budget arithmetic assumed
+`fetch` honours `AbortSignal`, so a DNS lookup stuck in the threadpool / a proxy swallowing the connection left
+the engine awaiting forever — reproduced by injecting a fetch that never settles (engine silent for 25s+ → host
+SIGKILL → whole scan lost). Every network wait is now wrapped in a race with a hard timeout
+(`OSV_RACE_SLACK_MS`), and the whole supply-chain phase is raced against its budget; if the remaining budget is
+below `OSV_MIN_BUDGET_MS` the phase is skipped outright instead of flooring the budget at 1000ms. (2) the
+scanner bin now exits as soon as the response is flushed (`process.stdout.write(..., () => process.exit(0))`) —
+the host decides success by child `close`, so a lingering handle (half-open socket, unsettled fetch) used to
+delay `close` past the kill timeout even though the report had already been written.
 
 ### 4.8 Capability manifest & cross-layer diff (N1)
 

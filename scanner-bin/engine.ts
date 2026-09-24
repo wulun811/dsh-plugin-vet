@@ -147,6 +147,36 @@ function sniffNativeBinary(file: string): boolean {
 /** R8-skip 触发后仍需时间写出报告并退出——必须早于宿主 kill 的余量。 */
 const ENGINE_KILL_MARGIN_MS = 1500
 
+/**
+ * OSV 硬护栏余量（0.3.14 用户实测回归）。
+ * P2-10 的预算算术**默认 fetch 会响应 AbortSignal**——DNS 卡在 threadpool、代理吞连接、
+ * 半开 socket 时 await 永不 settle，AbortController 只是发信号，预算约束整体失效：
+ * 实测把 fetch 换成永不 settle 的实现，引擎 25s+ 不返回 → 宿主 15s SIGKILL → 整个扫描丢失
+ * （report 报 scan-fail 黄牌；deny 模式 fail-closed 误拦）。真实案例：
+ * @deepseek-ai/dsh-mcp-client 重启首扫时 OSV 相位挂死 → 「scanner timeout after 15000ms」。
+ * 故每次网络等待都加一层竞速硬超时：无论底层是否响应 abort，引擎都在预算内返回。
+ */
+const OSV_RACE_SLACK_MS = 250
+
+/**
+ * OSV 最小可用预算（0.3.14）：宿主余量低于此值就整段跳过——OSV 是增强项（README 口径：
+ * 网络失败静默降级），不值得贴着宿主 kill 线赌。旧行为把预算地板设成 1000ms，最坏情形
+ * 只剩 0.5s 余量（静态扫描已吃掉大半），正是 scan-fail 的高发区。
+ */
+const OSV_MIN_BUDGET_MS = 2000
+
+/**
+ * 竞速硬超时：resolve 值或 null（超时/异常）。返回 null = 该次网络等待按失败静默降级。
+ * 注意不 unref 定时器——挂起的等待若只剩未引用的句柄，进程可能在写出报告前就退出。
+ */
+function withHardTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise<T | null>(resolve => {
+    const timer = setTimeout(() => resolve(null), ms)
+    const settle = (value: T | null): void => { clearTimeout(timer); resolve(value) }
+    promise.then(v => settle(v), () => settle(null))
+  })
+}
+
 // ── P0-2 #9（R16）：幽灵/僵尸依赖健康审计 ──────────────────────────────────
 // 依赖声明（package.json）↔ 代码引用（capabilities.imports）↔ 实际安装（node_modules）三方对账：
 // - 幽灵依赖（ghost）：代码引用但 package.json 未声明——靠传递依赖提升侥幸可解析，升级即可能断供/换源；
@@ -847,11 +877,14 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promi
     let found: OsvVuln[]
     try {
       // F15：带 version 查询——OSV 服务端按 affected ranges 过滤，已修复版本不再误报
-      found = await queryOsv(target.name, {
+      // 0.3.14：外层竞速硬超时兜底（abort 不生效时也不会挂死，见 withHardTimeout）
+      const raced = await withHardTimeout(queryOsv(target.name, {
         timeoutMs: perQuery,
         fetchImpl: opts.fetchImpl,
         version: target.version,
-      })
+      }), perQuery + OSV_RACE_SLACK_MS)
+      if (raced === null) continue // 硬超时：按网络失败静默降级
+      found = raced
     } catch {
       continue // 网络失败/超时：静默降级，不影响静态判定
     }
@@ -883,11 +916,18 @@ export async function scanWithOsv(request: ScanRequest, opts: OsvCheckOptions = 
   if (!base.ok || base.report === undefined) return base
   // P2-10：从宿主超时推导 OSV 总预算，确保 OSV 网络相位不超出宿主 kill 超时（见 checkOsv）。
   // 预算 = 宿主超时 - 静态扫描耗时 - 引擎余量 - 输出余量；缺省（直调引擎、无 timeoutMs）不改行为。
+  // 0.3.14：余量低于 OSV_MIN_BUDGET_MS → 整段跳过（旧行为用地板 1000ms 硬撑，最坏只剩 0.5s 余量）。
   let osvBudgetMs = opts.osvBudgetMs
   if (osvBudgetMs === undefined && typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs)) {
-    osvBudgetMs = Math.max(1000, request.timeoutMs - (Date.now() - start) - ENGINE_KILL_MARGIN_MS - 500)
+    const remaining = request.timeoutMs - (Date.now() - start) - ENGINE_KILL_MARGIN_MS - 500
+    if (remaining < OSV_MIN_BUDGET_MS) return base
+    osvBudgetMs = remaining
   }
-  const supplyChainFindings = await checkSupplyChain(request, { ...opts, osvBudgetMs })
+  // 0.3.14：相位级竞速兜底——逐查询护栏之外再保一层，供应链相位整体（含 upstream-radar 与
+  // 多次查询的累计误差）不得越过预算；超时即返回纯静态报告（OSV 是增强项，静默降级）。
+  const supplyChainFindings = osvBudgetMs === undefined
+    ? await checkSupplyChain(request, { ...opts, osvBudgetMs })
+    : (await withHardTimeout(checkSupplyChain(request, { ...opts, osvBudgetMs }), osvBudgetMs + OSV_RACE_SLACK_MS)) ?? []
   if (supplyChainFindings.length === 0) return base
   const findings = [...base.report.findings, ...supplyChainFindings]
   const report: ScanReport = {
