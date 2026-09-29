@@ -26,6 +26,9 @@ site/玻璃效果示例.html
 .subagent.js
 .index.html
 .npmrc
+# 发布凭据 env（NPM_TOKEN；0600，永不入库）
+.env
+.env.*
 
 # 内部方案文档（不入库，放 docs/local/ 即可自动忽略）
 docs/local/

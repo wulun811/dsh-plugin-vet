@@ -3,6 +3,77 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.3.17] - 2026-09-29
+
+Correctness fix in the `vet-gate` CLI plus documentation accuracy. **No engine change** — static rules and
+verdicts are untouched (`static-v26`, same as 0.3.13–0.3.16).
+
+### Fixed — `vet-gate` truncated its JSON whenever stdout was a pipe
+
+- `src/gate-cli.ts` printed the result and called `process.exit()` in the same tick. On a **pipe** (as opposed
+  to a TTY or a file redirect) stdout writes are asynchronous, so the un-drained queue was discarded:
+  measured on the shipped 0.3.16 build, a large package's JSON was cut to **65 536 bytes — exactly one pipe
+  buffer** — and was no longer parseable. Anything that captures stdout (`vet-gate … | jq`, CI collection,
+  programmatic callers) therefore received corrupt data. Redirecting to a file hid the bug (synchronous
+  writes), which is why it survived unnoticed.
+- The CLI now waits for the write callback (data handed to the kernel) before exiting, for stdout and stderr
+  alike. Measured after the fix: the same package emits its full 153 310 bytes and parses. Exit-code
+  semantics are unchanged (0/1/2), and `EPIPE` (e.g. `| head`) still terminates quietly.
+- Regression test `test/gate-cli.test.ts` reproduces the original condition with a deliberately slow
+  consumer (a >1 MB scan payload through a paused stdout pipe): it fails against the old implementation with
+  `Unterminated string in JSON` and passes now.
+
+### Changed — documentation matched to the 0.2.0-rc.1 measurements
+
+- `docs/ARCHITECTURE.md` §4.5b gains the 0.2.0-rc.1 re-measurement: all **288** installed official packages
+  through the same gate entry point → **4 non-clean** (3 `suspicious`: `cordis`, `cordis-plugin-loader`,
+  `schemastery`, every hit in authored `src/**`; 1 `critical`: `libreoffice-kit-wasm`, `process.exit` in its
+  authored root `build.mjs`). The 11 packages the 0.3.16 seed added all scan clean, and the four are
+  host-internal/toolchain packages rather than plugin entries, so none is auto-scanned live.
+- Two guard comments (`src/guard/runtime-patch.ts:108`, `src/guard/runtime-denoise.ts:189`) cited
+  `@deepseek-ai/dsh-settings-file`, which left the family in 0.2.0-rc.1. They now name the actual
+  `withFileLock` writers — `dsh-credentials-local`, `dsh-config-editor`, `dsh-app-boot` — and record that
+  settings persistence moved to `dsh-storage-json`'s own `.<uuid>.tmp` (no lock protocol). Behaviour is
+  unchanged: the rules match shapes, not package names.
+
+## [0.3.16] - 2026-09-29
+
+DSH 0.2.0-rc.1 sync. DSH's boot preflight (`evaluatePluginCompatibility` in `dsh-app-boot`) reads a plugin's
+`peerDependencies` for every `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` entry and refuses to mount the bundle unless
+the running runtime satisfies it. Vet was therefore skipped at boot on the upgraded runtime: `^0.1.1-rc.1` expands
+to `>=0.1.1-rc.1 <0.2.0-0`, and semver excludes a prerelease of the caret's own upper bound, so `0.2.0-rc.1` is not
+satisfied. Reproduced against the shipped gate function before touching anything: old manifest → BLOCK, new
+manifest → PASS. No engine-version bump — static rules and verdicts are unchanged (the catalog is data, not a rule).
+
+### Changed — peer ranges admit both families, on measured API compatibility
+
+- `@deepseek-ai/dsh-{invariants,llm,session,tools}` peers are now `^0.1.1-rc.1 || ^0.2.0-rc.1`. The union keeps
+  older runtimes installable (npm `latest` for this family is still `0.0.1-rc.1`; `0.2.0-rc.1` ships under `next`)
+  while admitting the new line. Range behaviour measured on the shipped gate: `0.1.1-rc.1`, `0.1.7-rc.1`,
+  `0.1.7-rc.2`, `0.2.0-rc.1`, `0.2.1-rc.1`, `0.2.1` → PASS; `0.1.0-rc.9`, `0.0.1-rc.1`, `0.3.0-rc.1` → BLOCK.
+- **Assessed, not assumed**: diffing the 0.1.7-rc.1 → 0.2.0-rc.1 declaration surface shows `dsh-invariants`
+  byte-identical, `dsh-tools` additive (`ask` decisions gain an optional `displayReason`), `dsh-session` additive
+  (`toolHistory()`, `ToolCallRecovery`, new `tool-history` module), `dsh-llm` additive — **no removed export in any
+  of the four**. Vet's own surface is `defineTool` plus the `tools`/`skills` services and the `tools/execute` event;
+  the browser half consumes `slots.inject` / `slots.register` / `locale.register`, all unchanged, and the
+  `conversation.session.header.actions` slot still exists in 0.2.0-rc.1's contract.
+- devDependencies moved to `^0.2.0-rc.1` so CI typechecks the real new API; the whole exact-pinned upstream peer
+  closure installs at 0.2.0-rc.1. `npm run typecheck` is clean and the full suite is green against those packages
+  (84 files, 1232 passed / 1 skipped). The host bundle keeps `@deepseek-ai/dsh-tools` external, so `defineTool`
+  resolves to the runtime's copy rather than a bundled one.
+
+### Changed — official catalog seed covers the 0.2.0 family
+
+- Regenerated: **319 → 330 names** (+11, no deletions) — telemetry (`dsh-otel`, `dsh-host-product-telemetry-otel`,
+  `dsh-client-product-analytics`), shortcuts (`dsh-client-shortcuts`, `dsh-client-ui-shortcuts`),
+  `dsh-client-ui-settings-session-log`, `dsh-experimental-auto-review`, `dsh-experimental-schedule-bundle`,
+  `dsh-llm-deepseek-account`, `dsh-llm-deepseek-api-key`, `dsh-util-code-language`. Without this, each of the new
+  family's packages raises an `official-not-in-catalog` yellow on first scan.
+- The local `dsh-src` source tree still sits at 0.1.0-rc.5 (GitHub fetch blocked), so the seed is the **union** of
+  that tree with the 0.2.0-rc.1 install tree: a superset, never a shrink (verified: zero names lost). Keeping a
+  retired name does not weaken the tier — an in-catalog name whose hash is not the official one grades exactly like
+  an unknown name (yellow).
+
 ## [0.3.15] - 2026-09-25
 
 Live regression while validating 0.3.14: the panel reported `vet-store-tamper` (yellow) —

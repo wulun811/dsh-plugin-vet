@@ -165,7 +165,16 @@ otherwise → clean. **Heuristic confidence never upgrades the verdict** (R6 adv
   tsc/tsdown, minified bundles, `.d.ts` declarations — where `new Function`, `process.kill` or
   `process.exit` are ordinary library/toolchain shapes. Measured on the 0.1.7-rc.1 install: 27 of 277
   official packages non-clean (4 critical), and live auto-scan had recorded 5 `suspicious` verdicts,
-  holding the shield yellow.
+  holding the shield yellow. **Re-measured on the 0.2.0-rc.1 install (0.3.17)**: all **288** installed
+  official packages through the same `gate-cli --package` entry point (store redirected to a scratch
+  dir, so this is the unfolded/strict reading — the CLI face does not set `request.officialFamily`) →
+  **4 of 288 non-clean**: 3 `suspicious` (`cordis`, `cordis-plugin-loader`, `schemastery` — every hit
+  lands in authored `src/utils.ts` / `src/index.ts`) and 1 `critical` (`libreoffice-kit-wasm` —
+  `process.exit` in its authored root `build.mjs`, plus bundled `soffice.cjs` shapes). Authored source
+  never folds by design, which is exactly why those four survive. The 11 newly split packages the
+  0.3.16 seed added all scan clean, and the four are host-internal / toolchain packages rather than
+  plugin entries — absent from the capabilities store, hence never auto-scanned — so the live shield
+  stays green.
 - **Classifier** (`artifactKind`, deterministic file-surface only): `*.d.ts`; files under a
   **package-root-relative** build-output directory (`lib/dist/build/out/esm/cjs/umd`); minified/bundled
   content (one line ≥1000 chars or ≥3 lines over 500). ⚠ The relative anchor matters — an absolute path

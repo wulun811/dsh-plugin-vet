@@ -1,9 +1,17 @@
 /**
  * 官方包目录种子（M1，0.3.6 首建四源；0.3.7 随 DSH 0.1.5-rc.1 重生成；0.3.13 随 DSH
- * 0.1.7-rc.1 重生成：278 → 319 名，+41 个新拆分包，无删除）：
+ * 0.1.7-rc.1 重生成：278 → 319；0.3.16 随 DSH 0.2.0-rc.1 重生成：319 → 330 名，+11 个
+ * 新拆分包，无删除）：
  * dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的 @deepseek-ai/* 全量包名。
  * 生成方式：node scripts/gen-official-catalog-seed.mjs
  *        （dsh-src 更新或本机 DSH 升级后重跑；收集源：dsh-src/packages、dsh-src/apps、dsh-src/vendor、live:/home/chen/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai）。
+ * 0.2.0 家族注记：新增遥测三件（client-product-analytics / otel / host-product-telemetry-otel）、
+ * 快捷键（client-shortcuts、client-ui-shortcuts）、会话日志设置页（client-ui-settings-session-log）、
+ * 自动复核（experimental-auto-review）、日程 bundle（experimental-schedule-bundle）、
+ * LLM 账号拆分（llm-deepseek-account、llm-deepseek-api-key）、util-code-language。
+ * 注：本机 dsh-src 源码树仍停在 0.1.0-rc.5（GitHub 拉取受阻），本次为「源码树 ∪ 新装家族」
+ * 并集（超集语义）：名字真值只增不减；退役名保留不降低安全档——目录内哈希不符与目录外
+ * 未收录同为黄牌观察，两者档位一致。
  * 0.1.7 家族注记：新增 plugin-manager / config-editor / dsh-hmr（原 cordis-plugin-hmr 退出
  * 家族）/ lazy-require / ptc-runtime(+node) / session-format-v3-to-v4 / office-to-pdf /
  * skill-office / workspace-changes / libreoffice-kit(+wasm) / experimental agent-team 与
@@ -61,9 +69,11 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-client-hmr',
   '@deepseek-ai/dsh-client-locale',
   '@deepseek-ai/dsh-client-modules',
+  '@deepseek-ai/dsh-client-product-analytics',
   '@deepseek-ai/dsh-client-resources',
   '@deepseek-ai/dsh-client-runtime',
   '@deepseek-ai/dsh-client-schema-form',
+  '@deepseek-ai/dsh-client-shortcuts',
   '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-test-runtime',
   '@deepseek-ai/dsh-client-ui-agent-preset',
@@ -99,9 +109,11 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-client-ui-settings-models',
   '@deepseek-ai/dsh-client-ui-settings-plugin-inventory',
   '@deepseek-ai/dsh-client-ui-settings-plugins',
+  '@deepseek-ai/dsh-client-ui-settings-session-log',
   '@deepseek-ai/dsh-client-ui-settings-shell',
   '@deepseek-ai/dsh-client-ui-settings-subagent',
   '@deepseek-ai/dsh-client-ui-settings-web-search',
+  '@deepseek-ai/dsh-client-ui-shortcuts',
   '@deepseek-ai/dsh-client-ui-sidebar',
   '@deepseek-ai/dsh-client-ui-sidebar-browser',
   '@deepseek-ai/dsh-client-ui-sidebar-documentpreview',
@@ -143,8 +155,10 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-experimental-agent-team',
   '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-api-speech-to-text',
+  '@deepseek-ai/dsh-experimental-auto-review',
   '@deepseek-ai/dsh-experimental-client-ui-agent-team',
   '@deepseek-ai/dsh-experimental-client-ui-voice-input',
+  '@deepseek-ai/dsh-experimental-schedule-bundle',
   '@deepseek-ai/dsh-experimental-speech-to-text',
   '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice',
   '@deepseek-ai/dsh-experimental-tool-agent-team',
@@ -172,6 +186,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-host-frontend-static',
   '@deepseek-ai/dsh-host-open-in-app',
   '@deepseek-ai/dsh-host-plugin-inventory',
+  '@deepseek-ai/dsh-host-product-telemetry-otel',
   '@deepseek-ai/dsh-host-webserver',
   '@deepseek-ai/dsh-http-proxy',
   '@deepseek-ai/dsh-invariants',
@@ -181,6 +196,8 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-lazy-require',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-llm-deepseek',
+  '@deepseek-ai/dsh-llm-deepseek-account',
+  '@deepseek-ai/dsh-llm-deepseek-api-key',
   '@deepseek-ai/dsh-llm-mock-server',
   '@deepseek-ai/dsh-llm-pi-ai',
   '@deepseek-ai/dsh-llm-replay',
@@ -193,6 +210,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-message-feedback',
   '@deepseek-ai/dsh-native-command',
   '@deepseek-ai/dsh-office-to-pdf',
+  '@deepseek-ai/dsh-otel',
   '@deepseek-ai/dsh-output-retention',
   '@deepseek-ai/dsh-package-manifest',
   '@deepseek-ai/dsh-permission-presets',
@@ -308,6 +326,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-typert-registry',
   '@deepseek-ai/dsh-user-approval',
   '@deepseek-ai/dsh-user-questions',
+  '@deepseek-ai/dsh-util-code-language',
   '@deepseek-ai/dsh-util-crypto',
   '@deepseek-ai/dsh-util-time',
   '@deepseek-ai/dsh-util-values',

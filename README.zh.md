@@ -69,10 +69,13 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 > 校验完成后再次安装/更新只需秒级（复用校验结果）。
 
 
-> **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer：`@deepseek-ai/cordis ^4.0.1`、dsh-* `^0.1.1-rc.1`；
+> **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer：`@deepseek-ai/cordis ^4.0.1`、dsh-* `^0.1.1-rc.1 || ^0.2.0-rc.1`；
 > round-15 对 npm-public `0.1.1-rc.2` 完成适配，其后对 `0.1.5-rc.1`/`0.1.5-rc.2`/`0.1.7-rc.1` 逐一复验
-> ——0.1.7 同步新增 R12 的 `dsh.bundle.patch` 有序数组支持与官方包产物降噪）。0.1.7-rc.1 新增的插件
-> peer 兼容性预检接受 vet 的声明范围（预检用 `includePrerelease` 语义，预发布版本参与匹配）。安装时 pnpm 可能提示
+> ——0.1.7 同步新增 R12 的 `dsh.bundle.patch` 有序数组支持与官方包产物降噪）。**0.3.16（DSH 0.2.0-rc.1 同步）**：
+> peer 扩为两个家族的并集——`^0.1.1-rc.1` 的上界展开是 `<0.2.0-0`，按 semver 预发布规则**不满足**
+> `0.2.0-rc.1`，boot 预检因此跳过 vet；实测新范围放行 `0.1.1-rc.1`/`0.1.7-rc.1`/`0.1.7-rc.2`/`0.2.0-rc.1`/`0.2.1`，
+> 仍拦住 `0.1.0-rc.9` 与 `0.3.0-rc.1`。peer 兼容性预检接受 vet 的声明范围（预检用 `includePrerelease`
+> 语义，预发布版本参与匹配）。安装时 pnpm 可能提示
 > unmet peer dependency——这是预期的：profile 模板 `autoInstallPeers: false`，运行期从 DSH 安装闭包
 > （`$DSH_HOME/profiles/node_modules` 回退层）解析，无需也不能在 profile 里另装一份 cordis 全家桶。
 >

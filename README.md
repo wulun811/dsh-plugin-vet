@@ -94,11 +94,14 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 > the time is parsing/validating the profile's existing tree, not vet). Subsequent installs/updates take seconds
 > (validation results are reused).
 
-> **Compatibility**: vet targets DSH 0.1.0-rc.6+ (peers: `@deepseek-ai/cordis ^4.0.1`, dsh-* `^0.1.1-rc.1`;
+> **Compatibility**: vet targets DSH 0.1.0-rc.6+ (peers: `@deepseek-ai/cordis ^4.0.1`, dsh-* `^0.1.1-rc.1 || ^0.2.0-rc.1`;
 > verified against npm-public `0.1.1-rc.2` in round-15 and re-verified against `0.1.5-rc.1`/`0.1.5-rc.2`/`0.1.7-rc.1`
 > since — the 0.1.7 sync added R12 array-form `dsh.bundle.patch` support and official-package artifact grading).
-> DSH 0.1.7-rc.1's plugin peer preflight accepts vet's ranges (prereleases participate via `includePrerelease`).
-> pnpm may warn about unmet peer
+> **0.3.16 (DSH 0.2.0-rc.1 sync)**: the peer range is now the union of both families — `^0.1.1-rc.1` expands to
+> `<0.2.0-0`, which by semver's prerelease rule does **not** satisfy `0.2.0-rc.1`, so boot's preflight skipped vet.
+> The new range admits `0.1.1-rc.1`/`0.1.7-rc.1`/`0.1.7-rc.2`/`0.2.0-rc.1`/`0.2.1` and still refuses
+> `0.1.0-rc.9` and `0.3.0-rc.1` (measured on the shipped gate). DSH's plugin peer preflight accepts vet's ranges
+> (prereleases participate via `includePrerelease`). pnpm may warn about unmet peer
 > dependencies — this is expected: profile templates set `autoInstallPeers: false`, and at runtime the packages
 > resolve from the DSH install closure (`$DSH_HOME/profiles/node_modules` fallback layer); you neither need nor
 > should install another copy of the cordis family in the profile.

@@ -114,10 +114,18 @@ const sorted = [...names].sort()
 const lines = sorted.map(n => `  '${n}',`).join('\n')
 const header = `/**
  * 官方包目录种子（M1，0.3.6 首建四源；0.3.7 随 DSH 0.1.5-rc.1 重生成；0.3.13 随 DSH
- * 0.1.7-rc.1 重生成：278 → 319 名，+41 个新拆分包，无删除）：
+ * 0.1.7-rc.1 重生成：278 → 319；0.3.16 随 DSH 0.2.0-rc.1 重生成：319 → 330 名，+11 个
+ * 新拆分包，无删除）：
  * dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的 @deepseek-ai/* 全量包名。
  * 生成方式：node scripts/gen-official-catalog-seed.mjs
  *        （dsh-src 更新或本机 DSH 升级后重跑；收集源：${sources.join('、')}）。
+ * 0.2.0 家族注记：新增遥测三件（client-product-analytics / otel / host-product-telemetry-otel）、
+ * 快捷键（client-shortcuts、client-ui-shortcuts）、会话日志设置页（client-ui-settings-session-log）、
+ * 自动复核（experimental-auto-review）、日程 bundle（experimental-schedule-bundle）、
+ * LLM 账号拆分（llm-deepseek-account、llm-deepseek-api-key）、util-code-language。
+ * 注：本机 dsh-src 源码树仍停在 0.1.0-rc.5（GitHub 拉取受阻），本次为「源码树 ∪ 新装家族」
+ * 并集（超集语义）：名字真值只增不减；退役名保留不降低安全档——目录内哈希不符与目录外
+ * 未收录同为黄牌观察，两者档位一致。
  * 0.1.7 家族注记：新增 plugin-manager / config-editor / dsh-hmr（原 cordis-plugin-hmr 退出
  * 家族）/ lazy-require / ptc-runtime(+node) / session-format-v3-to-v4 / office-to-pdf /
  * skill-office / workspace-changes / libreoffice-kit(+wasm) / experimental agent-team 与

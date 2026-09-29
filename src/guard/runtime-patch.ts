@@ -105,9 +105,13 @@ export function patchModule(
       }
       // 0.3.5（P8）：官方名归因的协议形状家务探针（Tier B，不再静默而是降级标记）。
       // 会话存储本尊（@deepseek-ai/dsh-session-persistence-jsonl）轮换时 lstat 自己的
-      // session.jsonl.zstd.xxx 分片、@deepseek-ai/dsh-settings-file 帧内跑 atomic-write 锁
-      // 探测——栈里有插件帧，上方「无归因」豁免结构上够不到；而 sink 的官方全域抑制要求
-      // 内容信任锚（SEC-1 isOfficialTrusted），首见验证/离线期锚内无名字 → 刷 yellow。
+      // session.jsonl.zstd.xxx 分片、@deepseek-ai/dsh-atomic-write 的 withFileLock 在写入方帧内
+      // 探测自己的 <file>.lock 兄弟文件（0.2.0-rc.1 的写入方：dsh-credentials-local 存凭据、
+      // dsh-config-editor 改写 profile package.json、dsh-app-boot 写 profile 兼容豁免；0.1.x 时代
+      // 举例的 dsh-settings-file 已随该家族退场——设置持久化改为 dsh-storage-json 的 <uuid>.tmp，
+      // 不走锁协议，dsh-atomic-write 本尊仍在）——栈里有插件帧，上方「无归因」豁免结构上够不到；
+      // 而 sink 的官方全域抑制要求内容信任锚（SEC-1 isOfficialTrusted），首见验证/离线期锚内
+      // 无名字 → 刷 yellow。
       // 此处按 SEC-1 保留的「名称级去噪」走廊处理：仅 fs-probe 一类（侦察）+ 仅两个协议形状
       // （~/.dsh 下 <file>.lock 锁兄弟 / ~/.dsh/sessions 会话日志形状）打标降级——由 sink
       // 降为 info 聚合观察（可见、可忽略、不计 alarmCount），不静默、不黄警；伪名 tarball
