@@ -2,7 +2,7 @@
  * 0.1.20 新功能测试：防御统计、启动校验、esm 去重、upgrade-cold 联审计。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { existsSync, readFileSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -29,23 +29,48 @@ describe('0.1.20 新功能', () => {
       expect(stats.activeDefenseCount).toBe(0)
     })
 
-    it('saveStats + loadStats: 原子写后读回', async () => {
+    it('saveStats + loadStats: 原子写后读回（scannedCount 由名集派生）', async () => {
       const { loadStats, saveStats, setStatsDirForTest } = await import('../lib/guard/stats.js')
       setStatsDirForTest(testDir)
+      // 0.3.18：scannedCount 不再是可写入的独立计数器——真值来自 scannedPlugins 名集
       saveStats({ scannedCount: 5, alarmsRecorded: 3, blockedCount: 1, activeDefenseCount: 2, updatedAt: 0 })
       const loaded = loadStats()
-      expect(loaded.scannedCount).toBe(5)
+      expect(loaded.scannedCount).toBe(0)
       expect(loaded.alarmsRecorded).toBe(3)
       expect(loaded.blockedCount).toBe(1)
       expect(loaded.activeDefenseCount).toBe(2)
       expect(loaded.updatedAt).toBeGreaterThan(0)
     })
 
+    it('0.3.18：scannedCount 按包名去重（旧口径是扫描事件累计数）', async () => {
+      const { incrementScanned, loadStats, getStats, setStatsDirForTest } = await import('../lib/guard/stats.js')
+      setStatsDirForTest(testDir)
+      incrementScanned('@scope/a')
+      incrementScanned('@scope/a') // 同包重扫不重复计
+      incrementScanned('@scope/b')
+      incrementScanned('') // 空名不入集
+      expect(getStats().scannedCount).toBe(2)
+      expect(loadStats().scannedCount).toBe(2) // 名集已落盘
+    })
+
+    it('0.3.18：旧文件的事件累计数被忽略（自愈，无需停机改数据）', async () => {
+      const { loadStats, incrementScanned, getStats, setStatsDirForTest } = await import('../lib/guard/stats.js')
+      // 0.3.17 及更早的落盘形态：只有 scannedCount（事件累计数），没有 scannedPlugins
+      const legacy = { scannedCount: 6001, alarmsRecorded: 25, blockedCount: 0, activeDefenseCount: 0, updatedAt: 1 }
+      writeFileSync(join(testDir, 'stats.json'), JSON.stringify(legacy), { mode: 0o600 })
+      setStatsDirForTest(testDir)
+      const loaded = loadStats()
+      expect(loaded.scannedCount).toBe(0) // 旧值不回灌（回灌会让自愈失效）
+      expect(loaded.alarmsRecorded).toBe(25) // 其余计数器保留
+      incrementScanned('@scope/a')
+      expect(getStats().scannedCount).toBe(1) // 从新名集重新累计
+    })
+
     it('incrementScanned/AlarmsRecorded/Blocked: 自增计数', async () => {
       const { incrementScanned, incrementAlarmsRecorded, incrementBlocked, loadStats, getStats, setStatsDirForTest } = await import('../lib/guard/stats.js')
       setStatsDirForTest(testDir)
-      incrementScanned()
-      incrementScanned()
+      incrementScanned('@scope/a')
+      incrementScanned('@scope/b')
       incrementAlarmsRecorded()
       incrementBlocked()
       getStats() // 落盘刷新（生产由盾牌 5s 轮询触发）

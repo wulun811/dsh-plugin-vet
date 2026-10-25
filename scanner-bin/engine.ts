@@ -860,7 +860,9 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promi
     { name: pkg.name, version: typeof pkg.version === 'string' ? pkg.version : undefined },
     ...directDepsOf(pkg),
   ].filter(t => isExactVersion(t.version)) // filter: only exact versions take part in OSV checks
-  const vulns: OsvVuln[] = []
+  // 每条命中记住「命中的是包自身还是哪个直接依赖」——0.4.1：告警文案要能说清
+  // 「依赖 zod@4.4.3 命中 GHSA-…」，否则用户面对官方包的黄牌无从判断该不该忽略。
+  const vulns: { vuln: OsvVuln; dependency: string }[] = []
   // 透传的外部集合（checkSupplyChain 跨源共享）或孤立集合——dedup 按 id 生效
   const seenVuln = opts.seenVuln ?? new Set<string>()
   // P2-10：OSV 总预算（宿主超时余量）——逐查询超时按「剩余预算 / 剩余目标数」动态收窄（下限
@@ -891,16 +893,23 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promi
     for (const v of found) {
       if (seenVuln.has(v.id)) continue
       seenVuln.add(v.id)
-      vulns.push(v)
+      const dependency = target.name === pkg.name ? '' : `${target.name}@${target.version ?? ''}`
+      vulns.push({ vuln: v, dependency })
     }
     if (vulns.length >= 10) break
   }
-  return vulns.slice(0, 10).map(v => ({
+  return vulns.slice(0, 10).map(({ vuln: v, dependency }) => ({
     rule: 'OSV',
     severity: 'high',
     confidence: 'certain', // 漏洞库命中是事实（非启发式），verdict 可据此抬升
-    message: '已知漏洞 ' + v.id + (v.aliases.length > 0 ? '（' + v.aliases[0] + '）' : '') + '：' + (v.summary ?? 'npm 生态已知漏洞').slice(0, 110),
-    evidence: '',
+    message: '已知漏洞 ' + v.id + (v.aliases.length > 0 ? '（' + v.aliases[0] + '）' : '')
+      + (dependency !== '' ? '（依赖 ' + dependency + '）' : '')
+      + '：' + (v.summary ?? 'npm 生态已知漏洞').slice(0, 110),
+    // 结构化坐标（`key=value;key=value`）：guard 侧用它生成可读告警与证据指纹，
+    // 不必解析上面的中文散文。版本不含 `;`/`=`，格式安全。
+    evidence: 'id=' + v.id
+      + (v.aliases.length > 0 ? ';alias=' + v.aliases[0] : '')
+      + (dependency !== '' ? ';dependency=' + dependency : ''),
     file: 'package.json',
   }))
 }

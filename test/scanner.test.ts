@@ -241,7 +241,38 @@ describe('OSV', () => {
       expect(f).toBeDefined()
       expect(f!.severity).toBe('high')
       expect(f!.confidence).toBe('certain')
+      expect(f!.message).toContain('已知漏洞 GHSA-1')
+      expect(f!.message).not.toContain('（依赖')
+      expect(f!.evidence).toBe('id=GHSA-1;alias=CVE-2024-1234')
       expect(res.report!.verdict).toBe('suspicious')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('scanWithOsv: 命中直接依赖 → 文案点名依赖坐标，evidence 携带结构化坐标', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vet-osv-dep-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({
+        name: 'host-pkg', version: '1.0.0', dependencies: { zod: '4.4.3' },
+      }))
+      // 包自身查询为空，只有 zod@4.4.3 命中——与 DSH 0.2.1 官包的真实形态一致
+      const depOnlyFetch = (async (_url: unknown, init?: { body?: unknown }) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { package?: { name?: string } }
+        const vulns = body.package?.name === 'zod'
+          ? [{ id: 'GHSA-mrhx-c7xc-m3w5', aliases: ['CVE-2023-54404'], summary: 'memory exhaustion' }]
+          : []
+        return { ok: true, status: 200, json: async () => ({ vulns }) }
+      }) as unknown as typeof fetch
+      const res = await scanWithOsv(
+        { kind: 'files', files: [join(dir, 'package.json')], osv: true },
+        { fetchImpl: depOnlyFetch },
+      )
+      expect(res.ok).toBe(true)
+      const f = res.report!.findings.find(x => x.rule === 'OSV')
+      expect(f).toBeDefined()
+      expect(f!.message).toContain('（依赖 zod@4.4.3）')
+      expect(f!.evidence).toBe('id=GHSA-mrhx-c7xc-m3w5;alias=CVE-2023-54404;dependency=zod@4.4.3')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

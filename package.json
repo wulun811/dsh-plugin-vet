@@ -1,6 +1,6 @@
 {
   "name": "@jieai/dsh-plugin-vet",
-  "version": "0.3.17",
+  "version": "0.4.1",
   "description": "Audit deepseek-harness (DSH) plugins before install, guard them at runtime. Static verdict + pre-install audit protocol; supply-chain checks (typosquat, OSV); exfiltration & ransomware detection, honeypot canaries, integrity baseline. Alarm-only; blocks confirmed destructive ops.",
   "license": "MIT",
   "author": {
@@ -92,11 +92,15 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-locale"
       ]
     }
+  },
+  "dshCompat": {
+    "tested": "^0.1.1-rc.1 || ^0.2.0-rc.2 || ^0.2.1-rc.2",
+    "note": "vet 已复验的 DSH 版本范围（自动更新适配提示的真值）。每轮复验后手工更新本字段；不用 peerDependencies 表达——peer 只覆盖模块 API，覆盖不到 patch 锚点/slot 契约。"
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('lib', { recursive: true, force: true })\"",
@@ -120,9 +124,14 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-invariants": "^0.1.1-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-llm": "^0.1.1-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-session": "^0.1.1-rc.1 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.1-rc.1 || ^0.2.0-rc.1"
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "^0.1.1-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-invariants": {
+      "optional": true
+    }
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4",
@@ -130,11 +139,10 @@
     "typescript": "^5.5.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-invariants": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-llm": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-session": "^0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.2.0-rc.1",
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-llm": "^0.2.1-rc.3",
+    "@deepseek-ai/dsh-session": "^0.2.1-rc.3",
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.3",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.0",

@@ -12,7 +12,6 @@ export const zh: Record<string, string> = {
   'status.red': '有风险',
   'level.green': '当前无报警，静态扫描与运行时守护正常。',
   'level.yellowAlarm': '有警告报警，详见下方报警列表。',
-  'level.yellowScan': '有可疑扫描结果，详见下方「预警详情」。',
   'level.red': '检测到高风险报警，请查看下方报警列表；可在 DSH 对话中把这段预警发给 LLM，让它协助排查处置。',
   'clickDetail': '（点击查看详情）',
   'alerts.count': '条报警',
@@ -26,9 +25,6 @@ export const zh: Record<string, string> = {
   'alerts.restoreHint': '恢复显示此报警',
   'alerts.dismissNote': '忽略只影响展示，报警记录仍保留；对应报警停止后忽略自动失效。',
   'ram.hint': 'RAM = DSH 宿主 + 全部插件 + vet 哨兵 + 全部 MCP 服务（跨进程总占用）',
-  'warn.title': '预警详情 · 最近扫描存在可疑结果',
-  'warn.scannedAt': '扫描于 ',
-  'warn.body': '静态判定存疑（非结论）：让 DSH 里的 agent 按 vet 审计协议（AUDIT_PROTOCOL）对该插件亲自审查，形成结论并落盘健康档案。',
   'points': '分',
   'metrics.title': '实时指标',
   'metrics.memory': '内存',
@@ -327,9 +323,26 @@ export const zh: Record<string, string> = {
 
   // 0.1.20：防御统计
   'stats.title': '防御统计',
-  'stats.scanned': '已扫描',
+  'stats.scanned': '已扫描插件',
   'stats.alarms': '已报警',
   'stats.blocked': '已拦截',
+
+  // 0.4.1：自动更新适配提示
+  'update.title': '版本与适配',
+  'update.compatOk': '已复验支持当前 DSH',
+  'update.compatOut': '超出已复验范围',
+  'update.compatUnknown': '适配范围未知',
+  'update.available': '新版已适配，可升级',
+  'update.upToDate': '已是最新',
+  'update.noteOut': '本机 DSH {dsh} 超出本版 VET 已复验范围（已复验至 {range}），兼容性未验证。升级 VET 前如遇异常，请先回退 DSH。',
+  'update.noteOutWithUpdate': '本机 DSH {dsh} 超出本版 VET 已复验范围（已复验至 {range}），兼容性未验证；但新版 VET {latest} 已声明覆盖它——建议直接升级 VET，而不是先回退 DSH。',
+  'update.noteAvailable': 'VET {latest} 已复验支持 DSH {dsh}。当前 {current}。',
+  'update.noteUpToDate': 'VET {current} 已是最新，且已复验支持 DSH {dsh}。',
+  'update.noteUpToDateUnverified': 'VET {current} 已是最新。但未能确认对当前 DSH 的复验状态（读不到运行中的 DSH 版本，或本版未声明已复验范围）。',
+  'update.noteUnknown': '当前 VET {current}；已复验 DSH 范围 {range}。未获取到可用的新版信息。',
+  'update.cmdLabel': '升级命令',
+  'update.rangeNone': '未声明',
+  'update.sourceNote': '来源：registry.npmjs.org（仅供参考，请自行核对版本号）',
 }
 
 export const en: Record<string, string> = {
@@ -338,7 +351,6 @@ export const en: Record<string, string> = {
   'status.red': 'Risk',
   'level.green': 'No alerts. Static scans and the runtime guard are normal.',
   'level.yellowAlarm': 'There are warnings — see the alert list below.',
-  'level.yellowScan': 'The latest scan came back suspicious — see the details below.',
   'level.red': 'High-risk alerts detected. See the list below; you can hand the alert to an LLM in the DSH chat to help investigate and resolve.',
   'clickDetail': ' (click for details)',
   'alerts.count': 'alerts',
@@ -352,9 +364,6 @@ export const en: Record<string, string> = {
   'alerts.restoreHint': 'Show this alert again',
   'alerts.dismissNote': 'Dismissing only hides it — the record is kept; the dismissal clears when the alert stops firing.',
   'ram.hint': 'RAM = DSH host + all plugins + vet sidecar + all MCP servers (cross-process total)',
-  'warn.title': 'Why: the latest scan came back suspicious',
-  'warn.scannedAt': 'Scanned at ',
-  'warn.body': 'The static verdict is suspicious (not conclusive): ask the DSH agent to review this plugin per the vet audit protocol (AUDIT_PROTOCOL) and archive a health record.',
   'points': 'pts',
   'metrics.title': 'Live metrics',
   'metrics.memory': 'Memory',
@@ -653,7 +662,24 @@ export const en: Record<string, string> = {
 
   // 0.1.20: Defense statistics
   'stats.title': 'Defense Stats',
-  'stats.scanned': 'Scanned',
+  'stats.scanned': 'Plugins scanned',
   'stats.alarms': 'Alarmed',
   'stats.blocked': 'Blocked',
+
+  // 0.4.1: auto update-adaptation notice
+  'update.title': 'Version & Compatibility',
+  'update.compatOk': 'Verified for this DSH',
+  'update.compatOut': 'Beyond verified range',
+  'update.compatUnknown': 'Compatibility unknown',
+  'update.available': 'New version verified — update available',
+  'update.upToDate': 'Up to date',
+  'update.noteOut': 'This DSH {dsh} is outside the DSH range this VET was verified against (verified to {range}); compatibility is unverified. Roll back DSH first if you hit issues before upgrading VET.',
+  'update.noteOutWithUpdate': 'This DSH {dsh} is outside the DSH range this VET was verified against (verified to {range}), so compatibility is unverified — but VET {latest} declares it covers that DSH. Upgrade VET instead of rolling DSH back.',
+  'update.noteAvailable': 'VET {latest} is verified against DSH {dsh}. You are on {current}.',
+  'update.noteUpToDate': 'VET {current} is up to date and verified against DSH {dsh}.',
+  'update.noteUpToDateUnverified': 'VET {current} is up to date, but verification against your running DSH could not be confirmed (the DSH version is unreadable, or this release declares no verified range).',
+  'update.noteUnknown': 'Current VET {current}; verified DSH range {range}. No usable new-version info available.',
+  'update.cmdLabel': 'Upgrade command',
+  'update.rangeNone': 'not declared',
+  'update.sourceNote': 'Source: registry.npmjs.org (informational only — verify the version yourself)',
 }

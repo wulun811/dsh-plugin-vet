@@ -30,6 +30,15 @@ import { PluginsListPanel } from './panels/PluginsListPanel.tsx'
 import { AuditCenterPanel } from './panels/AuditCenterPanel.tsx'
 import { PluginDetailPanel } from './panels/PluginDetailPanel.tsx'
 import { isShieldSnapshotShape } from '../guard/shield-shape.ts'
+import {
+  isUpdateNews,
+  parseSeen,
+  shouldShowUpdateCard,
+  updateCardPresentation,
+  updateCardSignature,
+  type UpdateCardInput,
+  type UpdateSeen,
+} from '../guard/update-card.ts'
 import type { ShieldSnapshotWire } from './types.ts'
 
 /** wire 类型从 types.ts 再导出（历史导入路径兼容）。 */
@@ -45,6 +54,30 @@ const SUB_W = 340
 
 /** L2 次级面板种类（D2/D7）：时间线 / 审计&蜜罐 / 最近插件 / 关于；插件详情是独立 L3。 */
 type L2Kind = 'timeline' | 'audit' | 'plugins' | 'about'
+
+/* —— 0.4.1「版本与适配」卡的安静窗口存储 —— 纯浏览器侧（判定逻辑在 guard/update-card，单源）。 */
+
+/** localStorage 键：记录安静态卡片「第一次看到」的消息指纹与时刻（跨刷新/跨重启）。 */
+const UPDATE_SEEN_KEY = 'vet.updateCardSeen'
+
+/** 读回「已见」记录；任何异常（隐私模式/配额/被禁）→ null（当作首次看到）。
+ * 解析与损坏判定走 guard/update-card 的 parseSeen（单源，与单测同规则）。 */
+function readUpdateSeen(): UpdateSeen | null {
+  try {
+    return parseSeen(window.localStorage.getItem(UPDATE_SEEN_KEY))
+  } catch {
+    return null
+  }
+}
+
+/** 记住「第一次看到」；写入失败静默（只影响记忆，不影响本次展示）。 */
+function writeUpdateSeen(seen: UpdateSeen): void {
+  try {
+    window.localStorage.setItem(UPDATE_SEEN_KEY, JSON.stringify(seen))
+  } catch {
+    // 无存储可用：本次展示照常，下次打开会再算「首次」——绝不因存储故障漏掉真消息
+  }
+}
 
 /** 复合卡趋势窗口样本上限（≈64 × 5s ≈ 5 分钟；P2 切服务端 history 后保留为后备）。 */
 const HIST_CAP = 64
@@ -303,12 +336,56 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
   const guard = snap?.runtimeGuard ?? 'off'
   const profile = tierOverride ?? snap?.profile ?? 'standard'
   const stats = snap?.stats
+  const update = snap?.update
+
+  // 0.4.1（用户 2026-10-13）：「版本与适配」卡在**安静态**下一直占着主面板，但它每次说的都是同
+  // 一句话——常驻仪表是给会变的量用的，这条是一次性通知。故安静态只从「第一次看到」起展示
+  // UPDATE_CARD_TTL_MS（20 分钟），随后收起；**真消息**（超出已复验范围 / 可升级）永不收起。
+  // 存储用 localStorage（跨刷新记住「第一次看到」的时刻，也跨 DSH 重启）；不可用（隐私模式/
+  // 配额满/被禁）时降级为「每次打开都算第一次」——即退化成常驻，而**绝不**因存储故障而漏掉
+  // 真消息（真消息本就不看存储，见 shouldShowUpdateCard）。
+  const [updateSeen, setUpdateSeen] = useState<UpdateSeen | null>(() => readUpdateSeen())
+
+  /** 判定卡片的展示语义与可见性（单源推导，供主面板与「关于」两处复用）。 */
+  const updateCard = update === undefined
+    ? { show: false, pres: null }
+    : (() => {
+      const input = update as UpdateCardInput
+      return {
+        show: shouldShowUpdateCard(input, updateSeen, Date.now()),
+        pres: updateCardPresentation(input),
+      }
+    })()
 
   // 「?」介绍面板：纯点击开合（原 400ms hover 弹出被用户反馈「经过就弹」不舒服，
   // 2026-08-27 改为与时间线/审计一致的点开/再点关；Esc 与主面板收起同样能关）。
   const toggleL2 = (kind: L2Kind): void => {
     setL2(v => (v === kind ? null : kind))
   }
+
+  // 首次看到某条安静态消息 → 记住指纹与时刻，窗口从此刻起算（下次打开即按 20 分钟收起）。
+  // 指纹变化（DSH/VET 升级等）视为新消息，重新计时。真消息不写存储（它永不收起，无需计时）。
+  // 依赖只写 [update]：updateSeen 用函数式读取（readUpdateSeen 每次读 localStorage），避免把
+  // updateSeen 列为依赖后每次 setUpdateSeen 触发自身重跑。
+  useEffect(() => {
+    if (update === undefined) return
+    const input = update as UpdateCardInput
+    if (isUpdateNews(input)) return
+    const sig = updateCardSignature(input)
+    const cur = readUpdateSeen()
+    if (cur !== null && cur.sig === sig) return
+    const seen: UpdateSeen = { sig, at: Date.now() }
+    writeUpdateSeen(seen)
+    setUpdateSeen(seen)
+  }, [update])
+
+  /** i18n 占位符填充（t 是纯查表，无插值能力）。值本身也可能是一个 i18n key（例如「未声明
+   * 范围」的 `update.rangeNone`）——查表后填入；t 对未知 key 原样返回，故普通值不受影响。 */
+  const fill = (key: string, vars: Record<string, string>): string =>
+    t(key).replace(/\{(\w+)\}/g, (_m, k: string) => {
+      const v = vars[k] ?? ''
+      return v.startsWith('update.') ? t(v) : v
+    })
 
   // Esc：逐层退回（L3 → L2 → 关主面板）——P5 a11y 提前落地。
   useEffect(() => {
@@ -435,42 +512,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
             </button>
           </div>
           <div style={{ color: tok.muted, marginTop: 5 }}>
-            {level === 'yellow'
-              ? (alarms.length > 0 ? t('level.yellowAlarm') : t('level.yellowScan'))
-              : t('level.' + level)}
+            {level === 'yellow' ? t('level.yellowAlarm') : t('level.' + level)}
           </div>
-
-          {/* 黄灯且无报警：唯一来源是最近扫描 suspicious → 直接展示预警详情（这就是可点的「详情」） */}
-          {level === 'yellow' && alarms.length === 0 && lastScan !== undefined && (
-            <div style={{
-              marginTop: 8,
-              background: cardBg(dark),
-              borderRadius: 8,
-              borderLeft: `3px solid ${tok.ochre}`,
-              borderRight: '1px solid ' + tok.borderWarn,
-              borderTop: '1px solid ' + tok.borderWarn,
-              borderBottom: '1px solid ' + tok.borderWarn,
-              boxShadow: cardInset(dark),
-              padding: '8px 10px',
-            }}>
-              <div style={{ fontSize: 10.5, fontWeight: 700, color: tok.ochre, letterSpacing: '0.02em' }}>
-                {t('warn.title')}
-              </div>
-              <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: tok.ink }}>
-                  {lastScan.pluginName}
-                </span>
-                <span style={{ marginLeft: 'auto', fontWeight: 700, color: tok[COLOR[level]], flexShrink: 0 }}>
-                  {lastScan.verdict}
-                </span>
-                <span style={{ fontSize: 11, color: tok.faint, flexShrink: 0 }}>{lastScan.staticScore} {t('points')}</span>
-              </div>
-              <div style={{ marginTop: 3, fontSize: 10.5, color: tok.faint }}>
-                {lastScan.at !== undefined ? t('warn.scannedAt') + fmtTime(lastScan.at) + ' · ' : ''}
-                {t('warn.body')}
-              </div>
-            </div>
-          )}
 
           {/* 实时指标（P1）：三张环趋势复合卡（当前值+方向一卡读全）+ 两个折叠区收纳细节。
               软上限仅用于画环/染色（D4），不参与执法判断。 */}
@@ -742,7 +785,65 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
             </>
           )}
 
-          {/* 0.1.20：防御统计——让用户知道"被保护了多少次"（始终显示，0 也展示） */}
+          {/* 0.4.1：版本与适配。两层合一的展示：
+              - 离线兼容层（零网络）：本机 DSH 超出本版已复验范围 → 黄字警示，这是价值最高的一半；
+              - 在线层（节流 24h）：仅当「确有更新版 **且** 该版声明覆盖本机 DSH」才提示可升级。
+              刻意不做一键升级：那要求 vet 能写自身安装目录并 spawn npm，对安全插件是巨大的新增攻击面，
+              且实测安装常为符号链接（本机即 profile/node_modules 链到开发目录），一键升级无意义。
+              只给事实 + 可复制命令，并标注数据来源供用户自行核对（防钓鱼）。
+              安静态（无新消息）自首次看到起 20 分钟收起——见 guard/update-card；收起后仍可在
+              「关于」次级面板查看（信息与真消息展示共用同一份 presentation，防两处漂移）。 */}
+          {updateCard.show && updateCard.pres !== null && (() => {
+            const pres = updateCard.pres
+            const accent = pres.accent ? (pres.tone === 'out' ? tok.ochre : tok.sage) : tok.faint
+            const label = t(pres.labelKey)
+            const note = fill(pres.noteKey, pres.vars)
+            // 升级命令按**在线结论**门控，而不是按档位：DSH 超出已复验范围时档位是 'out'，
+            // 但若确有声明覆盖它的新版，用户最需要的正是这条命令（见 guard/update-card）。
+            const avail = update?.status === 'update-available' && (update.latestVersion ?? '') !== ''
+            return (
+              <>
+                <SectionLabel pal={tok}>{t('update.title')}</SectionLabel>
+                <div style={{
+                  background: cardBg(dark),
+                  border: '1px solid ' + (pres.accent ? accent : tok.borderSoft),
+                  borderRadius: 10,
+                  boxShadow: cardInset(dark),
+                  padding: '8px 10px',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span aria-hidden="true" style={{ fontSize: 11, color: accent }}>{pres.icon}</span>
+                    <span style={{ fontSize: 11.5, fontWeight: 700, color: accent }}>{label}</span>
+                    <span style={{ marginLeft: 'auto', fontSize: 10.5, color: tok.faint }}>
+                      DSH {update?.dshVersion === '' ? '?' : update?.dshVersion} · VET {update?.currentVersion}
+                    </span>
+                  </div>
+                  <div style={{ marginTop: 5, fontSize: 10.5, lineHeight: 1.5, color: tok.muted }}>{note}</div>
+                  {avail && (
+                    <div style={{ marginTop: 6 }}>
+                      <div style={{ fontSize: 10, color: tok.faint }}>{t('update.cmdLabel')}</div>
+                      {/* 只给可复制命令，不做按钮（见上方注释） */}
+                      <code style={{
+                        display: 'block',
+                        marginTop: 2,
+                        fontSize: 10,
+                        color: tok.ink,
+                        background: tok.cardSoft,
+                        border: '1px solid ' + tok.borderSoft,
+                        borderRadius: 6,
+                        padding: '4px 6px',
+                        userSelect: 'all',
+                        wordBreak: 'break-all',
+                      }}>{`npm i -g @jieai/dsh-plugin-vet@${update?.latestVersion ?? ''}`}</code>
+                      <div style={{ marginTop: 4, fontSize: 9.5, color: tok.faint }}>{t('update.sourceNote')}</div>
+                    </div>
+                  )}
+                </div>
+              </>
+            )
+          })()}
+
+          {/* 0.1.20：防御统计（0.3.18：scannedCount 改为去重插件数）——让用户知道"被保护了多少次"（始终显示，0 也展示） */}
           {stats !== undefined && (
             <>
               <SectionLabel pal={tok}>{t('stats.title')}</SectionLabel>
@@ -943,7 +1044,8 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
               )}
               {l2 === 'about' && (
                 <div style={{ position: 'absolute', top: 0, bottom: 0, left: '100%', width: SUB_W, zIndex: 20 }}>
-                  <IntroPanel pal={tok} dark={dark} t={t} onBack={() => setL2(null)} />
+                  <IntroPanel pal={tok} dark={dark} t={t} onBack={() => setL2(null)}
+                    update={update} updatePres={updateCard.pres} />
                 </div>
               )}
               {detail !== null && (

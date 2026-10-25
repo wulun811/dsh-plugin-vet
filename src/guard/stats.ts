@@ -1,7 +1,13 @@
 /**
  * 防御统计模块（0.1.20）：记录 vet 的防御行为统计数据。
  * 存储：~/.dsh/vet/stats.json（原子写，0600）。
- * 数据：扫描插件数、警报总数、拦截次数、防御中插件数。
+ * 数据：已覆盖插件数（去重）、警报总数、拦截次数、防御中插件数。
+ *
+ * 0.3.18（去重修正）：scannedCount 从「扫描事件累计数」改为「去重后的已覆盖插件数」。旧口径
+ * 每次 DSH 重启都把同一批插件重新计一遍，本机实测涨到 6001，而实际只有 77 个不同插件
+ * （与 capabilities.json / scan-summaries.json 的去重名集一致）——盾牌上的数字因此不可读。
+ * 真值是落盘的 scannedPlugins 名集；0.3.17 及更早的文件没有该字段 → 视作空集重新累计，
+ * 下一次自然重启即自愈，不需要停机窗口改数据。
  * 用途：盾牌面板底部展示，让用户知道"被保护了多少次"。
  */
 import { readFileSync, renameSync, mkdirSync, existsSync } from 'node:fs'
@@ -11,7 +17,7 @@ import { withVetSelfIo } from './runtime-hooks.js'
 import { vetStoreRoot } from './store-root.js'
 
 export interface VetStats {
-  /** 累计扫描插件次数（recordScan 调用次数） */
+  /** 已覆盖的不同插件数（去重）。0.3.18 前为扫描事件累计数，随每次重启无限增长。 */
   scannedCount: number
   /** 累计警报记录次数（status.record 调用次数） */
   alarmsRecorded: number
@@ -52,9 +58,25 @@ const SNAPSHOT_DEFAULT_DIR = vetStoreRoot()
  *  切换统计目录（测试）时失效以重新从文件加载。 */
 let memStats: VetStats | undefined
 
+/** scannedCount 的真值：去重后的已覆盖插件名。与 memStats 同批由 loadSnapshot 初始化。 */
+let scannedPlugins: Set<string> | undefined
+
+/** 落盘去抖：仅计数器真变化时写。0.3.18 起名集进文件（约 3 KB，25× 于旧的 128 B），
+ *  稳态 5s 轮询不再整写；单次变更仍在下一个轮询周期（≤5s）落盘，丢失窗口与旧口径一致。 */
+let statsDirty = true
+
 function mem(): VetStats {
-  if (memStats === undefined) memStats = loadStats()
+  if (memStats === undefined) {
+    const snap = loadSnapshot()
+    memStats = snap.stats
+    scannedPlugins = snap.scanned
+  }
   return memStats
+}
+
+function scanned(): Set<string> {
+  mem()
+  return scannedPlugins as Set<string>
 }
 
 /** 统计文件路径：~/.dsh/vet/stats.json */
@@ -67,27 +89,42 @@ export function statsPath(): string {
 export function setStatsDirForTest(dir?: string): void {
   statsDirOverride = dir
   memStats = undefined
+  scannedPlugins = undefined
+  statsDirty = true
 }
 
-/** 加载统计（fail-open：异常返回默认值） */
-export function loadStats(): VetStats {
+/** 读取落盘快照：计数器 + 去重名集（scannedCount 的真值）。fail-open：异常返回默认值。
+ *  注意：文件里的 scannedCount 一律忽略——旧口径的值是事件累计数，回灌会让自愈失效。 */
+function loadSnapshot(): { stats: VetStats; scanned: Set<string> } {
   return withVetSelfIo(() => {
     try {
       const p = statsPath()
-      if (!existsSync(p)) return { ...DEFAULT_STATS }
+      if (!existsSync(p)) return { stats: { ...DEFAULT_STATS }, scanned: new Set<string>() }
       const raw = readFileSync(p, 'utf8')
-      const parsed = JSON.parse(raw) as Partial<VetStats>
+      const parsed = JSON.parse(raw) as Partial<VetStats> & { scannedPlugins?: unknown }
+      const scanned = new Set<string>()
+      if (Array.isArray(parsed.scannedPlugins)) {
+        for (const name of parsed.scannedPlugins) if (typeof name === 'string') scanned.add(name)
+      }
       return {
-        scannedCount: typeof parsed.scannedCount === 'number' ? parsed.scannedCount : 0,
-        alarmsRecorded: typeof parsed.alarmsRecorded === 'number' ? parsed.alarmsRecorded : 0,
-        blockedCount: typeof parsed.blockedCount === 'number' ? parsed.blockedCount : 0,
-        activeDefenseCount: typeof parsed.activeDefenseCount === 'number' ? parsed.activeDefenseCount : 0,
-        updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+        stats: {
+          scannedCount: scanned.size,
+          alarmsRecorded: typeof parsed.alarmsRecorded === 'number' ? parsed.alarmsRecorded : 0,
+          blockedCount: typeof parsed.blockedCount === 'number' ? parsed.blockedCount : 0,
+          activeDefenseCount: typeof parsed.activeDefenseCount === 'number' ? parsed.activeDefenseCount : 0,
+          updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+        },
+        scanned,
       }
     } catch {
-      return { ...DEFAULT_STATS }
+      return { stats: { ...DEFAULT_STATS }, scanned: new Set<string>() }
     }
   })
+}
+
+/** 加载统计（fail-open：异常返回默认值）。 */
+export function loadStats(): VetStats {
+  return loadSnapshot().stats
 }
 
 /** 保存统计（原子写：tmp + rename，0600） */
@@ -98,8 +135,11 @@ export function saveStats(stats: VetStats): void {
       const dir = dirname(p)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
       const tmp = p + '.tmp.' + process.pid
+      const plugins = [...scanned()]
       stats.updatedAt = Date.now()
-      writeTmpExclusive(tmp, JSON.stringify(stats, null, 2), 0o600)
+      stats.scannedCount = plugins.length
+      // scannedPlugins 是 scannedCount 的真值；count 冗余写入便于人工查看（读时以名集重算）
+      writeTmpExclusive(tmp, JSON.stringify({ ...stats, scannedPlugins: plugins }, null, 2), 0o600)
       renameSync(tmp, p)
     } catch {
       // fail-open：写失败不影响主流程
@@ -107,19 +147,27 @@ export function saveStats(stats: VetStats): void {
   })
 }
 
-/** 增加扫描计数（仅更新内存镜像，落盘由 getStats 轮询负责） */
-export function incrementScanned(): void {
-  mem().scannedCount++
+/** 记录一次扫描（按包名去重；仅更新内存镜像，落盘由 getStats 轮询负责）。
+ *  去重后该值 = vet 实际覆盖的插件数，不再随每次重启把同一批插件重复计入。 */
+export function incrementScanned(pluginName: string): void {
+  const stats = mem()
+  const set = scanned()
+  if (pluginName === '' || set.has(pluginName)) return
+  set.add(pluginName)
+  stats.scannedCount = set.size
+  statsDirty = true
 }
 
 /** 增加警报计数（仅更新内存镜像，落盘由 getStats 轮询负责） */
 export function incrementAlarmsRecorded(): void {
   mem().alarmsRecorded++
+  statsDirty = true
 }
 
 /** 增加拦截计数（仅更新内存镜像，落盘由 getStats 轮询负责） */
 export function incrementBlocked(): void {
   mem().blockedCount++
+  statsDirty = true
 }
 
 /** 设置当前防御中插件数（内存态更新，不持久化） */
@@ -136,7 +184,11 @@ export function getActiveDefenseCount(): number {
 export function getStats(): VetStats {
   const stats = mem()
   stats.activeDefenseCount = activeDefenseMemory
-  // 落盘时把内存态字段归零写回——activeDefenseCount 仅运行时有效，不落盘
-  saveStats({ ...stats, activeDefenseCount: 0 })
+  // 落盘时把内存态字段归零写回——activeDefenseCount 仅运行时有效，不落盘。
+  // 去抖：只有计数器真变化才写（首次调用必定写一次，用于把旧文件规整成新结构）。
+  if (statsDirty) {
+    saveStats({ ...stats, activeDefenseCount: 0 })
+    statsDirty = false
+  }
   return stats
 }

@@ -69,7 +69,7 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 > 校验完成后再次安装/更新只需秒级（复用校验结果）。
 
 
-> **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer：`@deepseek-ai/cordis ^4.0.1`、dsh-* `^0.1.1-rc.1 || ^0.2.0-rc.1`；
+> **兼容性**：vet 面向 DSH 0.1.0-rc.6+（peer：`@deepseek-ai/cordis ^4.0.1`、dsh-* `^0.1.1-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.2`；
 > round-15 对 npm-public `0.1.1-rc.2` 完成适配，其后对 `0.1.5-rc.1`/`0.1.5-rc.2`/`0.1.7-rc.1` 逐一复验
 > ——0.1.7 同步新增 R12 的 `dsh.bundle.patch` 有序数组支持与官方包产物降噪）。**0.3.16（DSH 0.2.0-rc.1 同步）**：
 > peer 扩为两个家族的并集——`^0.1.1-rc.1` 的上界展开是 `<0.2.0-0`，按 semver 预发布规则**不满足**
@@ -78,6 +78,35 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 > 语义，预发布版本参与匹配）。安装时 pnpm 可能提示
 > unmet peer dependency——这是预期的：profile 模板 `autoInstallPeers: false`，运行期从 DSH 安装闭包
 > （`$DSH_HOME/profiles/node_modules` 回退层）解析，无需也不能在 profile 里另装一份 cordis 全家桶。
+>
+> **0.4.1（自动更新适配提示）**：每版在 `package.json` → `dshCompat.tested` 声明自己**已复验**的 DSH 范围
+> （0.4.1 声明 `^0.1.1-rc.1 || ^0.2.0-rc.2 || ^0.2.1-rc.2`）。盾牌的「版本与适配」卡展示两件事。**离线层（零网络，永远在）**：
+> 运行中的 DSH 超出声明范围 → 提示兼容性未验证。**在线层（最多 24 小时一次）**：查 `registry.npmjs.org` 上最新
+> VET 声明的范围，**仅当**「确有更新版 **且** 该版声明覆盖你正在跑的 DSH」才提示可升级；我们还没发适配版时
+> 保持静默，不会谎称有适配版。`updateCheck: false` 可完全离线（或跑 `mode: deny`——出网被抑制，仅保留离线层）。
+> 刻意**不做一键升级**：面板只显示版本号、声明的范围、可复制的 `npm i -g` 命令与数据来源。卡片的
+> **安静态**（「已复验支持」/「已是最新」，无新消息）在**第一次看到后 20 分钟自动收起**——它每次都
+> 说同一句话，属于一次性通知而非常驻仪表；带**真消息**的状态（超出已复验范围 / 新版已适配可升级）
+> **永不收起**。收起后同一结论仍可在「关于」面板查看。新增网络**目标**：无（`registry.npmjs.org`
+> 本就已声明）；新增的是**定时调度**这一行为面。
+>
+> **0.4.1（DSH 0.2.1-rc.3 复验）**：0.4.1 待发布期间 DSH 已推进到 `0.2.1-rc.*`，声明范围因此延到
+> `^0.2.1-rc.2`，并对 `0.2.1-rc.2`（npm `latest`）与 `0.2.1-rc.3`（npm `next`）各装一遍依赖树实测通过。
+> 两处宿主变化落在 vet 触达面上：`@deepseek-ai/dsh-invariants` 在 0.2.1 家族中已被移除（vet 的包级
+> invariant 本就是「服务不存在即静默跳过」的探针，peer 现改为真正的 `optional`，profile 安装也不会再
+> 拉一份宿主已不提供的包）；`@deepseek-ai/dsh-client-ui-slots` 不再是独立客户端模块（`slots` 服务改由
+> `dsh-client-ui-renderer` 提供，`dsh.client.inject` 随之改名；`inject`/`register` 签名与
+> `conversation.session.header.actions` 键均未变）。真机验证：`status.json` 报 `dshVersion 0.2.1-rc.3`
+> 且 `compat: ok`；范围更新前同一宿主报 `out-of-range`——离线层按设计工作。
+>
+> **0.3.18（DSH 0.2.0-rc.2 复验）**：rc.1→rc.2 落在 vet 触达面上的差异是**纯增量**。`@deepseek-ai/cordis`
+> 未动（仍 `4.0.4`）；`dsh-tools`/`dsh-session`/`dsh-invariants`/`dsh-client-ui-slots`/`dsh-client-locale`
+> 与 rc.1 只差 `package.json` 版本号；`dsh-client-ui-conversation` 新增六个 `ask.*` 文案键与一处等价
+> `slots` 重构；`dsh-llm` 的 `MessageSourceMap` 新增一个成员。vet 运行期打补丁的四个包
+> （`dsh-atomic-write`/`dsh-storage-json`/`dsh-config-editor`/`dsh-credentials-local`）**字节完全一致**，
+> 降噪锚点未移。声明的 peer 范围实测已接纳 `0.2.0-rc.2`，devDependencies 亦已跟上。在 0.2.0-rc.2 宿主上
+> 实测：77 条扫描记录中 76 条为 rc.2 且全 clean，vet 客户端模块在 rc.2 构建的插件包内正常产出。
+> `@deepseek-ai/dsh-settings-file` 在该家族中依旧不存在（`0.1.6-alpha.2` 后退役），与 vet 注释一致。
 >
 > **npm-public DSH（0.1.1-rc.2+）**：profile 从自身 `package.json` 的 `dsh.profile.bundles` 加载插件
 > （boot 组合 bundles 层 + `cordis.patch.yml` + `$DSH_HOME/cordis.patch.yml`，后两层热重载）。`dsh plugin add`
@@ -99,11 +128,12 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 | `scannerTimeoutMs` | `15000` | 静态扫描子进程超时 |
 | `requireAudit` | `false` | 审计门槛（opt-in，**仅第三方**——官方 `@deepseek-ai/*` 包由内容哈希基线 + 静态扫描把关，不要求人工档案，round-17）：开启后新装第三方插件加载时检查 `~/.dsh/vet/audits/` 健康档案——无档案则 `report` 模式记录黄色 `audit-required` 告警、`deny` 模式拦截。档案由 agent 按 `vet-audit-protocol` 技能审查后手写落盘 |
 | `rules` | `{}`（全开） | 规则开关（R1-R20；如 `{"R17": false}` 关 !!js 配置面） |
-| `scanSurface` | 全开 | 静态扫描面开关（0.2.6，engine static-v14 起，当前 static-v20）：`configFiles`（cordis.yml/patch 的 !!js 检测，R17）、`instructionFiles`（指令/技能注入观测，R18）；关闭只影响新面，旧扫描面照扫 |
+| `scanSurface` | 全开 | 静态扫描面开关（0.2.6，engine static-v14 起，当前 static-v26）：`configFiles`（cordis.yml/patch 的 !!js 检测，R17）、`instructionFiles`（指令/技能注入观测，R18）；关闭只影响新面，旧扫描面照扫 |
 | `observeLoopback` | `true` | 本地 API 回环观测（0.2.6 曾默认关；**0.3 起默认开**——回环 + 控制面路径 + 第三方归因，官方归因豁免，yellow 可忽略）：开启后插件对 127.0.0.1 的请求计入 N3 台账，命中 DSH 控制面路径（/api/、session.*、/plugins/）且归因第三方插件 → yellow `loopback-control`（alarm-only、可忽略）。观测不是修复——RPC 认证需 dsh 侧 |
 | `telemetryDiff` | `true` | 遥测配置敏感化（0.2.6）：周期读取 profile 配置 telemetry exporter url/mode 字段哈希，冷启动只记录；主机变化 → yellow（要求重启校验，G-3 形态）。只存哈希，配置内容不进报警/档案 |
 | `thirdPartyBaseline` | `false`（hardened/paranoid 档开） | 第三方安装后完整性基线（0.2.6）：非官方包记录首装内容哈希，同版本内容变化 → red（可经 `acknowledgedPackageHashes` 豁免）。定位是变更检测而非信任锚；**不影响静态扫描**（第三方包仍要过 verdict） |
 | `denyOn` | `critical` | `mode: deny` 时的拦截阈值 |
+| `updateCheck` | `true` | 自动更新适配提示（0.4.1）。**离线层（零网络，永远在）**：运行中的 DSH 版本与本病 `package.json` → `dshCompat.tested` 比对，超出范围则盾牌「版本与适配」卡提示兼容性未验证（读不到版本 → `unknown`，绝不误报）。**在线层（24h 节流、fail-quiet）**：从 `registry.npmjs.org` 读最新 VET 声明的范围，**仅当**「确有更新版 **且** 该版声明覆盖本机 DSH」才提示可升级——还没发适配版时保持静默，不谎称有适配版。任何失败（断网/HTTP 错误/超大或畸形 body）一律静默。设 `false` 两层全关（纯离线部署）。出网目标未变（`registry.npmjs.org` 早已由 `registry-verify` 声明）；`deny` 模式抑制网络调用但保留离线层。刻意不做一键升级——面板只给事实 + 可复制命令 |
 | `allowlist` | `[]` | 包名/插件 id 白名单（跳过扫描） |
 | `runtimeGuard` | `off` | 运行时守卫（性能/稳定代价 opt-in）：`off` 关；`watch` 启用 T1 哨兵 + T2 钩子（alarm-only）**并唤醒 N7 确认拦截**（`confirmBlock` 默认 `block`，见下——`watch` 一旦开启即生效，含 `hardened`/`paranoid` 档与盾牌开关开启的情形） |
 | `runtimeIntervalMs` | `2000` | T1 哨兵 /proc 采样间隔 |
@@ -154,7 +184,7 @@ P15/P16/P17/G-2/G-5 一族在零用户操作下回到报警面。
 
 | 变量 | 默认值 | 用途 |
 |---|---|---|
-| `DSH_PLUGIN_VET_STORE_DIR` | `~/.dsh/vet` | **存储根（0.3.15）**：下列所有存储文件（capabilities / baseline / stats / scan-summaries / known-boundaries / official-catalog / forensics / contracts / audits / dismissed-alerts）都在其下；单独设了下面的分项变量时以分项为准 |
+| `DSH_PLUGIN_VET_STORE_DIR` | `~/.dsh/vet` | **存储根（0.3.15）**：下列所有存储文件（capabilities / baseline / stats / scan-summaries / known-boundaries / official-catalog / forensics / contracts / audits / dismissed-alerts / update-check）都在其下；单独设了下面的分项变量时以分项为准 |
 | `DSH_PLUGIN_VET_CACHE_DIR` | `<tmpdir>/dsh-plugin-vet-cache` | 静态扫描报告缓存（sha-256 键，0600 文件） |
 | `DSH_PLUGIN_VET_BASELINE_DIR` | `~/.dsh/vet` | 内容基线存储（`baseline.json`）+ N6 能力历史（`capabilities.json`）+ 版本快照 |
 | `DSH_PLUGIN_VET_ARCHIVE_DIR` | `~/.dsh/vet/audits` | 审计健康档案目录——`requireAudit` 在此查找 `<plugin>-<version>-<ts>.md` |
@@ -195,8 +225,9 @@ GUI 按 OBSIDIAN MOSS GOLD 设计稿换肤并重构为**层栈交互**（次级�
     - 工具链临时产物（tsc `<源名>.<pid>.<uuid>.tmpdir`、`*.tmp`、`*.temp`、`*.swp` 等）自动豁免——名字里的 secrets/credentials 只是被编译的源文件名，删它是清理不是破坏；父段照常判定（`~/.ssh/config.bak` 仍报警）。
 - **GUI 盾牌**：浏览器半区注册进 `conversation.session.header.actions`，轮询 /vet/status.json 显示绿/黄/红灯 + 报警计数。激活需 `dsh web` 重启（重启后 client-modules 才扫描到 `dsh.client` 声明）。
   - 交互：**可点击**——点击展开报警面板（**实时指标**：内存/CPU/I-O/子进程/fd；**守卫状态**：未开启时可一键写入 runtimeGuard: watch 配置（守卫即时生效并持久化，档位预设其余扩展键重启/热重载后生效）；**报警列表**含严重度/归因/**逐条建议**；最近扫描回显、刷新、更新时刻），外部点击自动关闭；有报警时盾牌旁显示计数徽标（绿/黄/红主题色，明暗自适应）。
-  - **单条忽略**：每条报警可点「忽略」——只影响展示（不再计入盾牌等级与计数），记录保留可随时「恢复」；报警停止后忽略自动失效，将来复发会重新可见（可再忽略）。忽略状态与报警存储同生命周期（重启即重置）。鉴权边界（P3-12 记录）：dismiss/restore 仅做同源校验（alarm-only 展示层风险——同源页面脚本可隐藏报警，但记录不删、不影响其他能力，体系内可接受）。
-  - **展示上限**：面板展示最近报警（最多 20 条）；存储为环形缓冲上限 20 条，同 id 60 秒内去重，24 小时 TTL 过期（持续触发会自然续期）——100 条不会全量展示，也无需展示（新报警会顶掉最旧的）。最近扫描回显（suspicious → 黄灯）同样按 24h TTL 过期（P3-2：一次可疑扫描不再永久黄，持续扫描自然续期）。
+  - **单条忽略**：每条报警可点「忽略」——只影响展示（不再计入盾牌等级与计数），记录保留可随时「恢复」；报警停止后忽略自动失效，将来复发会重新可见（可再忽略）。忽略状态**持久化**在 `~/.dsh/vet/dismissed-alerts.json`（0.2.1 起），重启不丢。鉴权边界（P3-12 记录）：dismiss/restore 仅做同源校验（alarm-only 展示层风险——同源页面脚本可隐藏报警，但记录不删、不影响其他能力，体系内可接受）。
+  - **扫描结论也可忽略（0.4.1）**：非 clean 的扫描结果现在落成**一等告警**（suspicious=黄、critical=红），不再由「最近扫描」隐式抬等级。文案把**证据放在最前**——命中已声明依赖的 OSV 公告时写「依赖 zod@4.4.3 命中 GHSA-…」而不是让人以为包自身代码有问题，官方包另附处置建议。当很多**官方包**带同一条公告时（0.2.1 有 54 个包钉同一个 `zod@4.4.3`），它们折叠成**一行**并带 `×N` 计数——上游修一次就够了，不该给用户 50 条通知；第三方包永不折进这一行。告警 id 带**证据指纹**：忽略只封住**这一组证据**（持久化），新公告 / 新依赖 / 规则集变化会生成新 id 重新变黄——一次忽略不会让你对新问题失明。官方聚合行按**公告集合**+依赖+结论折叠：同一个依赖上后来又出现第二条公告时，即使第一条已被忽略也会另起一行。同包重扫转 clean 撤销它那一份；别的包扫干净不会撤销它。
+  - **展示上限**：面板展示最近报警（最多 20 条）；存储为环形缓冲上限 20 条，同 id 60 秒内去重，24 小时 TTL 过期（持续触发会自然续期）——100 条不会全量展示，也无需展示（新报警会顶掉最旧的）。最近扫描回显自 0.4.1 起只作**展示**（结论本身已是告警，回显不再单独抬黄），同样按 24h TTL 过期（P3-2：一次可疑扫描不会永久黄，持续扫描自然续期）。
 
 ## 静态规则表（R1-R20）
 

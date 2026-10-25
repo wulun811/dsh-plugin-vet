@@ -94,7 +94,7 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 > the time is parsing/validating the profile's existing tree, not vet). Subsequent installs/updates take seconds
 > (validation results are reused).
 
-> **Compatibility**: vet targets DSH 0.1.0-rc.6+ (peers: `@deepseek-ai/cordis ^4.0.1`, dsh-* `^0.1.1-rc.1 || ^0.2.0-rc.1`;
+> **Compatibility**: vet targets DSH 0.1.0-rc.6+ (peers: `@deepseek-ai/cordis ^4.0.1`, dsh-* `^0.1.1-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.2`;
 > verified against npm-public `0.1.1-rc.2` in round-15 and re-verified against `0.1.5-rc.1`/`0.1.5-rc.2`/`0.1.7-rc.1`
 > since — the 0.1.7 sync added R12 array-form `dsh.bundle.patch` support and official-package artifact grading).
 > **0.3.16 (DSH 0.2.0-rc.1 sync)**: the peer range is now the union of both families — `^0.1.1-rc.1` expands to
@@ -105,6 +105,41 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 > dependencies — this is expected: profile templates set `autoInstallPeers: false`, and at runtime the packages
 > resolve from the DSH install closure (`$DSH_HOME/profiles/node_modules` fallback layer); you neither need nor
 > should install another copy of the cordis family in the profile.
+>
+> **0.4.1 (automatic update-adaptation notice)**: each release declares the DSH range it was verified against in
+> `package.json` → `dshCompat.tested` (0.4.1 declares `^0.1.1-rc.1 || ^0.2.0-rc.2 || ^0.2.1-rc.2`). The shield's *Version &
+> Compatibility* card shows two things. **Offline (always on, no network):** if the running DSH falls outside the
+> declared range, you get a warning that compatibility is unverified. **Online (at most once per 24 h):** vet asks
+> `registry.npmjs.org` for the latest VET's declared range and advertises an upgrade **only** when a newer version
+> exists *and* it declares coverage of your running DSH — if we have not shipped an adapted version, it stays
+> silent rather than claiming one exists. Set `updateCheck: false` for a fully offline deployment (or run
+> `mode: deny`, where egress is suppressed and only the offline layer remains). There is deliberately **no
+> one-click upgrade**: the panel shows the version, the declared range, a copyable `npm i -g` command, and the
+> data source. The card's **quiet state** ("verified for this DSH" / "up to date") auto-hides 20 minutes after
+> you first see it, since it carries no news — states with news (`out-of-range`, `update-available`) never hide.
+> After it collapses the same verdict is still available in the *About* panel. New network *destination*: none
+> (`registry.npmjs.org` was already declared); the new behaviour is periodic scheduling.
+>
+> **0.4.1 (DSH 0.2.1-rc.3 re-verification)**: DSH moved to the `0.2.1-rc.*` line while 0.4.1 was waiting for
+> release, so the declared range now ends at `^0.2.1-rc.2` and was tested against both `0.2.1-rc.2` (npm
+> `latest`) and `0.2.1-rc.3` (npm `next`). Two host changes touched vet's surface: `@deepseek-ai/dsh-invariants`
+> is gone from the 0.2.1 family (vet's package-level invariant was already a probe that no-ops when the service
+> is absent — its peer is now genuinely `optional`), and `@deepseek-ai/dsh-client-ui-slots` is no longer a
+> standalone client module (the `slots` service is provided by `dsh-client-ui-renderer`, so `dsh.client.inject`
+> names the renderer; `inject`/`register` and the `conversation.session.header.actions` key are unchanged).
+> Verified on the live host: `status.json` reports `dshVersion 0.2.1-rc.3` with `compat: ok`; before the range
+> update the same host reported `out-of-range`, which is the offline layer doing its job.
+>
+> **0.3.18 (DSH 0.2.0-rc.2 re-verification)**: the rc.1→rc.2 delta touching vet's surface is **additive-only**.
+> `@deepseek-ai/cordis` is untouched (still `4.0.4`); `dsh-tools`/`dsh-session`/`dsh-invariants`/
+> `dsh-client-ui-slots`/`dsh-client-locale` differ from rc.1 only in their `package.json` version;
+> `dsh-client-ui-conversation` adds six `ask.*` locale keys plus an equivalent `slots` refactor;
+> `dsh-llm` adds one `MessageSourceMap` member. The four packages vet patches at runtime
+> (`dsh-atomic-write`, `dsh-storage-json`, `dsh-config-editor`, `dsh-credentials-local`) are byte-identical,
+> so no denoise anchor moved. The declared peer range already admits `0.2.0-rc.2` (measured), and the
+> devDependencies now track it. Verified live on a 0.2.0-rc.2 host: 76 of 77 scan records are rc.2 and all
+> clean, and vet's client module is served inside the rc.2 plugin bundle. `@deepseek-ai/dsh-settings-file`
+> is still absent from this family (retired after `0.1.6-alpha.2`), matching vet's notes.
 >
 > **npm-public DSH (0.1.1-rc.2+)**: a profile loads plugins from `dsh.profile.bundles` in the profile's
 > `package.json` (boot composes bundle layers + `cordis.patch.yml` + `$DSH_HOME/cordis.patch.yml`). After
@@ -128,11 +163,12 @@ dsh plugin --profile <profile> add ./jieai-dsh-plugin-vet-<version>.tgz
 | `scannerTimeoutMs` | `15000` | Static-scan subprocess timeout |
 | `requireAudit` | `false` | Audit gate (opt-in, **third-party only** — official `@deepseek-ai/*` packages are governed by content-hash baseline + static scan instead, round-17): when enabled, loading a third-party plugin checks `~/.dsh/vet/audits/` for a health record — `report` mode logs a yellow `audit-required` alarm, `deny` mode blocks. Records are written to disk by hand by the agent following the `vet-audit-protocol` skill |
 | `rules` | `{}` (all on) | Per-rule switches (R1-R20; e.g. `{"R17": false}` disables the !!js config surface) |
-| `scanSurface` | all on | Static scan-surface switches (0.2.6, engine static-v14+, current static-v20): `configFiles` (cordis.yml/patch !!js detection, R17), `instructionFiles` (instruction/skill injection observation, R18); disabling only affects the new surfaces, the legacy surface keeps scanning |
+| `scanSurface` | all on | Static scan-surface switches (0.2.6, engine static-v14+, current static-v26): `configFiles` (cordis.yml/patch !!js detection, R17), `instructionFiles` (instruction/skill injection observation, R18); disabling only affects the new surfaces, the legacy surface keeps scanning |
 | `observeLoopback` | `true` | Local-API loopback observation (0.2.6 default off; **0.3 default on** — loopback + control-plane path + third-party attribution, official attribution exempt, yellow dismissible): when on, plugin requests to 127.0.0.1 enter the N3 ledger, and hits on DSH control-plane paths (/api/, session.*, /plugins/) attributed to third-party plugins raise a yellow `loopback-control` observation (alarm-only, dismissible). Observation is not a fix — RPC auth is a dsh-side concern |
 | `telemetryDiff` | `true` | Telemetry config sensitization (0.2.6): periodically hashes telemetry exporter url/mode fields in profile config; cold start records only; host change → yellow (requires restart verification, G-3 shape). Hashes only — config content never enters alarms/archive |
 | `thirdPartyBaseline` | `false` (on under hardened/paranoid) | Third-party post-install integrity baseline (0.2.6): records first-install content hash for non-official packages; same-version content change → red (exempt via `acknowledgedPackageHashes`). Change-detection, not a trust anchor; the static scan still runs regardless |
 | `denyOn` | `critical` | Blocking threshold in `mode: deny` |
+| `updateCheck` | `true` | Automatic update-adaptation notice (0.4.1). **Offline layer (always on, zero network):** the running DSH version is compared against this release's `package.json` → `dshCompat.tested`; outside that range the shield's *Version & Compatibility* card warns that compatibility is unverified (an unreadable version yields `unknown`, never a false warning). **Online layer (throttled to once per 24 h, fail-quiet):** the latest VET's declared range is read from `registry.npmjs.org` and an upgrade is advertised **only** when a newer version exists *and* it declares coverage of the running DSH — if no adapted version has been published, it stays silent rather than claiming one exists. Any failure (offline, HTTP error, oversized/malformed body) is silent. Set `false` to disable **both** layers for a fully offline deployment. Egress destination is unchanged (`registry.npmjs.org` was already declared by `registry-verify`); `deny` mode suppresses the network call while keeping the offline layer. There is deliberately no one-click upgrade — the panel shows facts plus a copyable command |
 | `allowlist` | `[]` | Package/plugin-id allowlist (skip scanning) |
 | `runtimeGuard` | `off` | Runtime guard (performance/stability cost, opt-in): `off` = disabled; `watch` enables the T1 sentinel + T2 hooks (alarm-only) **plus the N7 confirmation block** (`confirmBlock` defaults to `block` — see below; wakes whenever `watch` is on, incl. via the `hardened`/`paranoid` tiers) |
 | `runtimeIntervalMs` | `2000` | T1 sentinel /proc sampling interval |
@@ -199,7 +235,7 @@ directory — running vet's own test suite can no longer write your real store.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DSH_PLUGIN_VET_STORE_DIR` | `~/.dsh/vet` | **Base root (0.3.15)** for every store file below (capabilities / baseline / stats / scan-summaries / known-boundaries / official-catalog / forensics / contracts / audits / dismissed-alerts). Per-file variables below still win when set |
+| `DSH_PLUGIN_VET_STORE_DIR` | `~/.dsh/vet` | **Base root (0.3.15)** for every store file below (capabilities / baseline / stats / scan-summaries / known-boundaries / official-catalog / forensics / contracts / audits / dismissed-alerts / update-check). Per-file variables below still win when set |
 | `DSH_PLUGIN_VET_CACHE_DIR` | `<tmpdir>/dsh-plugin-vet-cache` | Static-scanner report cache (sha-256 keyed, 0600 files) |
 | `DSH_PLUGIN_VET_BASELINE_DIR` | `~/.dsh/vet` | Content-baseline store (`baseline.json`) + N6 capability history (`capabilities.json`) + version snapshots |
 | `DSH_PLUGIN_VET_ARCHIVE_DIR` | `~/.dsh/vet/audits` | Audit health records — where `requireAudit` looks for `<plugin>-<version>-<ts>.md` |
@@ -310,15 +346,29 @@ discipline as vet_label); the "blocked" mark comes from the N7 family-1 list.
     shield (green/yellow/red theme color, light/dark adaptive).
   - **Per-item dismiss**: each alarm can be "dismissed" — display-only (no longer counts toward shield level
     or count), the record is kept and can be "restored"; a dismissed alarm auto-expires once the alarm stops,
-    so a recurrence is visible again (and can be dismissed again). Dismiss state shares the alarm store's
-    lifecycle (resets on restart). Auth boundary (P3-12 recorded): dismiss/restore only do same-origin
+    so a recurrence is visible again (and can be dismissed again). Dismiss state is **persisted** to
+    `~/.dsh/vet/dismissed-alerts.json` (0.2.1+), so it survives restarts. Auth boundary (P3-12 recorded):
+    dismiss/restore only do same-origin
     validation (alarm-only display-layer risk — a same-origin page script could hide alarms, but records
     aren't deleted and nothing else is affected; acceptable within the system).
+  - **Scan verdicts are dismissible too (0.4.1)**: a non-clean scan result becomes a first-class alarm
+    (yellow for `suspicious`, red for `critical`) instead of implicitly raising the shield through the
+    "last scan" echo. The message names the evidence — for an OSV hit on a declared dependency it says
+    *"dependency zod@4.4.3 hits GHSA-…"* rather than implying the package's own code is bad — and notes
+    when the package is official. When many **official** packages carry the same advisory (0.2.1: 54 of them
+    pin the same `zod@4.4.3`) they collapse into **one** row with a `×N` count, so the fix upstream is one
+    notification rather than fifty; third-party packages are never folded into that row. The alarm id carries
+    an evidence fingerprint, so dismissing silences **that** evidence (persisted), while a new advisory, a new
+    dependency or a changed rule set produces a new id and re-alerts: one dismiss never blinds you to a
+    different problem. The aggregated official row folds on the **set** of advisories plus the dependency and
+    the verdict, so a second advisory on the same dependency starts a new row even after the first was
+    dismissed. A clean re-scan of a package retracts its share of the verdict; an unrelated package
+    scanning clean does not.
   - **Display caps**: the panel shows the most recent alarms (at most 20); the store is a ring buffer capped at 20, deduped
     per id within 60s, 24h TTL (sustained triggers naturally renew) — 100 alarms are not displayed in full,
-    and needn't be (new alarms push out the oldest). Recent-scan echo (suspicious → yellow) also expires on
-    the 24h TTL (P3-2: one suspicious scan no longer turns the shield permanently yellow; sustained scanning
-    renews naturally).
+    and needn't be (new alarms push out the oldest). The recent-scan echo is **display-only** since 0.4.1 —
+    it no longer raises the shield by itself (a verdict is an alarm now) — and it expires on the same 24h TTL
+    (P3-2: one suspicious scan never turns the shield permanently yellow; sustained scanning renews naturally).
 
 ## Static rule table (R1-R20)
 

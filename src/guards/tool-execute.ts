@@ -75,7 +75,16 @@ export function installToolExecuteGuard(ctx: Context, config: VetConfig, status?
       const request: ScanRequest = { kind: 'code', language: 'js', runtime: p.runtime, code: p.code }
       const res = await scan(request, { timeoutMs: config.scannerTimeoutMs })
       if (res.ok && res.report !== undefined) {
-        status?.noteScan({ pluginName: exec.name, verdict: res.report.verdict, staticScore: res.report.staticScore, at: Date.now() })
+        // 0.4.1：工具执行的代码同样落成可忽略告警（subject='tool' 让文案说清是「工具代码」，
+        // 而不是把工具名当成插件名）。rules 供指纹与展示；code 通道没有 package.json，无 OSV。
+        status?.noteScan({
+          pluginName: exec.name,
+          verdict: res.report.verdict,
+          staticScore: res.report.staticScore,
+          at: Date.now(),
+          subject: 'tool',
+          rules: [...new Set((res.report.findings ?? []).map(f => f.rule))],
+        })
         // round-5 review（A#15）：扫描器协议漂移出现未知 verdict 时 RANK 查表为
         // undefined——`undefined > RANK[worst]` 恒 false，deny 判定静默失效（fail-open）
         // 且无任何日志。未知 verdict 视为扫描结果不可信，走与 scanFailed 相同的

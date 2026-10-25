@@ -1,9 +1,18 @@
 /**
  * vet 盾牌状态聚合器（D22）：T1/T2 运行时报警与扫描回显的统一收口。
  * alarm-only：只记录与暴露状态，绝不产生任何拦截/杀进程/卸载行为（PLAN §2.1 D21）。
- * level 派生：任一 red 报警 → red；任一 yellow 报警或最近扫描 suspicious → yellow；否则 green。
+ * level 派生：任一 red 存活报警 → red；任一 yellow 存活报警 → yellow；否则 green。
+ * 扫描结论（0.4.1 起）走 `noteScan` → 显式 scan-verdict 告警：可读、可忽略、可跨重启持久化。
+ * 旧实现用 lastScan 隐式抬升 level——用户看得到黄、却没有任何可忽略的条目（0.2.1 官方包
+ * 命中上游 zod 漏洞时就是这种「黄得没有出路」的状态）。
  */
 import { isPersistentlyDismissed, persistentlyDismiss, restorePersistentDismissal } from './dismissed-alerts.js'
+import { scanVerdictAlarm, scanVerdictSubjectTag, type ScanVerdictEcho } from './scan-verdict.js'
+
+/** 按公告聚合的结论告警 id 前缀（`scan-verdict:agg:osv:<公告>:<依赖>:<结论>`）。
+ * 与对象行（`scan-verdict:plugin:<name>:…` / `scan-verdict:tool:<name>:…`）结构不相交，
+ * 「是不是聚合行」由前缀判断而非猜名字——否则一个叫 `osv` 的包就与聚合行撞命名空间。 */
+const AGGREGATE_PREFIX = 'scan-verdict:agg:'
 export type ShieldLevel = 'green' | 'yellow' | 'red'
 export type AlarmSeverity = 'yellow' | 'red' | 'info'
 export type AlarmSource = 't1' | 't2' | 'scan'
@@ -31,12 +40,8 @@ export interface VetAlarm {
   at: number
 }
 
-export interface ScanEcho {
-  pluginName: string
-  verdict: string
-  staticScore: number
-  at: number
-}
+/** 扫描回显：结论 + 证据（规则码 / OSV 坐标），告警文案与指纹都由 `scan-verdict.ts` 生成。 */
+export interface ScanEcho extends ScanVerdictEcho {}
 
 export interface VetStatusSnapshot {
   level: ShieldLevel
@@ -47,8 +52,7 @@ export interface VetStatusSnapshot {
   lastScan?: ScanEcho
 }
 
-export interface VetStatusOptions {
-  /** 报警环形缓冲上限（默认 20）。 */
+export interface VetStatusOptions {  /** 报警环形缓冲上限（默认 20）。 */
   alarmMax?: number
   /** 同 id 报警去重窗口 ms（默认 60s）。 */
   dedupeWindowMs?: number
@@ -71,6 +75,8 @@ export class VetStatus {
   private readonly alarms: VetAlarm[] = []
   /** 用户主动忽略的报警 id（alarm-only 的延伸：报警可以「看不见」，但从不被 vet 删除）。 */
   private readonly dismissedIds = new Set<string>()
+  /** 聚合行 id → 仍支撑它的包名集合（全部转 clean 时整行撤销，不必等 TTL）。 */
+  private readonly groupMembers = new Map<string, Set<string>>()
   private lastScanValue: ScanEcho | undefined
 
   constructor(options: VetStatusOptions = {}) {
@@ -99,6 +105,10 @@ export class VetStatus {
     // 0.3.9：内存键可能存的是 mergeKey（见 dismiss 修复）——按 id **或** mergeKey 匹配保留。
     for (const id of [...this.dismissedIds]) {
       if (!this.alarms.some(a => a.id === id || (a.mergeKey ?? a.id) === id)) this.dismissedIds.delete(id)
+    }
+    // 聚合行的成员集合跟着告警一起淘汰，避免 Map 无限增长。
+    for (const id of [...this.groupMembers.keys()]) {
+      if (!this.alarms.some(a => a.id === id)) this.groupMembers.delete(id)
     }
   }
 
@@ -150,6 +160,21 @@ export class VetStatus {
     // 展示层按 isDismissed（内存 ∪ 持久化）折叠进「已忽略」区——忽略 = 折叠 + 不参与
     // level/alarmCount，但记录保留且可恢复；量级最坏 = 已忽略区一条（mergeKey 聚合）。
     const groupKey = alarm.mergeKey ?? alarm.id
+    // 忽略是对「当时那条观察」的答复，不是对升级的预先批准：同一合并键把严重度升到 red 时
+    // 解除折叠并撤销持久化忽略。少了这一步，一次「忽略」会把 mergeKey 恒定的桶永久封住
+    // （升级提示升级成 red 能力变更、n3 外泄、canary 命中都走同一个桶），盾牌仍是绿的。
+    if (alarm.severity === 'red') {
+      // 只在**观察到升级**时解除折叠：同一条已忽略的红牌再次复报仍按原语义保持折叠（否则
+      // 一次忽略会被下一次复报立刻推翻，用户永远消不掉）；而没有存活行的（TTL 过期后重来）
+      // 也不动——没有可比对的旧等级，按 0.2.1 起的既有语义保持忽略。
+      const row = this.alarms.find(a => (a.mergeKey ?? a.id) === groupKey)
+      if (row !== undefined && row.severity !== 'red') {
+        for (const key of new Set([groupKey, row.mergeKey ?? row.id])) {
+          this.dismissedIds.delete(key)
+          if (isPersistentlyDismissed(key)) restorePersistentDismissal(key)
+        }
+      }
+    }
     const matchGroup = (a: VetAlarm): boolean => (a.mergeKey ?? a.id) === groupKey
     const recent = this.alarms.find(a => matchGroup(a) && now - a.at < this.dedupeWindowMs)
     if (recent !== undefined) {
@@ -196,9 +221,104 @@ export class VetStatus {
     }
   }
 
-  /** 记录一次扫描回显（suspicious 会把盾牌抬到 yellow）。 */
+  /**
+   * 记录一次扫描回显：结论 → 显式告警（suspicious=yellow / critical=red），
+   * clean → 撤销该对象仍存活的结论告警并回绿。
+   *
+   * 0.4.1：以前这里只写 lastScanValue，由 snapshot() 隐式抬 level。结果是盾牌变黄却
+   * 没有一条可点「忽略」的告警——面对「官方包命中上游依赖 CVE」这类无法靠用户行动
+   * 消解的情况，用户只能在永久黄和改代码之间选。现在结论本身就是告警，走既有折叠/
+   * 持久化语义：忽略后不参与 level，且跨重启有效。
+   */
   noteScan(echo: ScanEcho): void {
     this.lastScanValue = echo
+    const alarm = scanVerdictAlarm(echo)
+    const tag = scanVerdictSubjectTag(echo)
+    if (alarm === null) {
+      this.clearScanVerdict(echo.pluginName, tag)
+      return
+    }
+    this.record({
+      id: alarm.id,
+      severity: alarm.severity,
+      source: 'scan',
+      kind: alarm.kind,
+      message: alarm.message,
+      target: echo.pluginName,
+      pluginHint: echo.pluginName,
+      // 证据即身份：同一组证据折叠为一行（含 count 累计）；证据变化 → 新 id → 重新提醒。
+      mergeKey: alarm.id,
+      at: echo.at,
+    })
+    // 成员登记必须在 record **之后**：record 开头就 expire()，而 expire() 会丢掉「没有对应
+    // 告警行」的成员集合——先登记再 record，首条聚合行刚建好就被清空（实测后果：单成员转
+    // clean 撤不掉行，多成员乱序 clean 会提前撤行 → 仍受影响的包漏报）。
+    this.anchorGroup(echo.pluginName, tag, alarm.id)
+  }
+
+  /**
+   * 登记「这个对象当前由哪条结论支撑」。
+   * - 先脱离所有**旧**聚合行（结论 id 变了，例如从「依赖命中」转为「自身命中」），否则旧行
+   *   会一直把它算作成员，直到 24h TTL；
+   * - 再挂到当前行（仅聚合行），并把 count 校正为**仍受影响的包数**。record 的 count 累计受
+   *   60s 去重窗口约束（0.2.1 的 54 个包扫过一分钟就会重置成 1，面板于是显示「多个官方包」
+   *   却没有 ×N）；成员集合是去重后的名字，天然是准确口径。
+   */
+  private anchorGroup(pluginName: string, tag: 'plugin' | 'tool', alarmId: string): void {
+    // 证据换了但仍非 clean（新公告、依赖升级后另有问题）→ 旧行立刻撤掉，不留到 TTL。
+    this.dropStaleVerdicts(pluginName, tag, alarmId)
+    for (const [id, members] of [...this.groupMembers]) {
+      if (id === alarmId) continue
+      if (!members.delete(pluginName)) continue
+      if (members.size > 0) continue
+      this.groupMembers.delete(id)
+      const idx = this.alarms.findIndex(a => a.id === id)
+      if (idx >= 0) this.alarms.splice(idx, 1)
+    }
+    if (!alarmId.startsWith(AGGREGATE_PREFIX)) return
+    const members = this.groupMembers.get(alarmId) ?? new Set<string>()
+    members.add(pluginName)
+    this.groupMembers.set(alarmId, members)
+    const row = this.alarms.find(a => a.id === alarmId)
+    if (row !== undefined) row.count = members.size
+  }
+
+  /**
+   * 撤掉这个对象**仍然存活**的旧结论行（`scan-verdict:<name>:*`），保留 `keepId`。
+   * 证据变了但仍非 clean（换了一条公告、依赖升级后还有别的问题）时用得到——否则旧行会一直
+   * 留到 24h TTL：面板上同一个包两行，且旧行还点着已经修好的那条公告。
+   * 已忽略的行不撤：它不参与 level，留在「已忽略」区供恢复/审计。
+   */
+  private dropStaleVerdicts(pluginName: string, tag: 'plugin' | 'tool', keepId?: string): void {
+    const prefix = `scan-verdict:${tag}:${pluginName}:`
+    for (let i = this.alarms.length - 1; i >= 0; i--) {
+      const alarm = this.alarms[i]
+      if (alarm.id === keepId || !alarm.id.startsWith(prefix)) continue
+      if (this.isDismissed(alarm.mergeKey ?? alarm.id)) continue
+      this.alarms.splice(i, 1)
+    }
+  }
+
+  /**
+   * 撤销某对象**仍存活**的扫描结论告警（重扫转 clean 时调用）。
+   * 逐包告警若已被用户忽略则保留：它不参与 level，留在「已忽略」区供恢复/审计。
+   * 聚合行按「成员」撤销：最后一个成员也转 clean 时才移除整行——此时证据已经消解，不再
+   * 区分是否被忽略（没有可恢复的对象，留着只会让「已忽略」区堆一条已解决的历史）。
+   */
+  private clearScanVerdict(pluginName: string, tag: 'plugin' | 'tool'): void {
+    this.dropStaleVerdicts(pluginName, tag)
+    for (const [id, members] of [...this.groupMembers]) {
+      if (!members.delete(pluginName)) continue
+      if (members.size === 0) {
+        this.groupMembers.delete(id)
+        const idx = this.alarms.findIndex(a => a.id === id)
+        if (idx >= 0) this.alarms.splice(idx, 1)
+        continue
+      }
+      // 计数口径 = 仍受影响的包数（见 anchorGroup）：成员退场时同步校正。
+      const row = this.alarms.find(a => a.id === id)
+      if (row !== undefined) row.count = members.size
+    }
   }
 
   snapshot(): VetStatusSnapshot {
@@ -215,14 +335,16 @@ export class VetStatus {
     }
     const active = this.alarms.filter(a => !isFold(a))
     const dismissed = this.alarms.filter(a => isFold(a))
-    // P3-2：lastScan 加 TTL（复用 alarmTtlMs）——一次 suspicious 扫描不再让盾牌永久 yellow，
-    // 插件已移除/长时间未再扫描时自动恢复 green。持续扫描会不断刷新 at，天然续期。
+    // P3-2：lastScan 加 TTL（复用 alarmTtlMs）——只作「最近扫描」展示回显，不再参与 level；
+    // 插件已移除/长时间未再扫描时自动从快照消失。持续扫描会不断刷新 at，天然续期。
     const lastScan = this.lastScanValue !== undefined && now - this.lastScanValue.at < this.alarmTtlMs
       ? this.lastScanValue
       : undefined
+    // level 只看存活且未被忽略的告警（0.4.1）——扫描结论已由 noteScan 落成告警，
+    // 若仍让 lastScan 直接抬 level，则「忽略」对黄牌永远无效（用户实测的问题）。
     const level: ShieldLevel =
       active.some(a => a.severity === 'red') ? 'red'
-      : (active.some(a => a.severity === 'yellow') || (lastScan !== undefined && lastScan.verdict !== 'clean')) ? 'yellow'
+      : active.some(a => a.severity === 'yellow') ? 'yellow'
       : 'green'
     // 0.3.3（P1 双层通道，用户警报疲劳反馈）：alarmCount 只计「可行动风险」（yellow/red）——
     // info 观察（官方包 C2 边界等 capability/coverage 类）不参与警报计价与 level，但保留在

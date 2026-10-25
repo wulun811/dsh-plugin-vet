@@ -20,6 +20,7 @@ import type { VetStatus } from '../guard/status.js'
 import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline, consumeBaselineTamper, setRecordSuspected, isRecordSuspected } from './content-baseline.js'
 import { verifyAgainstRegistry } from './registry-verify.js'
 import { isOfficialPackageName, refreshOfficialCatalogFromRegistry } from './official-catalog.js'
+import { parseOsvEvidence } from '../guard/scan-verdict.js'
 
 /** typert loader 为 Fiber 附加的 entry 元数据（loader.ts:412 同款访问）。 */
 type VetFiber = Fiber & { entry?: { options?: { name?: string } } }
@@ -725,10 +726,44 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       }
       const { verdict, staticScore } = res.report
       ctx.logger.info(`vet: auto-scan ${entryName} → ${verdict} (${staticScore})`)
-      status?.noteScan({ pluginName: entryName, verdict, staticScore, at: Date.now() })
+      const findingsAll = res.report.findings ?? []
+      // 0.4.1：扫描结论落成**可忽略告警**（status.noteScan → scan-verdict），并带上证据：
+      // 规则码 + OSV 坐标。命中直接依赖时 scanner 把 `dependency=zod@4.4.3` 写进 evidence，
+      // 告警因此能直接说「依赖 zod 命中 GHSA-…」——用户看得懂，才谈得上判断要不要忽略。
+      // 一个包可能同时命中多条公告（checkOsv 最多 10 条）：**全量** id 进指纹与聚合键，
+      // 文案只点排序后的第一条、其余以「等 N 条」表示——只取第一条会让第二条在忽略后消失。
+      const osvHits = findingsAll
+        .filter(f => f.rule === 'OSV')
+        .map(f => ({ finding: f, evidence: parseOsvEvidence(f.evidence) }))
+      const osvIds = [...new Set(osvHits
+        .map(h => h.evidence.id)
+        .filter((id): id is string => id !== undefined && id !== ''))].sort()
+      const osvPrimary = osvHits.find(h => h.evidence.id === osvIds[0]) ?? osvHits[0]
+      // 依赖坐标只在**全部命中落在同一个依赖上**时才代表这一行。审查实测反例：两条公告分属
+      // lodash@4.17.20 与 zod@4.4.3 时，取「字典序第一条公告的依赖」会把 zod 的公告说成
+      // 「依赖 lodash 命中」——恰好答错用户唯一要问的问题（该升哪个依赖）。多依赖时宁可不点名。
+      const osvDeps = [...new Set(osvHits
+        .map(h => h.evidence.dependency)
+        .filter((d): d is string => d !== undefined && d !== ''))]
+      const osvDependency = osvDeps.length === 1 ? osvDeps[0] : undefined
+      status?.noteScan({
+        pluginName: entryName,
+        verdict,
+        staticScore,
+        at: Date.now(),
+        rules: [...new Set(findingsAll.map(f => f.rule))],
+        ...(osvPrimary !== undefined ? { osv: osvPrimary.finding.message } : {}),
+        ...(osvIds.length > 0 ? { osvIds } : {}),
+        ...(osvDependency !== undefined ? { osvDependency } : {}),
+        ...(osvPrimary?.evidence.id !== undefined ? { osvId: osvPrimary.evidence.id } : {}),
+        ...(osvPrimary?.evidence.alias !== undefined ? { osvAlias: osvPrimary.evidence.alias } : {}),
+        ...(officialTrustedFamily ? { official: true } : {}),
+        // 官方包 + 依赖命中：同一条公告折叠成一行。实测 0.2.1 有 54 个官方包钉同一个
+        // zod@4.4.3——逐包一行会一次刷满 20 槽缓冲，且每行都要单独忽略。第三方包不聚合。
+        ...(officialTrustedFamily && osvDependency !== undefined ? { aggregate: true } : {}),
+      })
       // P2：扫描摘要留档（详情页规则墙/OSV 行 + 「最近插件」列表数据源）。
       // 变化才落盘（verdict/版本/规则码集合），同版同结论重扫不重写（防写放大）。
-      const findingsAll = res.report.findings ?? []
       recordScanSummary({
         name: entryName,
         ...(installedVersion !== undefined ? { version: installedVersion } : {}),
@@ -757,8 +792,8 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           })
         }
       }
-      // 0.1.20：防御统计——扫描计数
-      incrementScanned()
+      // 0.1.20：防御统计——扫描计数（0.3.18 起按包名去重，统计实际覆盖的插件数）
+      incrementScanned(entryName)
       // N1：注册静态能力清单（声明侧）——T2 观测与此对账，差分出隐藏能力
       capabilityDiff.registerStatic(entryName, res.report.capabilities)
       // N6：版本行为差分——同名异版清单对比，新增敏感能力 → info(蓝)/red 报警（首次记录只存不报）

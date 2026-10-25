@@ -3,6 +3,292 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.4.1] - 2026-10-25
+
+> 0.4.0 was an internal pre-release number that never reached npm; 0.4.1 is its first public release.
+
+Automatic update-adaptation notice, in two layers, plus a shield fix that makes a scan verdict answerable.
+**No rule or verdict change** — rule set and thresholds are untouched (`static-v26`, same as 0.3.13–0.3.18).
+
+### Added — "this DSH is newer than what VET was verified against" is now visible
+
+The gate is deliberately **not** "DSH released a new version". It is: *does the newest VET on the registry
+declare that it has been verified against the DSH you are running?* That formulation satisfies both
+requirements at once — when we have not shipped an adapted version the panel stays silent (it never claims an
+adapted version exists); when we have, users on an older VET are told so.
+
+- **Offline compatibility layer (no network, always on).** Each release declares the DSH range it was verified
+  against in a new `dshCompat.tested` field. At runtime vet reads the host DSH version and, if it falls outside
+  that range, shows a panel warning that compatibility is unverified. This is the higher-value half: it works
+  with no network at all.
+- **Online layer (throttled, fail-quiet).** At most once per 24 h, on the shield's existing 5 s poll, vet asks
+  `registry.npmjs.org` for the latest VET's `dshCompat.tested`. An upgrade is advertised **only** when a newer
+  version exists *and* it declares that it covers the running DSH. Any failure — offline, HTTP error, oversized
+  or malformed body — is silent and never fabricates urgency.
+- **`dshCompat` is a dedicated field, not `peerDependencies`.** The peer range only expresses module-API
+  dependencies: measured across 0.3.16/0.3.17/0.3.18 it is byte-identical, and `0.2.0-rc.2` already satisfies
+  it — so "peers satisfied" can neither prove nor detect adaptation. Vet's real boundary also includes
+  `cordis.patch.yml` insert-row-id semantics, the client slot contract, and denoise patch anchors, none of
+  which peers cover.
+- The **offline layer stays live in `deny` mode**; only the network call is suppressed (report-only egress,
+  same P2-7 constraint as the rest of vet). `updateCheck: false` disables both layers.
+- **The quiet state auto-hides after 20 minutes.** The card's steady state ("verified for this DSH" /
+  "up to date") says the same thing every time, so it is a one-off notice rather than a live gauge: it is shown
+  for 20 minutes from when it was **first seen** (tracked in `localStorage`, so it survives reloads and host
+  restarts), then collapses and stops occupying the main panel. The states that carry actual news —
+  `out-of-range` (compatibility unverified) and `update-available` — **never** auto-hide, are unaffected by the
+  window, and still appear when storage is unavailable (private mode / quota / disabled), so a storage failure
+  can never swallow a real warning. The message signature deliberately excludes `latestVersion`, so a
+  registry-side bump that does not change the card's content cannot re-pop it. Collapsing loses no information:
+  the same verdict stays reachable from the *About* panel, which renders the **same** presentation object as the
+  card (single source, so the two cannot drift).
+- Zero new egress destinations: `registry.npmjs.org` is already in vet's declared-host list (from
+  `registry-verify.ts`). The **new** behaviour is periodic scheduling.
+
+### Added — `src/guard/update-card.ts` (quiet-window policy, shared by client and tests)
+
+The hide policy is a pure, DOM-free module so that the server-side tsconfig (which has no DOM lib) and the
+client build can both compile it, and so unit tests can drive it directly — the same single-source discipline
+as `guard/shield-shape.ts`. It owns three things: `isUpdateNews` (which states never hide),
+`updateCardSignature` (what counts as "the same message"), and `updateCardPresentation` (label/note/accent
+selection, so the main card and the About panel cannot render different text for the same state).
+
+### Added — `src/guard/dsh-compat.ts`, a zero-dependency semver subset
+
+vet deliberately carries **no** runtime `semver` dependency (see `version-diff.ts`), so range evaluation is a
+minimal implementation supporting `||`-separated AND groups with `^ ~ >= > <= < =` and bare versions, including
+npm's prerelease gate. It is **differentially tested against `semver@7`**: 4,160 generated cases plus an
+edge-case pass (2,490 more) agree with npm, the single deliberate divergence being malformed input
+(`'^0.2.0-rc.2 ||'`) where npm's own `satisfies` and `validRange` disagree with each other.
+
+### Added — `src/guard/update-check.ts`
+
+Host-version detection uses `ctx.baseUrl` (the profile directory) as its primary anchor, then `process.argv[1]`,
+then an upward `package.json` walk, then vet's own location; every anchor failing yields `''` and **never** an
+"out of range" verdict, so the offline layer cannot produce false alarms. Throttling state and the last remote
+answer persist atomically (0600) to `~/.dsh/vet/update-check.json`.
+
+### Security — no one-click upgrade, by design
+
+The panel shows the version, the declared verified range, a **copyable** command, and the data source. It
+deliberately provides no upgrade button: upgrading would require vet to write its own install directory and
+spawn `npm`, a large new attack surface for a security plugin, and the common install shape here is a symlink
+(`profiles/web/node_modules/@jieai/dsh-plugin-vet -> ~/1q/plugin-vet`) where an "upgrade" would be meaningless.
+The source line (`registry.npmjs.org`) is shown so an upgrade prompt cannot be used as a phishing surface.
+
+### Fixed — pre-release review pass
+
+A full re-read of the new surface (rather than of the test results) turned up three defects and a few
+documentation drifts, all corrected before release:
+
+- **Symlink-safe store write.** `savePersisted` used a bare `writeFileSync` on a temp name containing a fixed
+  PID. A same-user process could pre-plant `update-check.json.tmp.<pid>` as a symlink to an arbitrary target,
+  and the default `'w'` flag follows links — the JSON would be written straight through, destroying the target.
+  It now uses `writeTmpExclusive` (exclusive `'wx'` create, retried after unlinking a pre-planted entry),
+  the same discipline every other vet store writer already follows (`scan-summaries`, `stats`, `version-diff`,
+  `known-boundaries`, `official-catalog`, `content-baseline`, and the 0.3.9 SEC-5 fix in `status-route`).
+  In practice the payload is small and non-secret, but the inconsistency was a real defect and the fix is free.
+- **Removed a dead export.** `peekUpdateView()` had no caller anywhere (not in `src/`, `test/`, `scripts/`,
+  or the client bundle) and kept a write-only `lastView` module variable alive. Both are gone;
+  `getUpdateView()` remains the single entry point.
+- **Added the missing `status.json` wiring tests.** The changelog asserted "deny mode ⇒ zero fetches", but no
+  test exercised the route. Four tests now drive the real `registerStatusRouteOnce` handler: `update` present
+  under default config, absent under `updateCheck: false`, still present in `deny` mode with the fetch count
+  measured at **0**, and one genuine dispatch once the throttle window has elapsed.
+- **Honesty fix in the card's own copy (found in the same pass).** The `uptodate` presentation branch is
+  reachable *only* when compatibility is **not** determinable (the offline layer already returns
+  `out-of-range` and `ok` before it), yet it reused the "up to date **and verified against DSH …**" sentence —
+  so an unknown state was rendered as a verified one, and with an unreadable DSH version the placeholder came
+  out empty ("verified against DSH ."). It now uses a dedicated honest string that says VET is current but the
+  verification status could not be confirmed. The original text was preserved faithfully from the pre-0.4.1
+  implementation and had been locked in by a test asserting the wrong behaviour; that assertion is replaced.
+- **Documentation drift.** `scanSurface` still claimed `current static-v20` (the engine is `static-v26`, and has
+  been since 0.3.13) in both READMEs; `updateCheck` was missing from the Config table; the store-file lists did
+  not mention `dismissed-alerts` or `update-check`; and `docs/ARCHITECTURE.md` had no entry for the new store
+  file or the `status.json` → `update` field. All corrected.
+
+### Changed — DSH 0.2.1 re-verification
+
+DSH moved to the `0.2.1-rc.*` line while 0.4.1 was waiting for release. `dshCompat.tested` is now
+`^0.1.1-rc.1 || ^0.2.0-rc.2 || ^0.2.1-rc.2`, covering both `0.2.1-rc.2` (npm `latest`) and `0.2.1-rc.3`
+(npm `next`, the version this round was run against). Each was installed as the devDependency tree and passed
+the full gate — typecheck against its declarations and 1,284 tests — before the range was written. The extra
+range is needed because `^0.2.0-rc.2` cannot admit a `0.2.1-rc.*` version: npm's prerelease gate only lets a
+prerelease through when a comparator shares its `major.minor.patch`. Two host changes touched vet's surface:
+
+- **`@deepseek-ai/dsh-invariants` was removed from the DSH family in 0.2.1.** No package in the 306-package
+  install closure references it. vet's package-level invariant was already a probe that returns early when
+  `ctx.invariants` is absent (the service is optional in cordis), so nothing changes at runtime; the peer is
+  now `optional` and no longer a devDependency, so a profile install does not pull a copy of a package the
+  host no longer ships.
+- **`@deepseek-ai/dsh-client-ui-slots` is no longer a standalone client module.** The 0.2.1 boot graph has 71
+  module ids and no `dsh-client-ui-slots`; the `slots` service is provided by `dsh-client-ui-renderer`, which
+  re-exports the same `SlotRegistry`. `dsh.client.inject` now names the renderer. The surface vet uses is
+  unchanged: `inject(key, cb)` / `register(spec, component)` keep their signatures and
+  `conversation.session.header.actions` is still declared by `dsh-client-ui-conversation`.
+
+Everything else vet imports moved compatibly: `dsh-tools` drops the unused `ToolPresentationMode: 'both'`
+member, and the rest of the diff in `dsh-tools`/`dsh-session`/`dsh-llm` is documentation. Typecheck against the
+rc.3 declarations is clean, and no call site changed. Verified on the live host: `status.json` now reports
+`dshVersion: 0.2.1-rc.3` with `compat: ok`; before the range update the same host reported `out-of-range`,
+which is exactly the offline layer doing its job.
+
+### Fixed — a scan verdict is now a notification you can actually answer
+
+The 0.2.1 re-verification exposed a dead end that had existed since the first scan echo: **the shield could turn
+yellow with nothing to dismiss.** On this host several official packages pin `zod@4.4.3`, a version genuinely
+affected by `GHSA-mrhx-c7xc-m3w5` / `CVE-2023-54404`; the verdict was `suspicious` (correct), and the level was
+raised implicitly by `lastScan.verdict !== 'clean'` — so `alarmCount` stayed `0`, the alarms list stayed empty,
+and "dismiss" had nothing to act on. The only ways out were to disable vet or to downgrade the finding, and
+downgrading would have hidden a real advisory.
+
+- **Scan verdicts are first-class alarms.** `VetStatus.noteScan` now records a `kind: 'scan-verdict'` alarm
+  (`suspicious` → yellow, `critical` → red) through the existing ring buffer, dedupe, TTL and dismiss paths.
+  `lastScan` remains in `status.json` as a display echo only. `level` is derived from live, non-dismissed
+  alarms — nothing else.
+- **One row per advisory, not per package.** This host has **54** official packages pinning the same
+  `zod@4.4.3`, so per-package rows would have filled the 20-slot buffer instantly and required 54 dismissals.
+  The official + OSV-dependency case therefore aggregates by `(advisory set, dependency, verdict)`: one row, `×N`
+  in the panel, "本机多个官方包" in the text, and the row retracts once its last member re-scans clean.
+  Third-party packages are **never** aggregated — the same CVE in a third-party package keeps its own row, so
+  dismissing the official noise can never hide a third-party finding.
+- **The message carries the evidence, dependency first.** An OSV hit on a declared dependency reads
+  `依赖 zod@4.4.3 命中已知漏洞 GHSA-mrhx-c7xc-m3w5（CVE-2023-54404） → … 判定 suspicious（80 分）`, so the
+  first 64 characters (the panel's collapsed-row limit) already say it is the dependency's problem, not the
+  package's own code. Official packages get the corresponding advice (usually fixed upstream) and every row
+  says that dismissing stops it counting toward the shield.
+- **Dismissing silences that evidence, not the plugin forever.** The alarm id carries an evidence fingerprint
+  (verdict + rule codes + OSV coordinates). The same evidence rescanned folds into the dismissed row; a **new**
+  advisory, a newly added vulnerable dependency, or a changed rule set produces a new id and re-alerts. Dismiss
+  state persists in `dismissed-alerts.json`, as before.
+- **Every advisory counts, not just the first.** `checkOsv` can return up to ten findings for one package; the
+  echo used to take the first, so a second advisory on the same dependency was neither named nor in the
+  fingerprint — dismissing the first would have hidden it permanently. The fingerprint and the aggregate id now
+  carry the whole sorted advisory set (the text names the first and says "等 N 条"), so a second advisory
+  starts a new row even when the first has been dismissed.
+- **A changed verdict replaces the old row instead of stacking.** A re-scan that is still non-clean but with
+  different evidence (new advisory, dependency upgraded, another problem left) drops the previous row
+  immediately. Before, both rows stayed until the 24 h TTL: the panel showed the same package twice, and the
+  stale row still pointed at an advisory that had already been fixed.
+- **A clean re-scan retracts its own verdict.** `noteScan` with `clean` removes that package's live
+  `scan-verdict` alarm. An unrelated package scanning clean no longer erases another package's verdict — the
+  old single-slot `lastScan` did exactly that, which was its own bug.
+- **The scanner names the dependency.** `checkOsv` appends `（依赖 zod@4.4.3）` when the hit is on a declared
+  direct dependency and writes structured coordinates into `finding.evidence`
+  (`id=…;alias=…;dependency=…`), so the guard never parses prose. Rule codes and verdicts are unchanged
+  (engine stays `static-v26`); only the OSV finding's message and evidence are richer.
+
+Verified end to end against the installed `@deepseek-ai/dsh-agent-loop` with real OSV: verdict `suspicious`,
+alarm text starts with `依赖 zod@4.4.3 命中…`, shield yellow, one dismiss → green.
+
+### Fixed — second review pass (true positives only)
+
+- **A plugin named `osv` could wipe the whole aggregate row.** Alarm ids shared one flat namespace, and
+  retraction matched by string prefix, so `scan-verdict:osv:` was both "the aggregate prefix" and "the prefix
+  of an object called osv": one clean scan of a package by that name erased the row that says 54 official
+  packages carry a live advisory. Ids are now structurally tagged (`scan-verdict:plugin:<name>:…`,
+  `scan-verdict:tool:<name>:…`, `scan-verdict:agg:osv:…`), and "is this an aggregate row" is a property of the
+  id, not a guess about a name. The same tagging stops a tool whose name matches a package (`workflow`,
+  `run_code`) from retracting that package's alarm.
+- **A dismissed yellow observation silently pre-approved a later red.** Dismissals are keyed on the merge key,
+  which is constant for the upgrade-diff / n3 / canary buckets: dismiss one benign info notice and a future
+  red (new exec or network capability) was recorded but folded into the collapsed "dismissed" section — green
+  shield over a red event. `record()` now un-folds and clears the persisted dismissal when the same key
+  escalates to red.
+- **The update card hid the fix behind the workaround.** When the running DSH was out of the verified range
+  *and* a newer VET declared it covers that DSH, the card said only "roll DSH back": the upgrade command was
+  gated on the `available` tone, which the `out` branch had already replaced. It now names the covering
+  version, and the command block is gated on the online verdict instead of the card's tone.
+- **Two "unknown" values were reported as facts.** An unparseable DSH version was rendered as "out of the
+  verified range" (a fabricated compatibility alarm), and an unparseable registry version was reported as
+  "you are up to date". Both now resolve to `unknown`.
+- **The online layer could stop for years.** A `lastCheckedAt` in the future (clock stepped back, VM restored,
+  store synced from another machine) satisfied the throttle forever; a negative elapsed time now means
+  "check again".
+- **The store read trusted its path.** Only the write side was hardened against pre-planted paths:
+  `update-check.json` symlinked to a FIFO blocked the synchronous `/vet/status.json` handler (freezing the DSH
+  web event loop), and a symlink to a large file was an unbounded read. Reads now require a regular file and
+  are capped at 64 KiB.
+- **A raw i18n key could be printed.** When the tested range is undeclared the presentation puts the *key*
+  `update.rangeNone` in a placeholder; both panels now resolve such values through `t()`.
+- **Test hygiene.** The positive online-gate assertion no longer depends on this machine's
+  `~/.dsh/profiles/web` (a throwaway profile is built per test), the fail-quiet sub-cases each get a fresh
+  store (two of the three were being throttled and never ran), and `runtime-guard` reads the expected version
+  from `package.json` instead of a literal.
+
+### Tests
+
+`test/update-card.test.ts` (23 tests) covers the quiet-window policy: the news/no-news split, the 20-minute
+boundary (and that the constant really is 1,200,000 ms), re-timing on a changed message, the
+`latestVersion`-excluded signature (a registry-side bump must not re-pop the card), clock skew, the
+corrupted-record parser (`parseSeen` — non-object, bad JSON, missing/mistyped fields and a non-finite timestamp
+all degrade to "first seen"), the storage-failure posture (no storage ⇒ real news still shows, quiet state
+degrades to always-show rather than to hidden), and the presentation precedence/placeholders shared with the
+About panel.
+
+`test/update-check.test.ts` (24 tests) covers range evaluation incl. the prerelease gate, the offline layer's
+`unknown`-never-alarms behaviour, the online gate (newer-but-undeclared ⇒ **not** advertised), throttling,
+single-flight, fail-quiet on HTTP/oversize/parse failures, cross-process persistence, the pure-offline
+switch, and a symlink-preplant regression on the store temp path (verified to fail against the
+previous implementation). Four further tests in `test/runtime-guard.test.ts` cover the `status.json` wiring end to end:
+`update` present under default config, absent under `updateCheck: false`, still present in `deny` mode while
+the fetch count stays at **0**, and one real dispatch when the throttle window has elapsed.
+
+`test/scan-verdict.test.ts` (36 tests) covers the scan-verdict alarm: the dependency coordinate appears before
+the panel's 64-character fold, self-hits never fabricate a dependency, the official/non-official advice split,
+the evidence fingerprint (stable across rule order; changes on a new advisory, dependency or verdict), the
+end-to-end dismiss path through `VetStatus` (yellow → dismiss → green, and the same evidence rescanned stays
+green), re-alerting on new evidence after a dismissal, clean-rescan retraction (own package only), the
+`lastScan`-no-longer-raises-level invariant, TTL expiry, critical → red, and tolerant parsing of the
+cross-process `evidence` payload. The aggregation block also pins the member bookkeeping that the review round
+caught: a single-member row retracts when its only package rescans clean, cleaning the *later*-scanned member
+first cannot drop a row that another package still supports, `×N` stays the count of affected packages even
+when scans are spaced beyond the 60-second dedupe window, repeated scans of the same package never inflate it,
+and a verdict id that changes shape (dependency hit → self hit) takes its old aggregate row with it.
+`test/scanner.test.ts` gains a case proving an OSV hit on a declared
+dependency is named in the message (`（依赖 zod@4.4.3）`) and carried structurally in `evidence`.
+
+## [0.3.18] - 2026-09-30
+
+DSH 0.2.0-rc.2 re-verification (no code change was required by the upgrade), a semantics fix for the
+shield's "plugins scanned" statistic, and devDependency tracking. **No engine change** — rules and verdicts
+are untouched (`static-v26`, same as 0.3.13–0.3.17).
+
+### Fixed — the shield's "scanned" counter counted scan *events*, not plugins
+
+- `stats.scannedCount` was a monotonic event counter: every auto-scan incremented it, so each DSH restart
+  re-counted the same plugins. On this host it had reached **6001** while only **77** distinct packages had
+  ever been scanned — identical to the deduped name sets in `capabilities.json` and `scan-summaries.json` —
+  which made the panel number unreadable.
+- `incrementScanned(name)` now dedupes by package name. The set is persisted as `scannedPlugins` and
+  `scannedCount` is **derived** from it; the stale numeric field is deliberately ignored on load, so the
+  count **self-heals on the next ordinary restart**. The previously planned "stop DSH and edit the file"
+  window proved unnecessary *and* ineffective: the running process holds the counter in memory and rewrites
+  the file on its 5 s poll, so a file-only edit is reverted within seconds (measured — a sentinel value
+  survived one poll and was overwritten by the next).
+- The label `stats.scanned` becomes **Plugins scanned** / 「已扫描插件」 so the number cannot be misread as a
+  restart-inflated event count.
+- Persistence is now dirty-flagged: the scan-name set makes `stats.json` ~25× larger, so the 5 s shield poll
+  no longer rewrites it when nothing changed. The loss window (≤1 poll) is unchanged.
+- `test/v020-features.test.ts` covers dedupe (same name twice → 1), empty names, and legacy-file self-heal
+  (a 0.3.17 file with `scannedCount: 6001` loads as 0 while keeping its alarm/block counters).
+
+### Changed — DSH 0.2.0-rc.2 verified; devDependencies follow it
+
+- The rc.1→rc.2 delta on vet's surface is **additive-only**: `@deepseek-ai/cordis` is untouched (still
+  `4.0.4`); `dsh-tools`, `dsh-session`, `dsh-invariants`, `dsh-client-ui-slots` and `dsh-client-locale` differ
+  from rc.1 only in `package.json`; `dsh-client-ui-conversation` adds six `ask.*` locale keys plus an
+  equivalent `slots` refactor; `dsh-llm` adds one `MessageSourceMap` member. The four packages vet patches at
+  runtime (`dsh-atomic-write`, `dsh-storage-json`, `dsh-config-editor`, `dsh-credentials-local`) are
+  byte-identical, so no denoise anchor moved. The declared peer range already admits `0.2.0-rc.2` (measured),
+  and the devDependencies now track it.
+- Verified live on the restarted 0.2.0-rc.2 host: 76 of 77 scan records are rc.2 and all clean, and vet's
+  client module (`rev=d812aebf546d`) is served inside the rc.2 plugin bundle. `@deepseek-ai/dsh-settings-file`
+  is still absent from the family after `0.1.6-alpha.2`, matching the guard comments.
+- **Install note**: `dsh-tools@0.2.0-rc.2` declares eleven exact-version peers, so bumping the DSH
+  devDependencies needs a fresh resolve (`package-lock.json` + `node_modules`); an incremental `npm install`
+  fails with `ERESOLVE`. This is how the `0.2.0-rc.1` tree was produced as well.
+
 ## [0.3.17] - 2026-09-29
 
 Correctness fix in the `vet-gate` CLI plus documentation accuracy. **No engine change** — static rules and

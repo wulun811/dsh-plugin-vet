@@ -21,6 +21,7 @@ import { withVetSelfIo } from './runtime-hooks.js'
 import type { VetConfig } from '../config.js'
 import { PLUGIN_ENTRY_ID } from '../package-meta.js'
 import { getStats } from './stats.js'
+import { getUpdateView, maybeCheckForUpdate } from './update-check.js'
 import { buildAuditSummary } from './audit-summary.js'
 import { getScanSummary } from './scan-summaries.js'
 import { label as capabilityLabel, history as diffHistory, type CapabilityLabel } from './version-diff.js'
@@ -927,6 +928,13 @@ export function registerStatusRouteOnce(
         // P2：metricsHistory（火花线）+ audit（审计&蜜罐中心/最近插件索引）+ lastUpgradeDiff（浮动卡）
         const snap = status.snapshot()
         const alarmsAll = [...snap.alarms, ...snap.dismissed]
+        // 0.4.1：自动更新适配提示。deny 模式恒不出网（P2-7：同步路径零网络）——离线兼容层
+        // 照常展示（它零网络），只是不触发在线复核。
+        // profile 目录（ctx.baseUrl）作为宿主 DSH 版本探测的首选锚点：dsh loader 就用它解析
+        // 模块，实测能解析到真正的 @deepseek-ai/dsh（vet 自身位置在开发态符号链接下不可靠）。
+        const profileBase = ctx.baseUrl === undefined ? undefined : resolveProfileDir(ctx.baseUrl)
+        if (config.updateCheck && config.mode !== 'deny') maybeCheckForUpdate()
+        const update = config.updateCheck ? getUpdateView(profileBase) : undefined
         writeJson(res, 200, {
           ...snap,
           profile: config.profile,
@@ -935,6 +943,7 @@ export function registerStatusRouteOnce(
           metrics: readHostMetrics(),
           metricsHistory: readMetricsHistory(),
           stats: getStats(),
+          update,
           audit: buildAuditSummary({
             alarms: alarmsAll,
             honeypotArmed: config.honeypot?.enabled === true && config.runtimeGuard === 'watch',

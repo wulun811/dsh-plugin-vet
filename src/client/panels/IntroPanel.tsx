@@ -7,6 +7,8 @@ import type { T, ThemeTokens } from '../theme.ts'
 import { cardBg, cardInset } from '../theme.ts'
 import { SubPanel } from '../components/SubPanel.tsx'
 import { ShieldIcon } from '../components/ShieldIcon.tsx'
+import type { UpdateCardPresentation } from '../../guard/update-card.ts'
+import type { VetUpdateWire } from '../types.ts'
 // 内嵌 logo（build-client.mjs define 注入的 data URI，见 assets.d.ts）
 const vetLogo = __VET_ASSETS__.vetLogo
 const dshSoLogo = __VET_ASSETS__.dshSoLogo
@@ -23,13 +25,25 @@ const INTRO_SECTIONS = [
   { icon: '🔔', titleKey: 'intro.s5title', bullets: ['intro.s5b1', 'intro.s5b2', 'intro.s5b3'] },
 ]
 
-export function IntroPanel({ pal, dark, t, onBack }: {
+export function IntroPanel({ pal, dark, t, onBack, update, updatePres }: {
   pal: ThemeTokens
   dark: boolean
   t: T
   /** 层栈内打开时传返回；hover 浮层形态不传。 */
   onBack?: () => void
+  /** 0.4.1：版本与适配的原始数据（收起后可在此查看；缺省 = 旧后端，不渲染该区块）。 */
+  update?: VetUpdateWire
+  /** 0.4.1：与主面板卡片**同一份** presentation（单源，防两处漂移）。 */
+  updatePres?: UpdateCardPresentation | null
 }): ReactNode {
+  // 版本与适配：主面板卡片收起后的常驻查看入口（信息不丢，只是不再占着主面板）
+  const showUpdate = update !== undefined && updatePres !== undefined && updatePres !== null
+  /** 占位符填充；值本身可能是 i18n key（如 `update.rangeNone`），查表后填入。 */
+  const fillText = (key: string, vars: Record<string, string>): string =>
+    t(key).replace(/\{(\w+)\}/g, (_m, k: string) => {
+      const v = vars[k] ?? ''
+      return v.startsWith('update.') ? t(v) : v
+    })
   return (
     <div style={{ width: '100%', height: '100%' }}>
       <SubPanel tok={pal} title={t('intro.title')} ariaLabel={t('intro.aria')} onBack={onBack} backLabel={t('panel.back')}>
@@ -103,6 +117,34 @@ export function IntroPanel({ pal, dark, t, onBack }: {
           <div style={{ fontSize: 12, color: pal.faint, marginTop: 4 }}>
             {t('intro.position')}
           </div>
+
+          {/* 0.4.1：版本与适配（主面板卡片安静态收起后的常驻入口）。与卡片共用 presentation，
+              故文案/优先级不会漂移；这里始终展示（不看 20 分钟窗口——用户主动进来就是要看）。 */}
+          {showUpdate && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontWeight: 800, fontSize: 13, color: pal.ink, marginBottom: 6 }}>
+                {t('update.title')}
+              </div>
+              <div style={{ background: cardBg(dark), border: '1px solid ' + pal.borderSoft, boxShadow: cardInset(dark), borderRadius: 10, padding: '8px 12px', fontSize: 11.5, color: pal.muted }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span aria-hidden="true" style={{ fontSize: 11, color: updatePres.accent ? pal.ochre : pal.faint }}>{updatePres.icon}</span>
+                  <span style={{ fontWeight: 700, color: updatePres.accent ? pal.ochre : pal.ink }}>{t(updatePres.labelKey)}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10.5, color: pal.faint }}>
+                    DSH {update!.dshVersion === '' ? '?' : update!.dshVersion} · VET {update!.currentVersion}
+                  </span>
+                </div>
+                <div style={{ marginTop: 5, lineHeight: 1.6 }}>{fillText(updatePres.noteKey, updatePres.vars)}</div>
+                {/* 升级命令只在**确有可升级版本**时给出。安静态下 latestVersion 可能比本机旧
+                    （本机是开发版/预发布版），无条件给出会变成「降级命令」——故按 tone 门控。 */}
+                {update!.status === 'update-available' && update!.latestVersion !== '' && (
+                  <div style={{ marginTop: 6, fontSize: 10.5, color: pal.faint }}>
+                    {t('update.cmdLabel')}：<code style={{ userSelect: 'all' }}>{`npm i -g @jieai/dsh-plugin-vet@${update!.latestVersion}`}</code>
+                  </div>
+                )}
+                <div style={{ marginTop: 4, fontSize: 10.5, color: pal.faint }}>{t('update.sourceNote')}</div>
+              </div>
+            </div>
+          )}
         </div>
       </SubPanel>
     </div>

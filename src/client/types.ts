@@ -46,6 +46,22 @@ export interface VetStatsWire {
   updatedAt: number
 }
 
+/** 0.4.1：自动更新适配提示（两层）。旧后端无此字段时客户端整块隐藏。 */
+export interface VetUpdateWire {
+  /** 本机运行中的 DSH 版本（读不到 = ''）。 */
+  dshVersion: string
+  /** 本版 vet 自己声明的已复验 DSH 范围。 */
+  testedRange: string
+  /** 离线兼容层结论：ok = 在范围内；out-of-range = 超出已复验；unknown = 判不出来。 */
+  compat: 'ok' | 'out-of-range' | 'unknown'
+  /** 在线层结论：update-available 才提示可升级。 */
+  status: 'up-to-date' | 'update-available' | 'unknown'
+  currentVersion: string
+  latestVersion: string
+  latestTestedRange: string
+  checkedAt: number
+}
+
 export interface ShieldSnapshotWire {
   level: 'green' | 'yellow' | 'red'
   alarmCount: number
@@ -59,6 +75,8 @@ export interface ShieldSnapshotWire {
   metrics?: VetMetricsWire
   /** 0.1.20：防御统计 */
   stats?: VetStatsWire
+  /** 0.4.1：自动更新适配提示（离线兼容层 + 在线升级提示）。 */
+  update?: VetUpdateWire
   /* —— P2 增量（旧后端无此字段时全部降级）—— */
   /** 指标历史（旧→新，≤64 点；复合卡火花线）。 */
   metricsHistory?: MetricsHistoryPointWire[]

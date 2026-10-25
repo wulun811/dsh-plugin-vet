@@ -694,12 +694,55 @@ RingSparkCard/FoldSection/RadarChart/SubPanel…）+ `panels/`（主面板编排
     其防护走内容基线 + 静态扫描 + 报警，不占用给用户看的格子）、`lastUpgradeDiff`
     （N6 报警 + `version-diff.history()` 组装）。客户端分页逐页渲染（round-21：
     最近插件每页 20、审计状态每页 14，点「加载更多」追加，不全量画满）。
+  - `status.json` 增量（0.4.1）：`update`（`guard/update-check.ts` 的 `getUpdateView()` 产物）
+    ——「版本与适配」卡的数据源，见下方「自动更新适配提示」。
+  - `status.json` 语义变化（0.4.1）：**扫描结论落成告警**（`guard/scan-verdict.ts`）。此前
+    `noteScan` 只写 `lastScan`，由 `snapshot()` 用 `verdict !== 'clean'` 隐式抬 level——盾牌
+    会黄，却没有一条可点「忽略」的条目。现在结论就是一等的 `kind='scan-verdict'` 告警
+    （suspicious→yellow、critical→red），走既有的折叠/持久化语义；**level 只看存活且未忽略
+    的告警**，`lastScan` 退化为展示回显。告警 id 带证据指纹（verdict+规则码+OSV 坐标），
+    同证据重扫折叠，证据变化生成新 id 重新提醒；同包重扫转 clean 撤销其结论。OSV 命中在
+    `finding.evidence` 里带 `id=…;alias=…;dependency=…`（命中直接依赖时），告警文案因此能
+    点名「依赖 zod@4.4.3」，而不必解析中文散文。**官方包 + 依赖命中按公告聚合**：id 为
+    `scan-verdict:osv:<公告>:<依赖>:<结论>`，`count` = **仍受影响的包数**（成员集合按包名
+    去重，不受 60s 去重窗口影响——0.2.1 实测 54 个官方包钉同一个 zod，逐包一行会刷满 20 槽
+    缓冲）；`groupMembers` 记住支撑该行的包集合，最后一个成员转 clean 时整行撤销。第三方包
+    永不聚合——同一条 CVE 出现在第三方包里必须单独可见。
   - `GET /vet/plugin?name=`：`label()` + `getScanSummary()` + `diffHistory()` +
     `hasAuditRecordBatch()` 的只读聚合；name 校验（≤214、无路径符/控制字符）；未见过 404。
 - **扫描摘要库** `~/.dsh/vet/scan-summaries.json`（`guard/scan-summaries.ts`）：
   按包一条最新扫描结论（verdict/score/规则码/OSV 摘要）；原子写 tmp+rename 0600、
   LRU 200、**变化才落盘**（verdict/版本/规则码集合变化才覆写——防写放大）、损坏 fail-open；
   自动扫描（internal-plugin finish）与 vet-gate（gate.ts）双路径写入。
+- **自动更新适配提示**（0.4.1，`guard/update-check.ts` + `guard/dsh-compat.ts`）：闸门**不是**
+  「DSH 出新版了」，而是「registry 上最新 VET 自己声明的已复验范围是否覆盖你正在跑的 DSH」。
+  - **dshCompat**：每版在 `package.json` 的 `dshCompat.tested` 声明已复验 DSH 范围——
+    **刻意不用 `peerDependencies`**：实测 0.3.16/0.3.17/0.3.18 三版 peer 逐字节相同且 rc.2 本就在
+    范围内，peer 只表达模块 API 依赖，覆盖不到 patch insert 行 id 语义 / client slot 契约 /
+    降噪锚点。
+  - **离线层（零网络，永远在）**：本机 DSH ∉ 本版 `dshCompat.tested` → 面板黄字「超出已复验
+    范围」。宿主版本探测锚点依次为 `ctx.baseUrl`（profile 目录）→ `process.argv[1]` 目录 →
+    逐级上溯 `package.json` → vet 自身位置；**全失败返回 `''` 且绝不判为超出范围**（fail-open，
+    防误报）。
+  - **在线层（24h 节流 / 单飞 / fail-quiet）**：`registry.npmjs.org`（既有 DECLARED_HOSTS）
+    取 latest 的 `dshCompat.tested`；**仅当**「确有更新版 **且** 其声明覆盖本机 DSH」才
+    `update-available`，其余一律 `unknown`（绝不谎称有适配版）。失败仍推进 `lastCheckedAt`
+    ——否则 5s 轮询会退化成网络风暴；代价是失败后 24h 内不再重试。
+  - **出网纪律**：origin 钉死 + `redirect: 'error'` + content-length/正文双上限 + 超时；
+    **deny 模式零出网**（离线层照常展示，它零网络）；`updateCheck: false` 两层全关。
+  - **节流/结论状态** `~/.dsh/vet/update-check.json`（原子写排他 tmp + rename，0600）。
+  - **刻意不做一键升级**：那要求 vet 能写自身安装目录并 spawn npm，对安全插件是巨大的新增
+    攻击面；且实测安装形态常为符号链接。面板只给事实 + 可复制命令 + 数据来源（防钓鱼）。
+  - **零依赖 semver 子集**（`guard/dsh-compat.ts`）：vet 不带 runtime `semver` 依赖，
+    自实现 `||` AND 组 + `^ ~ >= > <= < =` + npm 预发布闸门，与 `semver@7` 差分测试对齐。
+  - **安静态 20 分钟自动收起**（`guard/update-card.ts`，纯判定、零 DOM）：卡片安静态
+    （已复验支持 / 已是最新）每次说的都是同一句话，属一次性通知而非常驻仪表——自「第一次
+    看到」起展示 20 分钟后收起；真消息（`out-of-range` / `update-available`）**永不收起**，
+    且不依赖存储（localStorage 不可用时真消息照常显示，存储故障绝不吞掉警告）。消息指纹
+    刻意**不含** `latestVersion`——registry 抖动不该把内容未变的卡片重新弹出。收起后同一
+    结论在「关于」面板可见：两处渲染**共用同一份 presentation**（单源，防文案/优先级漂移）。
+    本模块放服务端可编译位置（tsconfig.src 无 DOM lib）以便单测直接驱动——与
+    `guard/shield-shape.ts` 同款单源纪律。
 - **诚实口径**：雷达/营养标签展示**声明侧**静态能力（同 vet_label 边界，D5）；
   时间线处置标签按 severity 分档，不虚构「已拦截」；「已拦截」标记来自 N7 族 1 名单
   （confirmBlock.isFamily1Blocked）。
@@ -710,6 +753,9 @@ RingSparkCard/FoldSection/RadarChart/SubPanel…）+ `panels/`（主面板编排
 - Config: schemastery schema (`src/config.ts`); all fields in the README Config table.
 - Tools: `scan_plugin` (deterministic static scan; verdict comes only from the static layer).
 - Guards: `internal/plugin` auto-scan + requireAudit gate; `tools/execute` interception.
+- Update notice (0.4.1): `guard/update-check.ts` (host-DSH detection, 24 h-throttled registry
+  read, persisted throttle state) + `guard/dsh-compat.ts` (zero-dependency semver subset);
+  surfaced through `status.json` → `update` and the shield's *Version & Compatibility* card.
 - Shield: browser half (`conversation.session.header.actions`), polls /vet/status.json, one-click runtimeGuard
   config write (guard flips immediately via toggle hook and persists to the profile patch — since the
   2026-08-26 incident fix it no longer waits for a DSH restart; tier-preset expansion keys apply on reload).

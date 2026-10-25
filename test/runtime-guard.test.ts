@@ -14,6 +14,7 @@ import { decideRespawn, t2AlarmId, t2Severity, installRuntimeGuard, applyRuntime
 import { envSidecarPid } from '../lib/guard/runtime-sidecar.js'
 import { hasAuditRecord, setArchiveDirForTest } from '../lib/audit/archive.js'
 import { setDismissedFileForTest } from '../lib/guard/dismissed-alerts.js'
+import { setUpdateCheckDirForTest, setUpdateAutoCheck } from '../lib/guard/update-check.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import fsDefault from 'node:fs'
 import { join } from 'node:path'
@@ -78,12 +79,17 @@ describe('VetStatus（盾牌聚合器）', () => {
     expect(s.snapshot().alarms[0].id).toBe('a4')
   })
 
-  it('noteScan suspicious → yellow 抬升', () => {
+  it('noteScan 把结论落成可忽略告警：suspicious → yellow，同对象重扫 clean → 撤销', () => {
     const s = new VetStatus()
     expect(s.snapshot().level).toBe('green')
     s.noteScan({ pluginName: 'evil', verdict: 'suspicious', staticScore: 40, at: Date.now() })
     expect(s.snapshot().level).toBe('yellow')
-    s.noteScan({ pluginName: 'good', verdict: 'clean', staticScore: 100, at: Date.now() })
+    expect(s.snapshot().alarms.some(a => a.kind === 'scan-verdict' && a.pluginHint === 'evil')).toBe(true)
+    // 0.4.1：clean 只撤销**本对象**的结论。另一个包扫干净不代表 evil 变成干净了
+    // （旧实现里 lastScan 是全局单槽，后一次 clean 会把前一个 suspicious 顶掉——那是 bug）。
+    s.noteScan({ pluginName: 'other', verdict: 'clean', staticScore: 100, at: Date.now() })
+    expect(s.snapshot().level).toBe('yellow')
+    s.noteScan({ pluginName: 'evil', verdict: 'clean', staticScore: 100, at: Date.now() })
     expect(s.snapshot().level).toBe('green')
   })
 
@@ -146,10 +152,10 @@ describe('VetStatus（盾牌聚合器）', () => {
     s.noteScan({ pluginName: 'evil', verdict: 'suspicious', staticScore: 40, at: Date.now() - 500 }) // 500ms 前（> TTL）
     expect(s.snapshot().level).toBe('green')
     expect(s.snapshot().lastScan).toBeUndefined()
-    // 新鲜扫描 → yellow；clean 不抬升
+    // 新鲜扫描 → yellow；同对象 clean 才撤销
     s.noteScan({ pluginName: 'e2', verdict: 'suspicious', staticScore: 40, at: Date.now() })
     expect(s.snapshot().level).toBe('yellow')
-    s.noteScan({ pluginName: 'good', verdict: 'clean', staticScore: 100, at: Date.now() })
+    s.noteScan({ pluginName: 'e2', verdict: 'clean', staticScore: 100, at: Date.now() })
     expect(s.snapshot().level).toBe('green')
   })
 })
@@ -1841,5 +1847,94 @@ describe('即时装配（0.4.1）：setGuardToggleHook 接线 + 进程内切换'
     expect(r3.ok).toBe(true)
     expect(config.runtimeGuard).toBe('watch')
     expect(envSidecarPid()).toBeDefined()
+  })
+})
+
+describe('0.4.1：status.json 的 update 字段接线（离线层恒在 / 在线层受 updateCheck 与 deny 约束）', () => {
+  afterEach(() => {
+    setUpdateCheckDirForTest(undefined)
+    setUpdateAutoCheck(true)
+    vi.unstubAllGlobals()
+  })
+
+  /** 起一个注册好状态路由的 handler（只为拿到 handler，不真起 webServer）。 */
+  function handlerFor(config: Record<string, unknown>, dir: string): (req: unknown, res: unknown) => void {
+    const routes: unknown[] = []
+    const ctx = {
+      baseUrl: dir,
+      get: (name: string) => (name === 'webServer' ? { register: (r: unknown) => { routes.push(r); return () => {} } } : undefined),
+      effect: (fn: () => unknown) => { fn() },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }
+    registerStatusRouteOnce(ctx as never, config as never, new VetStatus())
+    return (routes[0] as { handler: (req: unknown, res: unknown) => void }).handler
+  }
+
+  function getJson(handler: (req: unknown, res: unknown) => void): { code: number; body: Record<string, unknown> } {
+    const res = { code: 0, body: null as unknown, writableEnded: false, writeHead: (c: number) => { res.code = c }, end: (b: string) => { res.body = JSON.parse(b) } }
+    handler({ method: 'GET', url: '/vet/status.json', headers: {} }, res)
+    return res as { code: number; body: Record<string, unknown> }
+  }
+
+  it('updateCheck 开（默认）→ status.json 带 update 字段，且离线层能读到本机 DSH 版本', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-upd-'))
+    setUpdateCheckDirForTest(dir)
+    setUpdateAutoCheck(false) // 禁真实出网；只验接线与离线层
+    const res = getJson(handlerFor({ runtimeGuard: 'off', profile: 'standard', updateCheck: true, mode: 'report' }, dir))
+    expect(res.code).toBe(200)
+    const update = res.body.update as Record<string, unknown> | undefined
+    expect(update).toBeDefined()
+    // 离线层的三个字段必须存在（compat 的取值取决于本机能否解析出宿主 DSH）
+    expect(typeof update!.dshVersion).toBe('string')
+    expect(typeof update!.testedRange).toBe('string')
+    expect(['ok', 'out-of-range', 'unknown']).toContain(update!.compat)
+    // 本版 package.json 真的声明了 dshCompat.tested → 该字段不应为空
+    expect(update!.testedRange).not.toBe('')
+    // 从 package.json 读，而不是写死版本号——否则每个版本都要手改这一行（发版陷阱）
+    const pkgVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
+    expect(update!.currentVersion).toBe(pkgVersion)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('updateCheck: false → status.json 完全不出现 update 字段（两层全关）', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-upd-'))
+    setUpdateCheckDirForTest(dir)
+    setUpdateAutoCheck(true)
+    const res = getJson(handlerFor({ runtimeGuard: 'off', profile: 'standard', updateCheck: false, mode: 'report' }, dir))
+    expect(res.code).toBe(200)
+    expect(res.body.update).toBeUndefined()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('deny 模式：update 字段照常（离线层零网络），但**绝不出网**——fetch 零调用', () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-upd-'))
+    setUpdateCheckDirForTest(dir)
+    setUpdateAutoCheck(true)
+    const fn = vi.fn(async () => ({ ok: true, headers: { get: () => null }, text: async () => '{}' }))
+    vi.stubGlobal('fetch', fn)
+    const res = getJson(handlerFor({ runtimeGuard: 'off', profile: 'standard', updateCheck: true, mode: 'deny' }, dir))
+    expect(res.code).toBe(200)
+    // 离线层仍在（这是设计：deny 只抑制网络，不抑制面板展示）
+    expect(res.body.update).toBeDefined()
+    expect(fn).not.toHaveBeenCalled()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('report 模式 + 节流窗口外 → 真的派发一次在线复核', async () => {
+    const dir = mkdtempSync(join(tmpdir(), '.tmp-upd-'))
+    setUpdateCheckDirForTest(dir)
+    setUpdateAutoCheck(true)
+    const fn = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ version: '9.9.9', dshCompat: { tested: '^0.0.0' } }),
+    }))
+    vi.stubGlobal('fetch', fn)
+    const handler = handlerFor({ runtimeGuard: 'off', profile: 'standard', updateCheck: true, mode: 'report' }, dir)
+    getJson(handler)
+    // maybeCheckForUpdate 后台落定，等一拍
+    await vi.waitFor(() => { expect(fn).toHaveBeenCalled() })
+    expect(fn).toHaveBeenCalledTimes(1)
+    rmSync(dir, { recursive: true, force: true })
   })
 })

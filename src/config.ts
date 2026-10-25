@@ -65,6 +65,11 @@ export interface VetConfig {
    * 记录首装内容哈希，后续加载内容变化（同版本字节不一致）→ red（可经 acknowledgedPackageHashes 豁免）。
    * 定位是"变更检测"而非信任锚：first-seen 自动信任仍有窗口，叠加 deny/requireAudit 才完整。 */
   thirdPartyBaseline: boolean
+  /** 0.4.1：自动更新适配提示（默认开）。离线兼容层零网络永远生效（运行中的 DSH 超出本版
+   * `dshCompat.tested` → 面板黄字提示）；在线层节流 24h 查 registry 上最新 vet 声明的已复验
+   * 范围，仅当「确有更新版 **且** 该版声明覆盖本机 DSH」才提示可升级（否则静默——绝不谎报
+   * 有适配版）。关闭后两层都不出（纯离线部署可用）。deny 模式恒不出网（P2-7 同款约束）。 */
+  updateCheck: boolean
   /** N7：确认拦截块（0.1.14）：'block'（默认）族 1/2 确认即拦；'alarm' 只报警不拦；'off' 关闭。 */
   confirmBlock: 'block' | 'alarm' | 'off'
   /** N7 族 3 覆写（默认 alarm，仅报警；paranoid 档展开为 block）：显式 'block' 才拦截系统持久化/提权面写入（误拦风险自负）。 */
@@ -108,6 +113,7 @@ export const VET_CONFIG_DEFAULTS = {
   observeLoopback: true,
   telemetryDiff: true,
   thirdPartyBaseline: false,
+  updateCheck: true,
   confirmBlock: 'block',
   confirmBlockFamily3: 'alarm',
   confirmBlockFamily4: 'alarm',
@@ -199,6 +205,7 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   observeLoopback: z.boolean().default(true),
   telemetryDiff: z.boolean().default(true),
   thirdPartyBaseline: z.boolean().default(false),
+  updateCheck: z.boolean().default(true),
   confirmBlock: z.union([z.const('block'), z.const('alarm'), z.const('off')]).default('block'),
   confirmBlockFamily3: z.union([z.const('alarm'), z.const('block')]).default('alarm'),
   confirmBlockFamily4: z.union([z.const('alarm'), z.const('block')]).default('alarm'),
