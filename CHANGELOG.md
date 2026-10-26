@@ -216,7 +216,38 @@ alarm text starts with `依赖 zod@4.4.3 命中…`, shield yellow, one dismiss 
   store (two of the three were being throttled and never ran), and `runtime-guard` reads the expected version
   from `package.json` instead of a literal.
 
+### Fixed — after the first Windows back-port (0.4.1, post-`871e7b0`)
+
+- **Changing the alarm ids silently un-dismissed what the user had already dismissed.** The namespace tagging
+  above was the right fix, but it changed the *string* of every aggregate id, and dismissals are stored by id:
+  a CVE the user had answered last week came back as a brand-new yellow alarm, and answering it again left the
+  same advisory in the store **twice** (measured on this machine: `scan-verdict:osv:GHSA-mrhx-…` and
+  `scan-verdict:agg:osv:GHSA-mrhx-…` side by side). `dismissed-alerts` now rewrites legacy ids on load, so a
+  dismissal survives the rename. The migration is deliberately conservative: only the 5-segment old aggregate
+  form is rewritten; the 3-segment `scan-verdict:<name>:<digest>` form is **not**, because the old format did
+  not distinguish plugin rows from tool rows and guessing `plugin:` there would turn "I dismissed a tool
+  result" into "I pre-approved a red from a same-named package" — the same aliasing this release just removed,
+  pointing the other way. When both keys exist the later `dismissedAt` wins and a `reason` on either is kept.
+  Malformed entries on disk are carried through untouched: throwing there would be caught upstream and degrade
+  the whole store to empty, losing *every* dismissal.
+- **The About panel showed a version baked at build time.** It was the only always-visible version number
+  (the "version & compatibility" card collapses after 20 quiet minutes), and it came from a `__VET_VERSION__`
+  define while the card's own header used the live `update.currentVersion` — two sources for one fact, so a
+  browser holding an older bundle showed a stale number next to a current one. The About panel now prefers the
+  server-reported version and keeps the define only as the fallback for backends that do not report it.
+- **Windows back-port (`871e7b0`, from the Windows checkout).** `detectDshVersion` hand-stripped `file://`
+  from the caller's `ctx.baseUrl`, which on win32 leaves `/C:/…` (an extra slash before the drive letter) so
+  `createRequire` cannot find the host — it now goes through `fileURLToPath` (and POSIX's single-slash
+  `file:/…` form is handled by the same call). The symlink-preplant store test now probes symlink capability
+  and skips where Windows cannot create one without developer mode, instead of failing.
+
 ### Tests
+
+`test/dismissed-id-migration.test.ts` (4 tests) pins the dismissal-id migration: the legacy 5-segment aggregate
+form is rewritten, the new form is idempotent, the ambiguous 3-segment object form is left alone on purpose,
+a store holding *both* keys merges to one entry (later `dismissedAt`, `reason` preserved, and the next write
+persists the merged shape), and malformed values on disk are carried through instead of taking the whole store
+down with them.
 
 `test/update-card.test.ts` (23 tests) covers the quiet-window policy: the news/no-news split, the 20-minute
 boundary (and that the constant really is 1,200,000 ms), re-timing on a changed message, the

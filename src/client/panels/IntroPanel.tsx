@@ -38,6 +38,13 @@ export function IntroPanel({ pal, dark, t, onBack, update, updatePres }: {
 }): ReactNode {
   // 版本与适配：主面板卡片收起后的常驻查看入口（信息不丢，只是不再占着主面板）
   const showUpdate = update !== undefined && updatePres !== undefined && updatePres !== null
+  // 版本号单一口径：优先用**服务端实时值**（与主面板表头 `VET {currentVersion}` 同一个字段），
+  // 构建期常量只在旧后端不汇报时兜底。此前这里独占一份 `__VET_VERSION__`：面板头显示 0.4.1
+  // 而「关于」页显示构建时烘死的旧号（浏览器里跑的是上一次构建的 bundle 时尤其明显），
+  // 同一件事实两处来源必然漂移。
+  const version = update !== undefined && update.currentVersion !== ''
+    ? update.currentVersion
+    : (typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0')
   /** 占位符填充；值本身可能是 i18n key（如 `update.rangeNone`），查表后填入。 */
   const fillText = (key: string, vars: Record<string, string>): string =>
     t(key).replace(/\{(\w+)\}/g, (_m, k: string) => {
@@ -59,7 +66,7 @@ export function IntroPanel({ pal, dark, t, onBack, update, updatePres }: {
             <img src={vetLogo} alt="vet" style={{ width: 200, height: 'auto' }} />
           </div>
           <div style={{ textAlign: 'center', fontSize: 12, color: pal.faint, marginBottom: 10 }}>
-            @jieai/dsh-plugin-vet v{typeof __VET_VERSION__ === 'string' ? __VET_VERSION__ : '0.1.0'}
+            @jieai/dsh-plugin-vet v{version}
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: pal.faint, marginBottom: 10 }}>

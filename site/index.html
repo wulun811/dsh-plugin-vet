@@ -218,8 +218,8 @@ code{font-family:var(--mono)}
 
 <section class="stats">
   <div class="container stats-inner">
-    <div class="stat"><b id="sTests">1325</b><span data-i18n="stats.tests">tests · 1324 passed · 1 skipped</span></div>
-    <div class="stat"><b id="sCov">90.78%</b><span data-i18n="stats.cov">line coverage</span></div>
+    <div class="stat"><b id="sTests">1330</b><span data-i18n="stats.tests">tests · 1329 passed · 1 skipped</span></div>
+    <div class="stat"><b id="sCov">90.8%</b><span data-i18n="stats.cov">line coverage</span></div>
     <div class="stat"><b id="sRules">20</b><span data-i18n="stats.rules">static rules R1–R20</span></div>
     <div class="stat"><b id="sMatrix">34/8</b><span data-i18n="stats.matrix">mutant gate · killed / clean</span></div>
     <div class="stat"><b id="sSkips">1</b><span data-i18n="stats.skips">platform / fixture skips</span></div>
@@ -363,8 +363,8 @@ code{font-family:var(--mono)}
         <div class="chart-box"><canvas id="covChart"></canvas></div>
       </div>
       <div class="chart-card">
-        <h3 data-i18n="d2.t">1325 tests by suite</h3>
-        <div class="sub" data-i18n="d2.sub">1324 passed · 1 platform-conditional skip (Linux run)</div>
+        <h3 data-i18n="d2.t">1330 tests by suite</h3>
+        <div class="sub" data-i18n="d2.sub">1329 passed · 1 platform-conditional skip (Linux run)</div>
         <div class="chart-box"><canvas id="testsChart"></canvas></div>
       </div>
       <div class="chart-card">
@@ -457,7 +457,7 @@ const I18N = {
     "hero.positioning":"A monitoring alarm, not an enforcer.","hero.positioning2":" vet never acts on your behalf by default — it only does check → alarm → advise; the opt-in watch mode may block confirmed destructive operations. The final call is always yours on your own DSH.",
     "hero.copy":"Copy","hero.dash":"View dashboard",
     "shield.status":"● live guard · alarm-only",
-    "stats.tests":"tests · 1324 passed · 1 skipped","stats.cov":"line coverage","stats.rules":"static rules R1–R20","stats.matrix":"mutant gate · killed / clean","stats.skips":"platform / fixture skips",
+    "stats.tests":"tests · 1329 passed · 1 skipped","stats.cov":"line coverage","stats.rules":"static rules R1–R20","stats.matrix":"mutant gate · killed / clean","stats.skips":"platform / fixture skips",
     "feat.kicker":"What it does","feat.title":"One pipeline, <span class=\"hl\">from download to runtime.</span>",
     "feat.sub":"vet occupies the whole trust chain — download → scan → audit → score → decide → runtime watch — and by default stops there: it reports, it advises; interception exists only in the opt-in watch mode.",
     "f1.t":"Deterministic static scan","f1.d":"R1–R20 rules over an AST (engine static-v26), verdicts produced only by the static layer — never spoofable by prompt injection. The scanner runs as an isolated subprocess: AST read-only, never eval'd.","f1.tag":"verdict · critical / suspicious / clean",
@@ -491,7 +491,7 @@ const I18N = {
     "dash.kicker":"Dashboard","dash.title":"Measured, <span class=\"hl\">not marketed.</span>",
     "dash.sub":"Real numbers from the test suite and coverage run — a security layer should be able to show its receipts.",
     "d1.t":"Coverage vs. enforced thresholds","d1.sub":"vitest v8 · v8 provider · thresholds lines/functions/statements ≥ 85%, branches ≥ 80% (ratchet, round-18); measured on ubuntu CI",
-    "d2.t":"1325 tests by suite","d2.sub":"1324 passed · 1 platform-conditional skip (Linux run)",
+    "d2.t":"1330 tests by suite","d2.sub":"1329 passed · 1 platform-conditional skip (Linux run)",
     "d3.t":"Adversarial matrix verdicts","d3.sub":"34 mutants + 8 benign controls across R1–R20 · kill-rate gate enforced",
     "d4.t":"Static rule severity map","d4.sub":"Default severity per rule (R1–R20)",
     "trust.kicker":"Trust boundaries","trust.title":"Design constraints <span class=\"hl\">that keep it honest.</span>",
@@ -526,7 +526,7 @@ const I18N = {
     "hero.positioning":"监控报警器，不是打手。","hero.positioning2":" vet 默认永不动手——只做「检查 → 报警 → 给建议」；显式开启 watch 后也只拦截已确认的破坏操作。最终处置永远由你在自己的 DSH 上决定。",
     "hero.copy":"复制","hero.dash":"查看仪表盘",
     "shield.status":"● 实时守卫 · 只报警",
-    "stats.tests":"用例 · 1324 通过 · 1 跳过","stats.cov":"行覆盖率","stats.rules":"静态规则 R1–R20","stats.matrix":"击杀门禁 · 击杀/全净","stats.skips":"平台/夹具跳过",
+    "stats.tests":"用例 · 1329 通过 · 1 跳过","stats.cov":"行覆盖率","stats.rules":"静态规则 R1–R20","stats.matrix":"击杀门禁 · 击杀/全净","stats.skips":"平台/夹具跳过",
     "feat.kicker":"它能做什么","feat.title":"一条流水线，<span class=\"hl\">从下载到运行时。</span>",
     "feat.sub":"vet 占据整条信任链——下载 → 扫描 → 审计 → 评分 → 决定 → 运行时盯梢——默认止步于此：报告、建议；拦截只存在于显式 opt-in 的 watch 模式。",
     "f1.t":"确定性静态扫描","f1.d":"AST 上的 R1–R20 规则（引擎 static-v26），verdict 只由静态层产出——提示注入无法欺骗。扫描器是独立子进程：AST 只读、从不 eval。","f1.tag":"verdict · critical / suspicious / clean",
@@ -560,7 +560,7 @@ const I18N = {
     "dash.kicker":"仪表盘","dash.title":"用数据说话，<span class=\"hl\">不靠营销。</span>",
     "dash.sub":"来自测试套件与覆盖率实测的真实数字——安全层应当拿得出收据。",
     "d1.t":"覆盖率 vs 强制阈值","d1.sub":"vitest v8 · v8 provider · lines/functions/statements ≥ 85%、branches ≥ 80%（round-18 棘轮）；ubuntu CI 实测",
-    "d2.t":"1325 用例按套件分布","d2.sub":"1324 通过 · 1 个平台条件跳过（Linux 实跑）",
+    "d2.t":"1330 用例按套件分布","d2.sub":"1329 通过 · 1 个平台条件跳过（Linux 实跑）",
     "d3.t":"对抗矩阵 verdict 分布","d3.sub":"34 个恶意变异 + 8 个良性对照，覆盖 R1–R20 · 击杀率门禁强制执行",
     "d4.t":"静态规则严重度地图","d4.sub":"各规则默认严重度（R1–R20）",
     "trust.kicker":"信任边界","trust.title":"让它保持诚实的<span class=\"hl\">设计约束。</span>",
@@ -627,7 +627,7 @@ function makeCharts(){
     data:{
       labels:['lines','functions','statements','branches'],
       datasets:[{
-        data:[90.78,93.36,90.78,84.9],
+        data:[90.8,93.39,90.8,84.89],
         backgroundColor:['#0ecb8b','#38bdf8','#0ecb8b','#a78bfa'],
         borderRadius:7, barPercentage:.62
       }]
@@ -644,7 +644,7 @@ function makeCharts(){
     data:{
       labels:['scanner','runtime','plugins','self','qa'],
       datasets:[{
-        data:[324,513,240,160,88],
+        data:[324,518,240,160,88],
         backgroundColor:['#38bdf8','#60a5fa','#a78bfa','#0ecb8b','#fbbf24'],
         borderRadius:7, barPercentage:.6
       }]

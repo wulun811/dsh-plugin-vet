@@ -36,6 +36,61 @@ interface DismissedStore {
   dismissed: Record<string, { dismissedAt: number; reason?: string }>
 }
 
+/**
+ * 0.4.1：`scan-verdict` 的 id 加了**类别结构位**（`agg:` / `plugin:` / `tool:`，见
+ * guard/scan-verdict.ts 的命名空间说明）。旧格式的聚合行是
+ * `scan-verdict:osv:<公告>:<依赖>:<结论>`，加了结构位后变成
+ * `scan-verdict:agg:osv:…`——**字符串不再相等**，于是已忽略的 CVE 在升级后重新冒出来，
+ * 用户被迫对同一条公告再点一次「忽略」（实测：同一 zod 公告在存储里留下新旧两把键）。
+ *
+ * 迁移必须保守，只改写**结构上无歧义**的旧聚合行：
+ * - 5 段及以上、且第二段是 `osv` → 插入 `agg` 段。
+ * - 3 段的 `scan-verdict:<name>:<digest>`（旧对象行）**不改写**：旧格式不区分 plugin/tool，
+ *   猜成 plugin 会把「工具执行结果被忽略」变成「同名插件的红牌被预批准」——这正是本轮
+ *   修掉的别名 bug 的反向版本。宁可不迁移（让用户重新忽略一次），也不做有损猜测。
+ */
+export function migrateLegacyScanVerdictId(id: string): string {
+  const parts = id.split(':')
+  if (parts.length >= 5 && parts[0] === 'scan-verdict' && parts[1] === 'osv') {
+    return `scan-verdict:agg:${parts.slice(1).join(':')}`
+  }
+  return id
+}
+
+/**
+ * 迁移整张忽略表：旧键改写成新键，**同一条目两条键都存时按 dismissedAt 取较晚的一条**
+ * （reason 有值就保留）。纯函数、不写盘——迁移结果随下一次 dismiss/restore 的既存写入
+ * 自然落盘（loadDismissed 每次写前重读，所以不需要额外的写路径）。
+ */
+function migrateLegacyDismissals(
+  dismissed: Record<string, { dismissedAt: number; reason?: string }>,
+): Record<string, { dismissedAt: number; reason?: string }> {
+  type Entry = { dismissedAt: number; reason?: string }
+  const isEntry = (v: unknown): v is Entry => v !== null && typeof v === 'object'
+  const out: Record<string, Entry> = {}
+  for (const [id, entry] of Object.entries(dismissed) as Array<[string, unknown]>) {
+    const next = migrateLegacyScanVerdictId(id)
+    const prev = out[next]
+    // 盘上数据不可信（外部手改/截断残留）：非对象条目原样带过，绝不让规格外的值在迁移里
+    // 抛异常——那会被外层 catch 吞成「空存储」，用户全部忽略一起失效。
+    if (!isEntry(entry)) {
+      if (prev === undefined) out[next] = entry as unknown as Entry
+      continue
+    }
+    if (!isEntry(prev)) {
+      out[next] = entry
+      continue
+    }
+    const prevAt = Number.isFinite(prev.dismissedAt) ? prev.dismissedAt : -Infinity
+    const nextAt = Number.isFinite(entry.dismissedAt) ? entry.dismissedAt : -Infinity
+    const [later, earlier] = nextAt > prevAt ? [entry, prev] : [prev, entry]
+    out[next] = earlier.reason !== undefined && later.reason === undefined
+      ? { dismissedAt: later.dismissedAt, reason: earlier.reason }
+      : later
+  }
+  return out
+}
+
 /** 加载持久化忽略列表（写路径用：写前重读盘，以磁盘为准防外部改写竞态；不触碰缓存）。 */
 function loadDismissed(): DismissedStore {
   return withVetSelfIo(() => {
@@ -46,7 +101,10 @@ function loadDismissed(): DismissedStore {
       const content = readFileSync(DISMISSED_FILE, 'utf8')
       const parsed = JSON.parse(content)
       if (parsed && typeof parsed === 'object' && parsed.dismissed && typeof parsed.dismissed === 'object') {
-        return parsed as DismissedStore
+        const store = parsed as DismissedStore
+        // 旧 id 迁移（纯内存，不在此写盘）：0.3.x 里点过的「忽略」在 0.4.x 继续有效。
+        // 迁移结果随下一次 dismiss/restore 的既存写入自然落盘。
+        return { dismissed: migrateLegacyDismissals(store.dismissed) }
       }
       return { dismissed: {} }
     } catch {
