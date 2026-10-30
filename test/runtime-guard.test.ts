@@ -25,6 +25,11 @@ import * as yaml from 'js-yaml'
 
 const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512, growthMb: 256, growthWindowMs: 600_000 }
 
+/** 0.4.2：本文件多处用 mkdtemp（/tmp）模拟「用户目录」再往里写敏感名文件——/tmp 现在属于
+ * OS 临时根豁免面（用户反馈修复），而这几条用例要验证的是「敏感路径照报」本身。
+ * 显式清空 tempRoots 聚焦该语义；临时根豁免由 test/macos-private-temp-roots.test.ts 覆盖。 */
+const NO_TEMP_ROOTS = { ...DEFAULT_HOOK_CONFIG, tempRoots: [] }
+
 // 0.2.1：dismiss/restore 会写持久化文件——测试必须隔离，避免污染用户真实的忽略记录
 const TMP_DISMISS = join(tmpdir(), 'vet-test-dismiss-' + Date.now())
 setDismissedFileForTest(TMP_DISMISS)
@@ -542,7 +547,7 @@ describe('isSensitivePath / classifyOp（T2 分类）', () => {
     writeFileSync(join(pkgDir, 'package.json'), '{}')
     const alarms: HookAlarm[] = []
     // 生产 rootIndex：归因映射不含 vet 根（isAttributableEntry 已排除）
-    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), () => new Map([['/app/node_modules/evil/lib', 'evil-plugin']]))
+    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', NO_TEMP_ROOTS, a => alarms.push(a), () => new Map([['/app/node_modules/evil/lib', 'evil-plugin']]))
     try {
       // 宿主模块解析链：realpathSync 包内 package.json（属性访问触发包装器，同线上）
       fsDefault.realpathSync(join(pkgDir, 'package.json'))
@@ -684,7 +689,7 @@ describe('R31：归因阶段 fs 直通（递归护栏）', () => {
         setRootIndexing(false)
       }
     }
-    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), rootIndex)
+    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', NO_TEMP_ROOTS, a => alarms.push(a), rootIndex)
     try {
       // 触发真实报警：写敏感路径 → 归因 → rootIndex 内 realpathSync 敏感名包 → 不应递归
       // （无护栏时此处 RangeError: Maximum call stack size exceeded）
@@ -703,7 +708,7 @@ describe('R31：归因阶段 fs 直通（递归护栏）', () => {
 
   it('置位期间敏感操作直通（不报警）；清除后恢复报警', () => {
     const alarms: HookAlarm[] = []
-    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), () => new Map())
+    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', NO_TEMP_ROOTS, a => alarms.push(a), () => new Map())
     try {
       const p = join(mkdtempSync(join(tmpdir(), '.tmp-r31b-')), '.env')
       setRootIndexing(true)
@@ -721,7 +726,7 @@ describe('R31：归因阶段 fs 直通（递归护栏）', () => {
   it('rootIndex 抛错：P1-3 归因失败不反噬原始调用——报警保留无主，写照常执行', () => {
     const alarms: HookAlarm[] = []
     let throwOnce = true
-    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', DEFAULT_HOOK_CONFIG, a => alarms.push(a), () => {
+    const dispose = patchModule(fsDefault as unknown as Record<string, unknown>, 'fs', NO_TEMP_ROOTS, a => alarms.push(a), () => {
       setRootIndexing(true)
       try {
         if (throwOnce) {
@@ -1443,7 +1448,9 @@ describe('installRuntimeGuard（T1 哨兵 + T2 钩子集成，覆盖率补盲）
       // 真实 fs 模块已被包装：写敏感路径应产生 fs-write 报警（T2 生效）
       const before = status.snapshot().alarmCount
       // 用真实 fs 触发（写一个临时敏感命名路径）
-      const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-integ-'))
+      // 0.4.2：/tmp 已属 OS 临时根豁免面（用户反馈修复），此处要验证的是敏感名写入照报，
+      // 因此把测试目录放在仓库内（.tmp-*/ 已在 .gitignore）。
+      const dir = mkdtempSync(join(process.cwd(), '.tmp-guard-integ-'))
       try {
         // 用属性访问（fsDefault.writeFileSync）触发——ESM 具名导入是 patch 前固化的原始引用，
         // patchModule 包装的是模块对象属性（README 已知旁路），属性访问才能命中 T2 钩子
@@ -1463,7 +1470,7 @@ describe('installRuntimeGuard（T1 哨兵 + T2 钩子集成，覆盖率补盲）
     // dispose 后：环境变量清空、再写不再报警（钩子已恢复）
     expect(process.env.DSH_VET_SIDECAR_PID).toBeUndefined()
     const after = status.snapshot().alarmCount
-    const dir2 = mkdtempSync(join(tmpdir(), '.tmp-guard-integ2-'))
+    const dir2 = mkdtempSync(join(process.cwd(), '.tmp-guard-integ2-'))
     try {
       fsDefault.writeFileSync(join(dir2, 'id_rsa.pem'), 'y')
       expect(status.snapshot().alarmCount).toBe(after)

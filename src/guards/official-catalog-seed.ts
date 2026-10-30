@@ -5,6 +5,15 @@
  * dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的 @deepseek-ai/* 全量包名。
  * 生成方式：node scripts/gen-official-catalog-seed.mjs
  *        （dsh-src 更新或本机 DSH 升级后重跑；收集源：dsh-src/packages、dsh-src/apps、dsh-src/vendor、live:/home/chen/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai）。
+ * 0.2.1 家族注记（0.4.2，随 DSH 0.2.1-rc.5 重生成）：新增插件市场三件（plugin-market、
+ * plugin-market-index、client-ui-plugin-market）、远程访问/工作目录/日程（api-remote-access、
+ * working-directory、tool-working-directory、tool-schedule、web-deepseek-api、harness-dev-context）、
+ * 会话检查器与翻译（experimental-inspector(+profile)、experimental-session-inspector、
+ * experimental-session-search、experimental-translator、experimental-*-bundle 等）、
+ * 密钥遮罩与入口定制（client-ui-secret-mask、client-ui-entry-customization）。
+ * 0.2.1 起改并集生成：现有种子里的名字一律保留（本轮 dsh-client-store、dsh-webhook、
+ * dsh-webhook-github、experimental-schedule-bundle 已不随 0.2.1-rc.5 发行物出现，
+ * 仍留档——目录内名字不是信任本身，哈希不符照旧黄牌）。
  * 0.2.0 家族注记：新增遥测三件（client-product-analytics / otel / host-product-telemetry-otel）、
  * 快捷键（client-shortcuts、client-ui-shortcuts）、会话日志设置页（client-ui-settings-session-log）、
  * 自动复核（experimental-auto-review）、日程 bundle（experimental-schedule-bundle）、
@@ -48,6 +57,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-api-account-controller',
   '@deepseek-ai/dsh-api-gateway',
   '@deepseek-ai/dsh-api-job-controller',
+  '@deepseek-ai/dsh-api-remote-access',
   '@deepseek-ai/dsh-api-remotes',
   '@deepseek-ai/dsh-api-session-controller',
   '@deepseek-ai/dsh-api-settings-controller',
@@ -84,9 +94,11 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-client-ui-commands',
   '@deepseek-ai/dsh-client-ui-conversation',
   '@deepseek-ai/dsh-client-ui-cordis',
+  '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017',
   '@deepseek-ai/dsh-client-ui-deliverables',
   '@deepseek-ai/dsh-client-ui-directory-picker-browse',
   '@deepseek-ai/dsh-client-ui-directory-picker-native',
+  '@deepseek-ai/dsh-client-ui-entry-customization',
   '@deepseek-ai/dsh-client-ui-goal',
   '@deepseek-ai/dsh-client-ui-input-trigger',
   '@deepseek-ai/dsh-client-ui-jobs',
@@ -97,10 +109,12 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-client-ui-permission-presets',
   '@deepseek-ai/dsh-client-ui-plan',
   '@deepseek-ai/dsh-client-ui-plugin-manager',
+  '@deepseek-ai/dsh-client-ui-plugin-market',
   '@deepseek-ai/dsh-client-ui-primitives',
   '@deepseek-ai/dsh-client-ui-reference',
   '@deepseek-ai/dsh-client-ui-renderer',
   '@deepseek-ai/dsh-client-ui-schedule',
+  '@deepseek-ai/dsh-client-ui-secret-mask',
   '@deepseek-ai/dsh-client-ui-session',
   '@deepseek-ai/dsh-client-ui-settings',
   '@deepseek-ai/dsh-client-ui-settings-account',
@@ -156,13 +170,27 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-api-speech-to-text',
   '@deepseek-ai/dsh-experimental-auto-review',
+  '@deepseek-ai/dsh-experimental-badge-skill-bundle',
   '@deepseek-ai/dsh-experimental-client-ui-agent-team',
+  '@deepseek-ai/dsh-experimental-client-ui-cot-translation',
   '@deepseek-ai/dsh-experimental-client-ui-voice-input',
+  '@deepseek-ai/dsh-experimental-cot-translation-bundle',
+  '@deepseek-ai/dsh-experimental-inspector',
+  '@deepseek-ai/dsh-experimental-inspector-profile',
+  '@deepseek-ai/dsh-experimental-plugin-market-bundle',
+  '@deepseek-ai/dsh-experimental-ralph-bundle',
   '@deepseek-ai/dsh-experimental-schedule-bundle',
+  '@deepseek-ai/dsh-experimental-session-inspector',
+  '@deepseek-ai/dsh-experimental-session-search',
+  '@deepseek-ai/dsh-experimental-session-titles-bundle',
   '@deepseek-ai/dsh-experimental-speech-to-text',
   '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice',
+  '@deepseek-ai/dsh-experimental-terminal-bundle',
   '@deepseek-ai/dsh-experimental-tool-agent-team',
+  '@deepseek-ai/dsh-experimental-tool-worktree',
+  '@deepseek-ai/dsh-experimental-translator',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
+  '@deepseek-ai/dsh-experimental-worktree',
   '@deepseek-ai/dsh-file-reference',
   '@deepseek-ai/dsh-file-reference-local',
   '@deepseek-ai/dsh-fs',
@@ -172,6 +200,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-fs-sandbox',
   '@deepseek-ai/dsh-goal',
   '@deepseek-ai/dsh-goal-round-driver',
+  '@deepseek-ai/dsh-harness-dev-context',
   '@deepseek-ai/dsh-headless',
   '@deepseek-ai/dsh-hmr',
   '@deepseek-ai/dsh-home-paths',
@@ -217,6 +246,8 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-persona',
   '@deepseek-ai/dsh-plan-mode',
   '@deepseek-ai/dsh-plugin-manager',
+  '@deepseek-ai/dsh-plugin-market',
+  '@deepseek-ai/dsh-plugin-market-index',
   '@deepseek-ai/dsh-plugin-package-inventory-deepseek',
   '@deepseek-ai/dsh-ptc-runtime',
   '@deepseek-ai/dsh-ptc-runtime-node',
@@ -308,6 +339,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-tool-pwsh',
   '@deepseek-ai/dsh-tool-pwsh-persistent',
   '@deepseek-ai/dsh-tool-ralph',
+  '@deepseek-ai/dsh-tool-schedule',
   '@deepseek-ai/dsh-tool-session-query',
   '@deepseek-ai/dsh-tool-skill',
   '@deepseek-ai/dsh-tool-str-replace-editor',
@@ -318,6 +350,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-tool-todo',
   '@deepseek-ai/dsh-tool-web',
   '@deepseek-ai/dsh-tool-workflow',
+  '@deepseek-ai/dsh-tool-working-directory',
   '@deepseek-ai/dsh-tool-workspace-dependencies',
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-typert-generator',
@@ -333,6 +366,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-util-workspace-path',
   '@deepseek-ai/dsh-web',
   '@deepseek-ai/dsh-web-app',
+  '@deepseek-ai/dsh-web-deepseek-api',
   '@deepseek-ai/dsh-web-fetch-http',
   '@deepseek-ai/dsh-web-frontend',
   '@deepseek-ai/dsh-web-search-deepseek',
@@ -344,6 +378,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-workflow',
   '@deepseek-ai/dsh-workflow-ptc',
   '@deepseek-ai/dsh-workflow-worker-thread',
+  '@deepseek-ai/dsh-working-directory',
   '@deepseek-ai/dsh-workspace',
   '@deepseek-ai/dsh-workspace-changes',
   '@deepseek-ai/libreoffice-kit',

@@ -5,7 +5,8 @@
 
 import type { HookConfig } from './runtime-ops.js'
 import { fileURLToPath } from 'node:url'
-import { normPath } from './path-utils.js'
+import { homedir, tmpdir } from 'node:os'
+import { normPath, normalizePathForJudge, stripMacPrivatePrefix } from './path-utils.js'
 
 /**
  * T2 观测面单实参上限（round-22）：路径/命令实参超长按前缀截断。超长实参本身必然
@@ -198,19 +199,100 @@ export function isDshLockSiblingProbe(p: string): boolean {
   if (!DSH_STATE_DIR_RE.test(norm)) return false
   return isLockSiblingPath(norm)
 }
+// ── OS 临时根（0.4.2，用户反馈：macOS /private 前缀导致的 fs-destroy 误报）──────────
+
+/** macOS 每用户临时区（os.tmpdir() 的形态）：/var/folders/<xx>/<yy>/T。 */
+const MAC_USER_TEMP_RE = /^\/var\/folders\/[^/]+\/[^/]+\/T$/
+/** Windows 临时区（os.tmpdir() 的两种常见形态）：%LOCALAPPDATA%\Temp、%SystemRoot%\Temp。 */
+const WIN_TEMP_RE = /^[a-z]:\/(?:users\/[^/]+\/appdata\/local\/temp|windows\/temp)$/i
+/** 末段形如临时目录的名字（TMPDIR 被指到非标准位置时的兜底形态）。 */
+const TEMP_DIR_NAMES = new Set(['tmp', 'temp'])
+
+function isUnderRoot(p: string, root: string): boolean {
+  return p === root || p.startsWith(root + '/')
+}
+
 /**
- * 归一化路径并判断是否敏感。
+ * 临时根可信性（0.4.2）：os.tmpdir() 可以被部署方/沙箱指到任意目录，无条件信任等于把
+ * 「删除豁免面」交给一个环境变量——`TMPDIR=$HOME/.ssh` 就能把凭据目录变成临时区。
+ * 只接受三类形态：字面 /tmp、/var/tmp；macOS 每用户临时区；Windows 临时区；以及末段为
+ * tmp/temp 且**不在家目录内**的目录（非标准 TMPDIR 的常见合法形态，如 TMPDIR=/data/tmp）。
+ * 校验失败的候选直接丢弃——宁可多报，不把用户数据目录悄悄纳入豁免。
+ */
+export function isPlausibleTempRoot(root: string): boolean {
+  if (root === '/tmp' || root === '/var/tmp') return true
+  if (MAC_USER_TEMP_RE.test(root) || WIN_TEMP_RE.test(root)) return true
+  const last = root.slice(root.lastIndexOf('/') + 1).toLowerCase()
+  if (!TEMP_DIR_NAMES.has(last)) return false
+  return !isUnderRoot(root, stripMacPrivatePrefix(normPath(homedir())))
+}
+
+/**
+ * 解析生效的临时根列表（0.4.2）：默认 /tmp、/var/tmp、os.tmpdir()，逐个归一化（点段折叠 +
+ * macOS /private 折叠）、去重、按 isPlausibleTempRoot 校验。
+ * 模块加载时物化一次（不是每个 fs 事件都读 os.tmpdir()：既是热路径成本，也避免「运行中
+ * 改 TMPDIR 就换一套豁免面」的时序面——恶意插件改 env 无法扩面）。
+ */
+export function resolveTempRoots(candidates: readonly string[] = ['/tmp', '/var/tmp', tmpdir()]): string[] {
+  const out: string[] = []
+  for (const c of candidates) {
+    if (typeof c !== 'string' || c === '') continue
+    const n = stripMacPrivatePrefix(normPath(c))
+    // 只收绝对路径：TMPDIR 是相对路径（'tmp'）时 os.tmpdir() 原样返回，相对根永远不会匹配
+    // 绝对事件路径，却在相对目标上产生「碰巧命中」的豁免面——直接丢弃（Windows 盘符也算绝对）。
+    if (n === '' || n === '/' || n === '.' || !(n.startsWith('/') || /^[a-zA-Z]:\//.test(n))) continue
+    if (!isPlausibleTempRoot(n) || out.includes(n)) continue
+    out.push(n)
+  }
+  return out
+}
+
+/** 默认临时根（模块加载时物化；HookConfig.tempRoots 的默认值即此）。 */
+export const DEFAULT_TEMP_ROOTS: readonly string[] = Object.freeze(resolveTempRoots())
+
+/**
+ * 路径是否落在任一临时根之下（含根本身）。
+ * 0.4.2：两侧同一 darwin 大小写口径——判定路径已由 normalizePathForJudge 折叠为小写，
+ * 而根可能保持原始拼写（macOS 的 os.tmpdir() 形如 /var/folders/xx/yy/T，末段是大写 T），
+ * 只折一侧会让「就是那个临时根」反而匹配不上。
+ */
+export function isUnderTempRoot(
+  p: string,
+  roots: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const fold = (v: string): string => (platform === 'darwin' ? v.toLowerCase() : v)
+  const key = fold(p)
+  return roots.some(r => isUnderRoot(key, fold(r)))
+}
+
+/**
+ * 归一化路径并判断是否敏感（DSH 安装树的 node_modules 依赖豁免见下方第一段）。
+ *
  * mode='mutate'（写/删）额外计入系统根前缀（/etc /usr /var …：写删系统文件=篡改/破坏）；
  * mode='read' 只看密钥特征（段名/后缀/关键词）——读系统目录下的普通文件（库文件、配置）属正常
  * 操作；枚举目标（/etc/passwd、/etc/shadow）已由精确段名覆盖，不需要系统根。
+ *
+ * 0.4.2（用户反馈）：判定前先做 macOS 归一化（见 normalizePathForJudge：/private 前缀 +
+ * 大小写，仅 darwin），再判 **OS 临时根**——写/删落在 /tmp、/var/tmp、os.tmpdir() 下的直接
+ * 放行。临时目录按定义可丢弃：DSH 原子写暂存、工具链临时件、workspace-changes 的私有 git
+ * index 都落在那里，清理它们不损坏任何用户数据或凭据。豁免只覆盖写/删（mode='read' 仍走
+ * 段名/关键词判定，`/tmp/id_rsa` 这类把密钥复制到临时区的侦察照旧可见）；豁免面在点段折叠
+ * 之后计算——`/tmp/../etc/hosts` 折成 `/etc/hosts` 后不再落在临时根下，照旧敏感。
+ * `platform` 参数供测试/跨平台诊断显式指定（生产调用一律取 process.platform）。
  */
-/** DSH 安装树豁免：~/.dsh 下任意 profile 目录里的 node_modules 依赖树（判定见 isSensitivePath，round-17 去正则化）。 */
-export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'mutate' = 'mutate'): boolean {
+export function isSensitivePath(
+  p: string,
+  cfg: HookConfig,
+  mode: 'read' | 'mutate' = 'mutate',
+  platform: NodeJS.Platform = process.platform,
+): boolean {
   // 0.3.9（审查修复）：先做点段折叠（normPath 与 confirm-block/contract 同源）——
   // 此前只换反斜杠，`…/.dsh/node_modules/x/../../.credentials.yaml` 这类**内核解析后**
   // 指向凭据本体的别名路径会被 node_modules 豁免/后段不查的判定放行（实测返回 false）→
   // T2 读侦察报警、N3 敏感台账、N1 隐藏能力差分对该路径全盲。
-  const norm = normPath(p)
+  // 0.4.2：叠加 macOS `/private` 前缀折叠（macOS 上 /tmp、/var、/etc 的规范路径在 /private 下）。
+  const norm = normalizePathForJudge(p, platform)
   // DSH 安装树豁免：~/.dsh/**/node_modules/** 是平台自己装的公开依赖树（任意 profile 布局——
   // 本机 profiles/web/node_modules、用户机 .dsh/web/node_modules、顶层 hoisted node_modules）。
   // 插件加载期 require.resolve 触发 realpathSync（electron/install.js、dsh-traffic-light/package.json
@@ -226,6 +308,11 @@ export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'muta
   // rmdir node_modules 本体不带尾斜杠 → 不在豁免内，与旧正则一致）。
   const dshStateIdx = norm.indexOf('/.dsh/')
   if (dshStateIdx !== -1 && norm.indexOf('/node_modules/', dshStateIdx + 1) !== -1) return false
+  // 0.4.2（用户反馈）：OS 临时根豁免——只豁免写/删（mode='mutate'），且严格按归一化后的
+  // 绝对路径做前缀判定。macOS 上 /private/var/folders/<xx>/<yy>/T 会先折成
+  // /var/folders/<xx>/<yy>/T，否则它命中 sensitiveRoots 的 /var 前缀（这正是「临时清理被判
+  // 敏感删除」的另一半根因）。/var/db、/var/log、/etc、/usr 不在临时根内，照旧报警。
+  if (mode !== 'read' && isUnderTempRoot(norm, cfg.tempRoots ?? DEFAULT_TEMP_ROOTS, platform)) return false
   const parts = norm.split('/')
   for (let i = 0; i < parts.length; i++) {
     const low = parts[i].toLowerCase()
@@ -246,7 +333,9 @@ export function isSensitivePath(p: string, cfg: HookConfig, mode: 'read' | 'muta
   }
   if (mode === 'read') return false
   for (const root of cfg.sensitiveRoots) {
-    if (norm === root || norm.startsWith(root + '/')) return true
+    // darwin：norm 已小写化，根也按同一口径比（配置里写成 '/ETC' 也照样命中）
+    const cmp = platform === 'darwin' ? root.toLowerCase() : root
+    if (norm === cmp || norm.startsWith(cmp + '/')) return true
   }
   return false
 }
@@ -379,19 +468,24 @@ export function redirectTarget(command: string): string | undefined {
   const m = /(?:^|\s)[12]?>>?\s*([^\s&;|]+)/.exec(command)
   return m === null ? undefined : m[1].replace(/^['"]|['"]$/g, '').replace(/^~/, '/home')
 }
-/** 路径是否为完整性金丝雀文件（精确文件名匹配，N4）。 */
+/**
+ * 路径是否为完整性金丝雀文件（精确文件名匹配，N4）。
+ * 0.4.2：两侧走同一归一化（点段折叠 + darwin 的 /private/大小写折叠）——金丝雀与蜜罐的
+ * 判定是「碰一下就是高置信信号」，按 realpath 拼写（/private/tmp/...、大小写变体）绕过
+ * 归一化就等于留一条规避通道。顺带修掉旧实现的尾斜杠陷阱（根写成 '/x/' 时永不匹配）。
+ */
 export function isIntegrityPath(p: string, roots: string[]): boolean {
   if (roots.length === 0) return false
-  const norm = p.replace(/\\/g, '/')
-  return roots.some(r => norm === r.replace(/\\/g, '/'))
+  const norm = normalizePathForJudge(p)
+  return roots.some(r => norm === normalizePathForJudge(r))
 }
 
-/** 路径是否落在任一蜜罐根下（D27）。 */
+/** 路径是否落在任一蜜罐根下（D27）；两侧同一归一化，理由同上。 */
 export function isHoneypotPath(p: string, roots: string[]): boolean {
   if (roots.length === 0) return false
-  const norm = p.replace(/\\/g, '/')
+  const norm = normalizePathForJudge(p)
   return roots.some(r => {
-    const root = r.replace(/\\/g, '/')
-    return norm === root || norm.startsWith(root + '/')
+    const root = normalizePathForJudge(r)
+    return root !== '' && (norm === root || norm.startsWith(root + '/'))
   })
 }

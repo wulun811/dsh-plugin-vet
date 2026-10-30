@@ -110,7 +110,17 @@ if (liveFamily !== undefined && liveFamily !== null && existsSync(liveFamily)) {
   sources.push(`live:${liveFamily}`)
 }
 
+// 超集语义（0.4.2）：种子声明「名字真值只增不减」，但收集源是「当前发行物」——DSH 一走
+// 弃包/改包，重跑就会把旧名从种子删掉，等于用一次重生成悄悄降档。这里并上现有种子里的
+// 全部名字：退役名保留，新增名照加（差集只增不减）。
+const existing = existsSync(outFile)
+  ? [...readFileSync(outFile, 'utf8').matchAll(/'(@deepseek-ai\/[^']+)'/g)].map(m => m[1])
+  : []
+for (const n of existing) names.add(n)
+
 const sorted = [...names].sort()
+const added = sorted.filter(n => !existing.includes(n))
+const retired = existing.filter(n => !sorted.includes(n)) // 恒空（并集保证），留作断言
 const lines = sorted.map(n => `  '${n}',`).join('\n')
 const header = `/**
  * 官方包目录种子（M1，0.3.6 首建四源；0.3.7 随 DSH 0.1.5-rc.1 重生成；0.3.13 随 DSH
@@ -119,6 +129,15 @@ const header = `/**
  * dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的 @deepseek-ai/* 全量包名。
  * 生成方式：node scripts/gen-official-catalog-seed.mjs
  *        （dsh-src 更新或本机 DSH 升级后重跑；收集源：${sources.join('、')}）。
+ * 0.2.1 家族注记（0.4.2，随 DSH 0.2.1-rc.5 重生成）：新增插件市场三件（plugin-market、
+ * plugin-market-index、client-ui-plugin-market）、远程访问/工作目录/日程（api-remote-access、
+ * working-directory、tool-working-directory、tool-schedule、web-deepseek-api、harness-dev-context）、
+ * 会话检查器与翻译（experimental-inspector(+profile)、experimental-session-inspector、
+ * experimental-session-search、experimental-translator、experimental-*-bundle 等）、
+ * 密钥遮罩与入口定制（client-ui-secret-mask、client-ui-entry-customization）。
+ * 0.2.1 起改并集生成：现有种子里的名字一律保留（本轮 dsh-client-store、dsh-webhook、
+ * dsh-webhook-github、experimental-schedule-bundle 已不随 0.2.1-rc.5 发行物出现，
+ * 仍留档——目录内名字不是信任本身，哈希不符照旧黄牌）。
  * 0.2.0 家族注记：新增遥测三件（client-product-analytics / otel / host-product-telemetry-otel）、
  * 快捷键（client-shortcuts、client-ui-shortcuts）、会话日志设置页（client-ui-settings-session-log）、
  * 自动复核（experimental-auto-review）、日程 bundle（experimental-schedule-bundle）、
@@ -138,5 +157,6 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
 ${lines}
 ]
 `
+if (retired.length > 0) throw new Error(`种子并集失败：${retired.join(', ')}`)
 writeFileSync(outFile, header)
-console.log(`official-catalog-seed.ts: ${sorted.length} names (sources: ${sources.join(', ')}) → ${outFile}`)
+console.log(`official-catalog-seed.ts: ${sorted.length} names (+${added.length} new, sources: ${sources.join(', ')}) → ${outFile}`)

@@ -2,6 +2,8 @@
  * T2 进程内钩子：操作表与类型
  * P0-4 结构债拆分自 runtime-hooks.ts（纯类型/常量，无副作用）
  */
+import { DEFAULT_TEMP_ROOTS } from './runtime-denoise.js'
+
 export type HookModule = 'fs' | 'child_process'
 
 export interface HookConfig {
@@ -19,6 +21,13 @@ export interface HookConfig {
   honeypotRoots: string[]
   /** 完整性金丝雀路径（N4，仅 ~/.dsh 内）：写/删即 red kind=integrity（与凭据蜜罐语义分离）。 */
   integrityRoots: string[]
+  /**
+   * OS 临时根（0.4.2，用户反馈）：写/删落在这些根之下直接放行（读不豁免）。
+   * 默认 /tmp、/var/tmp、os.tmpdir()（见 runtime-denoise 的 resolveTempRoots）；平台/部署
+   * 差异（沙箱自定义 TMPDIR）可在此覆盖。判定只认归一化后的绝对前缀，且候选要过
+   * isPlausibleTempRoot（家目录内的 tmp 不算——避免把凭据目录变成豁免面）。
+   */
+  tempRoots: string[]
   /** round-13（Phase 3）：本地 API 回环观测（默认关）。true 时 127.0.0.1 出站进台账，
    * 命中 DSH 控制面路径（/api/、session.*、/plugins/）且归因第三方插件 → yellow loopback-control。 */
   observeLoopback?: boolean
@@ -39,6 +48,9 @@ export const DEFAULT_HOOK_CONFIG: HookConfig = {
   shellTokens: ['sh', 'bash', 'zsh', 'cmd', 'powershell', 'pwsh', 'curl', 'wget', 'nc', 'ncat', 'telnet'],
   honeypotRoots: [],
   integrityRoots: [],
+  // 0.4.2（用户反馈）：OS 临时根默认值与平台一起物化（home 之外的自定义 TMPDIR 需显式配置，
+  // 见 HookConfig.tempRoots 与 isPlausibleTempRoot）。
+  tempRoots: [...DEFAULT_TEMP_ROOTS],
 }
 
 /** T2 报警候选（at/source 由调用方补全）。 */

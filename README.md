@@ -336,6 +336,23 @@ discipline as vet_label); the "blocked" mark comes from the N7 family-1 list.
       auto-exempt — the secrets/credentials in their names are just source filenames being compiled; deleting
       them is cleanup, not destruction; parent segments still judged normally (`~/.ssh/config.bak` still
       alarms).
+    - **OS temp roots and macOS `/private` (0.4.2, user report)**: on macOS `/tmp`, `/var` and `/etc` are
+      symlinks into `/private/*`, so the canonical path is `/private/tmp/…` or `/private/var/…`. Previously
+      `/private/tmp/...` (atomic-write staging) and `/private/var/folders/<xx>/<yy>/T/...` (`os.tmpdir()`,
+      where DSH's atomic staging and workspace-changes' private git index live) were hit **twice** — by the
+      `private` keyword and by the `/var` system-root prefix — producing a burst of 20 unattributed red
+      `fs-destroy` alarms. Paths are now normalized (dot-segment folding + macOS `/private` folding) before
+      judgement, and **writes/deletes** under `/tmp`, `/var/tmp` and `os.tmpdir()` pass; reads are **not**
+      exempt (`/tmp/id_rsa` is still visible as a key copy). Boundaries hold: `/private/etc`,
+      `/private/var/db`, `/var/log`, `~/.dsh/.credentials.yaml` still alarm, and `/tmp/../etc/hosts` folds
+      out of the temp root and still alarms. The roots are `HookConfig.tempRoots` (`/tmp`, `/var/tmp`,
+      `os.tmpdir()`, materialized at load) and candidates are validated — `TMPDIR=$HOME/.ssh` cannot turn a
+      credential directory into an exemption surface. **Case is folded on darwin as well** (macOS volumes are
+      case-insensitive by default): `/ETC/hosts` *is* `/etc/hosts`, yet the root-prefix check compared case
+      sensitively, so an all-caps spelling rewrote `/etc/hosts` with no alarm at all; Linux/Windows keep exact
+      case (`ext4` cannot resolve `/ETC/hosts` to `/etc`). Honeypot/canary matching (`isHoneypotPath`,
+      `isIntegrityPath`) normalizes both sides too, so a lure spelled `/private/tmp/...` no longer misses. The N7
+      confirm-block uses the same normalization (`/private/etc/hosts` no longer bypasses family 3).
 - **GUI shield**: a browser half registers into `conversation.session.header.actions` and polls
   /vet/status.json to show a green/yellow/red light + alarm count. Activation requires a `dsh web` restart
   (client-modules only scans the `dsh.client` declaration at startup).

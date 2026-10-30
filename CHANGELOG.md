@@ -3,6 +3,128 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.4.2] - 2026-10-30
+
+DSH 0.2.1-rc.5 re-verification, plus a user-reported macOS false-positive fix. **No engine change** — rule set
+and thresholds are untouched (`static-v26`, same as 0.3.13–0.4.1).
+
+### Fixed — every macOS purge of a temp directory looked like credential destruction
+
+Reported with a clean reproduction: on a hardened profile (`runtimeGuard: watch`) the panel produced **20 red
+`fs-destroy` alarms in one burst, all unattributed**, with targets under `/private/tmp` and
+`/private/var/folders/<xx>/<yy>/T`:
+
+```
+unlink(/private/tmp/.<name>.applescript.<pid>.<uuid>.tmpdir/<name>.applescript.tmp) + rmdir(…tmpdir)
+unlink(/private/var/folders/<xx>/<yy>/T/dsh-workspace-changes-<rand>/index-<rand>/index)      + rmdir(…)
+```
+
+Both are the host cleaning up after itself: `fs-local`'s `writeFileAtomic` staging directory (commit by rename,
+then `rm -rf`) and `@deepseek-ai/dsh-workspace-changes`'s `snapshotTree()` private git index (`mkdtemp('index-')`
+under `os.tmpdir()`, removed in `finally`). Nothing user-owned or secret was touched.
+
+Two independent causes, both in `isSensitivePath()`:
+
+1. **The `private` keyword vs macOS canonical paths.** `sensitiveKeywords` contains `private`, and macOS
+   presents `/tmp`, `/var`, `/etc` as `/private/tmp`, `/private/var`, `/private/etc`. Every write or delete under
+   `/private/**` was therefore sensitive by keyword.
+2. **`sensitiveRoots` prefix matching inverted the same fact.** `/private/var/db/x` does not start with `/var/`,
+   so the root check silently missed it and only the keyword "happened" to catch it — removing the keyword
+   alone would have *lost* `/private/etc` and `/private/var/db` while fixing `/private/tmp`.
+
+The fix is the normalization the platform actually defines, applied where it belongs:
+
+- **`stripMacPrivatePrefix` / `normalizePathForJudge` (path-utils).** Judgement now runs on dot-segment folding
+  **followed by** the macOS `/private` fold, so `/private/etc/hosts` → `/etc/hosts` (root hit, as before) and
+  `/private/tmp/...` → `/tmp/...` (no longer a keyword hit). Order matters and is pinned by tests:
+  `/private/tmp/../etc/hosts` folds to `/private/etc/hosts` and *then* to `/etc/hosts` — still sensitive, so the
+  fold cannot be used to launder a traversal. `/private` itself is left alone (it is a real directory; mapping it
+  to `/` would equate "delete /private" with "delete the root").
+- **The fold is gated on `darwin`.** `/private` is a macOS canonical prefix; on Linux/Windows a `/private/...`
+  path is an ordinary directory, and folding it there would only manufacture hits. The platform is a parameter
+  (defaulting to `process.platform`) so the darwin behaviour is testable on a Linux CI.
+- **OS temp roots are exempt from write/delete judgement.** `/tmp`, `/var/tmp` and `os.tmpdir()` (on macOS
+  `/var/folders/<xx>/<yy>/T`) are disposable by definition — DSH atomic-write staging, toolchain temp files and
+  the workspace-changes git index all live there. The exemption applies to `mode !== 'read'` **only**: reads keep
+  the segment/keyword judgement, so `/tmp/id_rsa` (a key copied into the temp area) is still a recon signal.
+  `/var/db`, `/var/log`, `/etc`, `/usr` are not temp roots and still alarm. The list is
+  `HookConfig.tempRoots` (default `/tmp`, `/var/tmp`, `os.tmpdir()`, materialized **once at module load** — a hot
+  path does not re-read `os.tmpdir()`, and a plugin cannot change `process.env.TMPDIR` mid-run to widen the
+  exemption surface). Candidates are validated by `isPlausibleTempRoot`: `TMPDIR=$HOME/.ssh` (or any `~/**/tmp`)
+  is rejected, so a misconfigured or hostile TMPDIR cannot turn a credential directory into an exemption.
+- **N7 confirm-block uses the same normalization.** Family-3 targets compared by exact equality (`/etc/hosts`,
+  `/etc/sudoers`) and by prefix (`/etc/ssl`) were bypassable with the macOS spelling; they now normalize first.
+- **Case is folded too, on macOS only.** macOS's default volume (APFS/HFS+) is case-insensitive, so `/ETC/hosts`
+  *is* `/etc/hosts` — but `sensitiveRoots` compares prefixes case-sensitively, so a plain
+  `writeFileSync('/ETC/hosts', …)` produced **no alarm at all** on macOS (`/ETC/...` misses `/etc`, and the
+  `private` keyword does not apply). `normalizePathForJudge` now also lowercases on darwin (Linux/Windows keep
+  exact case — `ext4` cannot even resolve `/ETC/hosts` to `/etc`, so folding there would only manufacture
+  hits). The comparison inside `isSensitivePath` folds the configured roots the same way, so a root written as
+  `/ETC` still matches. This is a *tightening*: writes to `/ETC/hosts`, `/ETC/sudoers`, `/ETC/ssl/...` are now
+  family-3 `persistence-write`, and `/USERS/A/.SSH/ID_RSA` now matches the credential list (both sides of that
+  comparison are normalized, otherwise a mixed-case `$HOME` would never compare equal).
+- **Canary and honeypot matching now use the same normalization** (`isIntegrityPath`, `isHoneypotPath`).
+  Lures/canaries are placed inside `~/.dsh` by default so they were never affected by `/private`, but a
+  honeypot configured under `/tmp` (or a plugin that resolves `realpath`) could be spelled `/private/tmp/...`
+  and silently miss. Both sides are normalized now — and the old trailing-slash trap (`roots: ['/x/']` could
+  never match) is gone as a side effect. The temp-root exemption deliberately does **not** run before these
+  checks: a canary or lure under a temp root still fires (pinned by a test).
+- **Temp-root candidates must be absolute.** `TMPDIR=tmp` (relative) makes `os.tmpdir()` return `tmp`, a root
+  that can never match an absolute event path yet could "accidentally" match a relative one — relative
+  candidates are now dropped, and the Windows drive-letter form is accepted as absolute.
+- **Official package catalog re-seeded for 0.2.1** (330 → 356 names, +26, zero removals). The generator now
+  **unions** with the existing seed instead of replacing it: the seed's own contract says "names only ever grow",
+  but a plain regeneration from the current release would have dropped `dsh-client-store`, `dsh-webhook`,
+  `dsh-webhook-github` and `experimental-schedule-bundle` — a silent downgrade by re-seeding. New official names
+  in 0.2.1 include `plugin-market`/`plugin-market-index`, `api-remote-access`, `working-directory`,
+  `tool-working-directory`, `tool-schedule`, `web-deepseek-api`, `harness-dev-context`, `experimental-inspector`
+  (+profile), `experimental-session-inspector`/`-search`/`-translator`, `client-ui-secret-mask` and
+  `client-ui-entry-customization`; without them those packages would have been flagged
+  `official-not-in-catalog` (yellow observation) purely because they are new.
+
+### Tests — 20 new tests (`test/macos-private-temp-roots.test.ts`)
+
+The reported four paths (write/delete, darwin) return `false`; `/ETC/hosts` is folded to `/etc/hosts` on darwin
+(false on linux, so the gate is pinned both ways); relative `TMPDIR` candidates are dropped; `/private/etc/hosts`, `/private/var/db/x`,
+`/var/log/system.log`, `~/.dsh/.credentials.yaml`, `/tmp/../etc/hosts` and `/private/tmp/../etc/hosts` still
+return `true`; the Linux gate is pinned (the same `/private/tmp` path is *not* folded there); reads stay
+exempt-free (`/private/tmp/id_rsa`, `/tmp/.ssh/id_rsa`); `resolveTempRoots` normalization/dedup and
+`isPlausibleTempRoot` rejection of `$HOME/**.ssh/tmp` are covered; and `classifyOp` returns `null` for the
+workspace-changes index purge while `/etc/hosts` deletion is still a red `fs-destroy`. One test goes through
+the **real wrapper**: it swaps `process.platform` for `darwin` (restoring it in `finally`), drives
+`unlink/rename/rmdir` through `patchModule` with the reported path sequence and asserts zero alarms, then
+asserts `/private/etc/hosts` still produces a red `fs-destroy` — so the default `platform` parameter is proven to
+be wired to `process.platform`, not just to the explicit test argument. Two more go through the same wrapper:
+`/ETC/hosts` written under a simulated darwin becomes `persistence-write` (and stays silent under linux), and a
+honeypot under `/tmp/hp/` plus an integrity canary at `/tmp/canary.yaml`, both touched via their
+`/private/tmp/...` spelling, still produce `honeypot` + `integrity` — proving the temp exemption cannot swallow
+the two highest-confidence signals. Five existing tests that
+used `mkdtemp()` under `/tmp` as a stand-in "user directory" now state their intent explicitly (`NO_TEMP_ROOTS`
+or a repo-local scratch dir) instead of silently depending on `/tmp` not being exempt.
+
+### Changed — DSH 0.2.1-rc.5 re-verification
+
+`dshCompat.tested` stays `^0.1.1-rc.1 || ^0.2.0-rc.2 || ^0.2.1-rc.2`, deliberately: npm's prerelease gate lets
+a `0.2.1-rc.*` version through any comparator sharing its `major.minor.patch`, so `rc.5` is already inside the
+declared range — widening or narrowing it for a patch-level prerelease bump would only make the declaration less
+honest. The `note` field records the actual version this round was verified against.
+
+- devDependencies moved to the rc.5 declarations (`dsh-llm`, `dsh-session`, `dsh-tools`); typecheck is clean, so
+  no call site in vet's import surface changed.
+- **rc.5 turned `dsh-tools`' runtime dependencies into exact peers.** `@deepseek-ai/dsh-scope`,
+  `dsh-agent`, `dsh-ptc-runtime`, `dsh-system-prompt`, `dsh-user-approval`, `dsh-sandbox`,
+  `dsh-sandbox-policy` and `dsh-working-directory` (all `0.2.1-rc.5`) are now peers of `dsh-tools`, so a dev
+  install that only bumps `dsh-tools` resolves `@deepseek-ai/dsh-scope` at import time and every test that loads
+  `dsh-tools` fails with `Cannot find package '@deepseek-ai/dsh-scope'`. They are therefore listed explicitly in
+  `devDependencies` (dev-only; consumers are unaffected) so a plain `npm install` reproduces the tree — no
+  `--legacy-peer-deps` needed in the committed lockfile.
+- Live host check (rc.5): `/vet/status.json` reports `dshVersion: "0.2.1-rc.5"`, `compat: "ok"`, the shield
+  scans the profile (77 packages), and the client slot (`conversation.session.header.actions`) plus the locale
+  `register(ns, dicts)` API that the panel needs are unchanged in rc.5.
+- rc.5's own temp protocols were the trigger for the fix above: `dsh-workspace-changes` builds its scratch under
+  `join(tempRoot, 'dsh-workspace-changes-')` with `tempRoot: tmpdir()` and creates a private index with
+  `mkdtemp(join(scratch, 'index-'))`, i.e. exactly `os.tmpdir()` on macOS — which is why the report surfaced now.
+
 ## [0.4.1] - 2026-10-25
 
 > 0.4.0 was an internal pre-release number that never reached npm; 0.4.1 is its first public release.

@@ -72,18 +72,23 @@ function credentialFiles(): string[] {
 // round-5 review（B-A12）：路径归一从本地副本改为共享 normPath（path-utils.ts，与 contract 同源）
 // ——旧副本只替换反斜杠，「/home/u/.ssh//id_rsa」等双斜杠等价写法不命中凭据精确清单
 // （N7 族 1/2 拦截的理论绕过形态）；单源（折叠 //、去尾 /）后两侧语义一致。
-import { normPath } from './path-utils.js'
+// 0.4.2（用户反馈）：改用 normalizePathForJudge（normPath + macOS /private 前缀折叠）——
+// macOS 上「规范路径」是 /private/etc/hosts，而本模块的精确等值面（/etc/hosts、/etc/sudoers、
+// /etc/ssl）和凭据清单都按「用户看到的名字」书写，不折叠就等于用 /private 拼写绕过拦截。
+import { normalizePathForJudge } from './path-utils.js'
 
 function isCredentialFile(p: string): boolean {
-  const n = normPath(p)
-  return credentialFiles().some(c => n === normPath(c))
+  // 两侧同一归一化：darwin 上 normalizePathForJudge 会把 /private 前缀与大写折叠掉，
+  // 只归一化调用方一侧会让 /USERS/A/.SSH/ID_RSA 与清单里的真实拼写对不上。
+  const n = normalizePathForJudge(p)
+  return credentialFiles().some(c => n === normalizePathForJudge(c))
 }
 
 // ── 族 3/4 谓词（classifyOp 复用；纯路径判定，零 IO）────────────────────
 
 /** 族 3：系统持久化/提权面（类 Unix；Windows 持久化经注册表不在 fs 面——由 spawn 命令报警兜底）。 */
 export function isPersistenceWriteTarget(p: string): boolean {
-  const n = normPath(p)
+  const n = normalizePathForJudge(p)
   const segs = n.split('/')
   const last = segs[segs.length - 1]
   // shell 启动文件
@@ -103,7 +108,7 @@ export function isPersistenceWriteTarget(p: string): boolean {
 
 /** 族 4：供应链/安装态篡改——node_modules 内包文件写入、cordis 插件补丁配置。 */
 export function isInstallWriteTarget(p: string): boolean {
-  const n = normPath(p)
+  const n = normalizePathForJudge(p)
   if (n.includes('/node_modules/')) return true
   if (n.endsWith('cordis.patch.yml') || n.endsWith('.cordis.patch.yml')) return true
   if (n.endsWith('/cordis.yml') || n.endsWith('/plugin.json')) return true

@@ -342,6 +342,18 @@ snapshots are a known side channel):
   keywords, destructive commands (rm/mv/dd/mkfs…) hitting sensitive paths, shell redirection to sensitive
   paths, reconnaissance primitives (readdir/stat/access on sensitive paths), honeypot-lure touches.
 - **Never blocks a call**; officially attributed spawn gets noise reduction.
+- **Path judgement normalization (0.4.2, user report)**: sensitive-path judgement runs on
+  `normalizePathForJudge()` — dot-segment folding, then the macOS `/private` fold (`/tmp`, `/var`, `/etc` are
+  symlinks, so canonical paths arrive as `/private/tmp/…`). The fold is darwin-only and ordered *after* dot
+  folding, so `/private/tmp/../etc/hosts` still resolves to `/etc/hosts` and stays sensitive. Writes and
+  deletes under the OS temp roots (`HookConfig.tempRoots`, default `/tmp`, `/var/tmp`, `os.tmpdir()`,
+  materialized at load) are exempt — temp areas are disposable, and this is where DSH's atomic-write staging,
+  toolchain temp files and `dsh-workspace-changes`' private git index live. Reads are **not** exempt (a key
+  copied into temp is still recon). Candidates pass `isPlausibleTempRoot`, so `TMPDIR=$HOME/.ssh` cannot turn a
+  credential directory into an exemption surface. The same normalization lowercases on darwin (case-insensitive
+  default volumes: `/ETC/hosts` ≡ `/etc/hosts`), and `isHoneypotPath`/`isIntegrityPath` normalize both sides, so
+  a lure spelled through `/private/tmp` still fires. `confirm-block` uses the same normalization, so
+  `/private/etc/hosts` no longer bypasses the N7 family-3 target list.
 - **Hook integrity heartbeat (0.1.21, P0-2 #2)**: every wrapper is branded (`brandVetHook`) with a
   module-closure-private `Symbol` — an extractable, non-spoofable marker (a copied `toString()` can't forge
   it). `hookHeartbeat()` re-checks the registered targets' current exports. In `watch` mode a periodic timer
