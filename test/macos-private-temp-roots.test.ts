@@ -189,6 +189,16 @@ describe('端到端：真实 fs 包装器 + 模拟 darwin（复刻现场 op 序�
       if (original !== undefined) Object.defineProperty(process, 'platform', original)
     }
   }
+  /** Windows 兼容/CI 兼容：macOS runner 上真实平台就是 darwin，非 darwin 分支必须显式模拟。 */
+  const withLinux = <T>(fn: () => T): T => {
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+    try {
+      return fn()
+    } finally {
+      if (original !== undefined) Object.defineProperty(process, 'platform', original)
+    }
+  }
 
   const removeMod = (): Record<string, unknown> => ({
     // 真实调用会 ENOENT（这些路径在本机不存在），包装器在调用前分类，所以抛错不影响断言
@@ -235,9 +245,10 @@ describe('端到端：真实 fs 包装器 + 模拟 darwin（复刻现场 op 序�
       withDarwin(() => (mod.writeFileSync as (p: string, d: string) => void)('/ETC/hosts', '1.2.3.4 evil'))
       expect(alarms).toHaveLength(1)
       expect(alarms[0]).toMatchObject({ kind: 'persistence-write' })
-      // 非 darwin 平台不折叠大小写（ext4 区分大小写，/ETC/hosts 根本写不到 /etc/hosts）
+      // 非 darwin 平台不折叠大小写（ext4 区分大小写，/ETC/hosts 根本写不到 /etc/hosts）。
+      // 必须显式模拟 linux：macOS runner 上真实平台本就是 darwin，裸调用会照样报警。
       alarms.length = 0
-      ;(mod.writeFileSync as (p: string, d: string) => void)('/ETC/hosts', 'x')
+      withLinux(() => (mod.writeFileSync as (p: string, d: string) => void)('/ETC/hosts', 'x'))
       expect(alarms).toEqual([])
     } finally {
       dispose()
