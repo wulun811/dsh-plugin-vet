@@ -7,6 +7,8 @@ import type { HookModule, HookConfig, HookAlarm } from './runtime-ops.js'
 import type { LedgerFsEvent, LedgerNetEvent } from './exfil-ledger.js'
 import { confirmBlock, BLOCK_FS_OPS, type BlockDecision } from './confirm-block.js'
 import { incrementBlocked } from './stats.js'
+import { buildReceipt, describeReceiptResult, supportsBlockedClaim } from '../domain/receipt.js'
+import { nextOperationId, noteAttempt, noteForwarded, rememberReceipt, type AttemptToken } from './receipt-oracle.js'
 import { isRootIndexing, isVetSelfIo, isStackTraceTampered, firstString, allStrings, isSensitivePath, isDshWebTempArtifact, isDshAtomicStagingPath, isDshRuntimeTempPath, isDshLockSiblingProbe, isSessionLogFile } from './runtime-denoise.js'
 import { classifyOp } from './runtime-classify.js'
 import { classifyNetworkOp, extractNetworkTarget, isTrackedNetHost, isLoopbackHost, isControlPlanePath, NET_OPS } from './runtime-net.js'
@@ -132,8 +134,13 @@ export function patchModule(
       // 的破坏类操作整个跳过 N7 拦截（身份判定被名字欺骗）。
       let block: BlockDecision | null = null
       const blockIdentity: string | undefined = stackTampered ? '__vet_attribution_tampered__' : hint
+      // 0.5.2：进判定点先记一次 attempt，并拿回**这次判定专属**的 token。
+      // 计数在这里起、在真正调原函数之前由 noteForwarded 置位——两者分开才叫 oracle
+      // （见 receipt-oracle.ts；0.5.5 起因并发窗口改为 per-attempt）。
+      let attempt: AttemptToken | undefined
       if (blockRelevant && blockIdentity !== undefined && (stackTampered || !isOfficialTrusted(blockIdentity))) {
         try {
+          attempt = noteAttempt('fs_write')
           block = confirmBlock.decideBlock(blockIdentity, opName, args)
           // 族 3/4 覆写：用户显式 'block' 才拦（默认 alarm 只报警，零误拦护栏不变——
           // 仅破坏类操作面、仅该插件归因；appendFile 等可逆写即使升级也不拦）
@@ -149,10 +156,26 @@ export function patchModule(
       }
       if (block !== null) {
         const target = firstString(args) ?? ''
+        // 0.5.2：拦截话术只由回执支撑。applied 要求三条同时成立——决策是 deny、拦截点在真实
+        // 边界之前、原调用计数未增加；缺一条就换说法，不许继续宣称「已拦截」。
+        const receipt = buildReceipt({
+          id: `n7-block:${blockIdentity ?? 'unknown'}:${target.slice(0, 60)}`,
+          boundary: 'fs_write',
+          attemptedAt: Date.now(),
+          action: 'deny',
+          beforeBoundary: true,
+          // 该次判定的原调用计数（0 → 0 才是「没进来」）。没有 token 说明判定点没走到，
+          // 那种情况下 operationId 一并缺席，buildReceipt 会落 unknown 而不是替我们猜。
+          forwardedBefore: 0,
+          forwardedAfter: attempt?.forwarded === true ? 1 : 0,
+          ...(attempt !== undefined ? { operationId: nextOperationId(attempt) } : {}),
+        })
+        rememberReceipt(receipt)
+        const claim = supportsBlockedClaim(receipt) ? '' : `（回执：${describeReceiptResult(receipt.result)}）`
         sink({
           severity: 'red',
           kind: 'n7-block',
-          message: `vet 拦截（N7 族 ${block.family}）：${block.reason}`,
+          message: `vet 拦截（N7 族 ${block.family}）：${block.reason}${claim}`,
           target: target.slice(0, 120),
           pluginHint: hint,
         })
@@ -169,6 +192,8 @@ export function patchModule(
       const target = firstString(args) ?? ''
       let result: unknown
       try {
+        // 0.5.2：原调用真的要进来了——先置位，回执据此把「已拦截」判成 failed。
+        if (attempt !== undefined) noteForwarded(attempt)
         result = (fn as (...a: unknown[]) => unknown).apply(this, args)
       } catch (error) {
         // 台账留痕：调用失败同样是观测事实（此前整段跳过）；无 result → 字节计 0

@@ -143,7 +143,9 @@ describe('round-14 异常流对抗回归：R19 全角同形规避', () => {
   })
 
   it('package.json 依赖为全角仿冒名 → R19 info；精确官方依赖不报', () => {
-    const evil = runTyposquat(JSON.stringify({ name: 'legit-pkg', dependencies: { '@deepseek-ai/ｄｓｈ-tool-bash': '1.0.0' } }), 'package.json')
+    // 0.5.22：仿冒名放在第三方 scope 里。@deepseek-ai/ 是 npm 的发布权限边界（攻击者发不进去），
+    // 所以那条 scope 里的候选一律不报——NFKC 归一本身仍由上面那条单元断言覆盖。
+    const evil = runTyposquat(JSON.stringify({ name: 'legit-pkg', dependencies: { '@acme/ｄｓｈ-tool-bash': '1.0.0' } }), 'package.json')
     expect(evil.length).toBe(1)
     expect(evil[0].rule).toBe('R19')
     expect(evil[0].severity).toBe('info')

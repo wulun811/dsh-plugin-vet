@@ -17,11 +17,16 @@
  *   - 词表遵循「组合命中」纪律：单串永不直接 high（N6，规则数据不自伤）。
  */
 import { decodeB64, decodeHex } from '../decode.js'
-import { isTestOrCiFile } from './process-direct.js'
+import { isTestOnlyFile } from './process-direct.js'
 import type { Finding } from '../protocol.js'
 
 /** 配置文件扩展名（walker 侧 SOURCE_EXT 已过滤；engine 侧再按本规则收口）。 */
 export const CONFIG_EXT = new Set(['yml', 'yaml'])
+
+/** 存在性观测的固定文案（0.5.22）：只说明「这里有 !!js」，不含任何判定。
+ * 档位抬升（src/guards/internal-plugin.ts 的 observationAlarmsFor）按这个前缀把这类
+ * 零信息观测排除在报警面之外——官方 bundle 自己就用 !!js 做合法配置，报了也没人该动。 */
+export const CONFIG_PRESENCE_MESSAGE = '配置含 !!js 表达式（配置即代码，加载期在宿主进程执行）'
 
 /** 根级配置文件名：cordis.yml / cordis.patch.yml / plugin.yml / *.patch.yml。 */
 export function isRootConfigName(name: string): boolean {
@@ -218,9 +223,9 @@ function scanText(text: string, decoded: boolean): { verbs: string[]; hosts: str
  * 对一个配置文件跑 R17。text = 文件全文；name = basename；file = 全路径（用于测试/CI 降级）。
  * 返回 findings：!!js 存在性 info 观测 + 单动词 info + 双组合 high。
  */
-export function runConfigScan(text: string, name: string, file?: string, targetKind?: 'plugin' | 'generic'): Finding[] {
+export function runConfigScan(text: string, name: string, file?: string, targetKind?: 'plugin' | 'generic', entryFiles?: ReadonlySet<string>): Finding[] {
   const findings: Finding[] = []
-  const testOrCi = file !== undefined && isTestOrCiFile(file)
+  const testOrCi = file !== undefined && isTestOnlyFile(file, entryFiles)
   // 产出一律按测试/CI 降 info 处理（双组合也不例外——测试配置里的载荷是夹具）
   const push = (f: Omit<Finding, 'rule'>, forceInfo = false): void => {
     if (findings.length >= MAX_FINDINGS_PER_FILE) return
@@ -238,7 +243,7 @@ export function runConfigScan(text: string, name: string, file?: string, targetK
   push({
     severity: 'info',
     confidence: 'certain',
-    message: '配置含 !!js 表达式（配置即代码，加载期在宿主进程执行）',
+    message: CONFIG_PRESENCE_MESSAGE,
     evidence: '!!js ×' + exprs.length,
     line: exprs[0].line,
   })

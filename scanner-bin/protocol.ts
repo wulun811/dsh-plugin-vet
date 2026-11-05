@@ -26,6 +26,9 @@ export interface ScanRequest {
   /** 扫描基础（接入 dsh.so 静态注册站）：'npm' = registry tarball 真实发布物（入口/patch 声明对照发布物有效）；
    * 'git' = 仅源码仓（通常不提交 lib/ 等构建产物），此时 R12 入口/patch 缺失降 info 不误报。缺省按 npm 语义。 */
   scanBasis?: 'git' | 'npm'
+  /** 宿主正在运行的 DSH 版本（0.5.24）：R12 用它判「engines.dsh / dsh peer 会不会拒绝这个包」。
+   * 缺省 = 宿主没探到版本 → 只做形态检查，不做版本对照（fail-open，不谎报会被拒绝）。 */
+  dshVersion?: string
   /** 扫描面扩展（undefined = 全开；dsh.so 等消费方可按需关闭）：
    * configFiles: 包根 cordis.yml、cordis.patch.yml、*.patch.yml 纳入扫描面 → R17 !!js 配置检测；
    * instructionFiles: AGENTS.md/CLAUDE.md 与 skills 目录、*.skill 目录下的 SKILL.md 纳入扫描面 → R18 指令/技能注入检测。
@@ -85,6 +88,11 @@ export interface CapabilityManifest {
   hasExec: boolean
   /** C2（0.1.16 加固）：是否含内建危险模块的 ESM 具名/命名空间导入（Node 互操作快照，T2 钩子盲区）。 */
   esmNamedBuiltins?: boolean
+  /** 0.5.3（static-v27）：上面那个布尔命中的**具体内建模块**（去重，上限 16）。
+   * 布尔只说「有盲区」，说不出「哪个面有盲区」——覆盖面归因需要模块名，才能把
+   * `child_process` 的具名导入算到 runtime_spawn，而不是三个面一律标 partial。
+   * 旧缓存/旧扫描器没有此字段 → 消费方按「知道有盲区、不知道是哪几个」降级处置。 */
+  esmNamedBuiltinModules?: string[]
   /** P0-2（round-11，0.1.21）：代码引用但 package.json 未声明的"幽灵依赖"（靠传递依赖提升侥幸可解析，
    * 升级即可能断供/换源）。仅 files 模式 + 存在可读 package.json 时产出（R16 门控）；
    * @deepseek-ai/* 宿主信任边界不列。 */
@@ -135,14 +143,62 @@ export interface ScanReport {
    * （rc.2 只支持字符串）并对非法形态报 high；② 新增 request.officialFamily——官方目录成员包
    * 的**非授权源码产物**（构建输出 lib/dist/build/out 等路径、压缩/打包文件、.d.ts 声明）里的
    * critical/high 折为 info 并加「构建产物/压缩产物/类型声明」前缀，第三方包只标注不降档
-   * （身份核验仍由哈希基线 + registry 对账负责，本降噪不改判定权属）。输出形状变化，旧缓存作废。 */
-  engine: 'static-v26'
+   * （身份核验仍由哈希基线 + registry 对账负责，本降噪不改判定权属）。输出形状变化，旧缓存作废。
+   * 0.5.3 起 static-v27：capabilities 增 esmNamedBuiltinModules（C2 盲区精确到模块）——只加字段、
+   * 不改任何规则判定；旧缓存因缺该字段会被降级消费（覆盖面标「不知哪几个面」而非静默当无盲区），
+   * 故仍递增引擎版本，让已缓存报告重扫一次拿到精确值。
+   * 0.5.24 起 static-v28（DSH 0.2.2 适配）：① R12 新增 DSH 需求闸门——`engines.dsh` / dsh peer
+   * 的形态非法（DSH 直接抛错或判为不满足）与「不接纳本机 DSH 版本」（宿主经 request.dshVersion
+   * 传入，判定按 DSH 自己的 includePrerelease 语义）都报 high；② 「测试/CI 文件」的路径降级
+   * 让位给包声明的入口（main/module/exports/bin 落在 test/ 里的就是产品代码）。判定变化，
+   * 旧缓存作废。
+   * 0.5.25（同一次适配的补充）：需求闸门支持部分版本范围（`>=0.2` / `<0.3` / `0.3`）——真实第三方
+   * 插件就写这种形式，此前"判不了 → 不报"，现在按 semver 的 includePrerelease 编译结果判定。
+   * 判定范围扩大，旧缓存作废。
+   * 0.5.26（发布前自查修正）：① 部分版本 caret（`^1.2`）按 major 锁边界（此前误用 x-range 的
+   * minor 边界，`1.9.3` 被谎报为「不接纳」）；② `engines.dsh` 存在时不再检查 peerDependencies
+   * （DSH 的实现里它根本不读 peer）；③ `engines`/`peerDependencies` 非对象、peer 范围为空/
+   * dist-tag/逗号分隔等「能确证非法」的形态补报 high。判定变化，旧缓存作废。
+   * 0.5.27（再压一轮）：① x-range（`0.2.x`/`1.2.x`）与 `~>` 进入求值——此前对「按上一版
+   * 发布」的常见写法静默；② 任一 OR 组能确证非法时整段判为不满足（DSH 解析整个 range，
+   * `>=0.2 || workspace:^` 是 false，此前在第一组 true 时提前放行）。判定变化，旧缓存作废。 */
+  engine: 'static-v31'
   sourceCount: number
   findings: Finding[]
   staticScore: number
   verdict: Verdict
   /** N1：文件模式扫描的静态能力清单（code 模式无插件身份，不产出）。 */
   capabilities?: CapabilityManifest
+  /** 0.5.4：OSV 相位的自述统计（仅 scanWithOsv 的异步路径产出，不进缓存，故不涉及引擎版本）。 */
+  osv?: OsvOutcome
+}
+
+/**
+ * 0.5.4：OSV 相位的自述统计。
+ *
+ * 以前宿主只能从「请求里 osv=true」推出 intel_osv，而那条推理只能到「问了」为止——引擎对
+ * 网络失败静默降级，报告里没有「发出去几条、回来几条」，于是覆盖面只能写 partial。这里补上
+ * 的只有事实，没有判断：宿主拿它算 `answered === attempted`。
+ *
+ * 计数**可推导的不重复存**：失败条数 = attempted - answered，未发出条数 = targets - attempted。
+ * 存两份就会有不一致的一天，而不一致时哪个是真的没人知道。
+ *
+ * 不进缓存：缓存只存静态报告（`scan()` 的产物），本字段只由 `scanWithOsv()` 在异步路径追加，
+ * 所以加它不需要递增 ENGINE_VERSION（旧缓存里本来就没有、也不该有这一格）。
+ */
+export interface OsvOutcome {
+  /**
+   * ran：查完了（targets 可以是 0——那时是「没有可查的」，不是「没查」）；
+   * overran：相位被总预算掐断——下面的计数是**断点前**的事实，不是结论；
+   * skipped：宿主余量不足，整段没跑——此时三个计数为 0 没有含义，别读成「没东西可查」。
+   */
+  phase: 'ran' | 'overran' | 'skipped'
+  /** 有资格查询的目标数（插件自身 + 精确版本的直接依赖；直接依赖受 8 个上限约束）。 */
+  targets: number
+  /** 真正发起的查询数（连接失败也算发起过——问没问与答没答是两件事）。 */
+  attempted: number
+  /** 拿到应答的查询数（「应答是 0 条漏洞」也算应答）。 */
+  answered: number
 }
 
 export interface ScanResponse {
@@ -197,10 +253,20 @@ export interface ScanResponse {
  * 0.3.12（审查修正）：上述「根级」改按 package.json 所在目录界定（仅深度 1 平铺）——
  * 首发版按 basename 深度无关匹配把 scripts/、lib/ 等嵌套文件也降档，与「scripts/ 是产品
  * 代码、运行时文件名不参与」立场矛盾；修正后嵌套文件一律不降，无 package.json 保守不降——
- * 规则行为变化，旧缓存作废。 */
-export const ENGINE_VERSION = 'static-v26' as const
+ * 规则行为变化，旧缓存作废。
+ * 0.5.3（C2 盲区精确化）：capabilities 增 esmNamedBuiltinModules——规则判定一字未改，
+ * 只把「有 ESM 具名导入盲区」这个布尔补上具体模块名（覆盖面归因要用）。输出形状变化，
+ * 旧缓存作废（否则已缓存的报告永远拿不到模块名，只能降级成「不知哪几个面」）。
+ * 0.5.24（DSH 0.2.2 适配）：R12 新增 DSH 需求闸门（engines.dsh / dsh peer 的形态与版本对照，
+ * 版本经 request.dshVersion 传入）；R3/R13/R17/R20 的测试/CI 路径降级让位给包声明的入口。
+ * 0.5.25：需求闸门补上部分版本范围（>=0.2 / <0.3）——真实插件写法，此前判不了即不报。
+ * 0.5.26：发布前自查修正——`^1.2` 的 caret 边界（曾按 x-range 展开，谎报不接纳）、
+ * `engines.dsh` 存在时不再看 peer、非法形态（非对象 / 空范围 / dist-tag / 逗号）补报。
+ * 0.5.27：x-range 与 `~>` 进入求值；任一 OR 组确证非法 → 整段不满足。
+ * 判定变化，旧缓存作废。 */
+export const ENGINE_VERSION = 'static-v31' as const
 
-/** The rules of static-v26（规则集相对 v25 变化：0.3.13 新增 request.officialFamily——官方目录成员包的
+/** The rules of static-v31（相对 v30：补 x-range/`~>`、OR 组整体失效语义。前序 v30 相对 v29：修 `^1.2` 的 caret 边界与 engines.dsh/peer 的判定顺序，补非法范围形态。前序 v29 支持部分版本范围 >=0.2 / <0.3。前序 v28 相对 v27：R12 增 DSH 需求闸门；测试/CI 路径降级让位给包声明的入口。前序 v27 只给 capabilities 补了 esmNamedBuiltinModules，不改任何判定。前序 v26（相对 v25）变化：0.3.13 新增 request.officialFamily——官方目录成员包的
  * 非授权源码产物（构建输出路径/压缩内容/.d.ts）里 critical/high 折 info 并加类别前缀（第三方只加
  * 前缀）；R12 支持 dsh.bundle.patch 有序数组并对非法形态报 high。前序 v25（相对 v24）变化：R3 dev/ops 中间态改**相对包根**的根级判定——
  * 0.3.11 首发的深度无关 basename 匹配会把 scripts/、lib/ 等嵌套的运行时文件一并降档（与
@@ -235,6 +301,9 @@ export interface RuleContext {
    * 供规则做**相对包根**的位置判定（如 R3 dev/ops 中间态只认根级平铺的 dev 脚本）。
    * 无 package.json（code 模式 / 消费方未传清单）为 undefined → 规则保守不降。 */
   pkgRoot?: string
+  /** 包声明过的入口文件绝对路径（0.5.24，engine 从 main/module/exports/bin 解析）——
+   * 测试/CI 路径降级必须让位给声明：入口在 test/ 里的包，那一片就是产品代码。 */
+  entryFiles?: Set<string>
 }
 
 export const SEVERITIES: readonly Severity[] = ['critical', 'high', 'medium', 'info']

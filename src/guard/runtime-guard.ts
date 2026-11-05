@@ -40,6 +40,8 @@ import { exfilLedger } from './exfil-ledger.js'
 import { canaryStore } from './canary.js'
 import { confirmBlock } from './confirm-block.js'
 import { createT2Sink, type ContractResolver } from './runtime-sink.js'
+import { emitAlarm } from './alarm-emit.js'
+import { HOST_SUBJECT, SELF_SUBJECT } from '../domain/types.js'
 import { loadContract } from './contract.js'
 import { SIDECAR_PID_ENV, envSidecarPid, pidAlive, safeKillSidecar, killSidecarFromEnv, sidecarSkippedWarned, setSidecarSpawned, setSidecarSkippedWarned, decideRespawn, sidecarSupportedOn } from './runtime-sidecar.js'
 
@@ -213,9 +215,29 @@ function waitPidExit(pid: number, maxMs: number): void {
   }
 }
 
+/**
+ * 哨兵生命周期行（起不来 / 意外退出 / 被接管）。
+ *
+ * 三处落点只有 id 与文案不同，形状（yellow、t1 通道、`sentinel` 码、不合并、无 pluginHint）
+ * 完全一样——所以它只该有一份。主体是 `SELF_SUBJECT`：说的是「vet 的监控通道断了」，
+ * 不是「宿主资源异常」（后者才是 `HOST_SUBJECT`，见上面 T1 读数那一行）。
+ */
+function sentinelRow(status: VetStatus, mode: VetConfig['domainProjection'], id: string, message: string): void {
+  emitAlarm(status, {
+    id,
+    severity: 'yellow',
+    source: 't1',
+    kind: 'sentinel',
+    message,
+    at: Date.now(),
+  }, { subject: SELF_SUBJECT, source: 'sentinel' }, mode)
+}
+
 /** T1 哨兵装配：spawn sidecar 子进程 + stdout JSON 行解析 + respawn 管理与卸载清理。 */
 function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () => void {
   // ── T1 哨兵 ─────────────────────────────────────────────
+  // argv 顺序 = runtime-watch.ts 底部 sidecarIdx 的解析顺序（追加只许往末尾加：
+  // 老 sidecar 进程读不到新槽位，回落到它自己的 DEFAULT_WATCH_CONFIG）。
   const watchArgs = [
     String(config.runtimeIntervalMs),
     String(config.runtimeMemLimitMb),
@@ -223,19 +245,21 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
     String(config.runtimeFdLimit),
     String(config.runtimeGrowthMb),
     String(config.runtimeGrowthWindowMs),
+    String(config.runtimeWarmupMs),
+    String(config.runtimeMemSustainMs),
   ]
   const sidecarPath = resolveVetFile('guard/runtime-watch.js')
   // 0.1.20：启动时文件存在性校验——sidecar 文件缺失时直接报 red vet-self-broken，
   // 不静默降级（prepublish 检查防打包漏，这里防安装损坏/用户误删）
   if (!existsSync(sidecarPath)) {
-    status.record({
+    emitAlarm(status, {
       id: 'vet-self-broken:sidecar-missing',
       severity: 'red',
       source: 't1',
       kind: 'vet-self-broken',
       message: 'vet 哨兵文件缺失：' + sidecarPath + '——T1 运行时监控无法启动。可能原因：安装损坏/文件被误删。建议重装 vet 插件',
       at: Date.now(),
-    })
+    }, { subject: SELF_SUBJECT, source: 'sentinel' }, config.domainProjection)
     ctx.logger.error('vet: 哨兵文件缺失，T1 监控无法启动：' + sidecarPath)
     // 不 return——继续尝试 T2 钩子（进程内防线仍可用）
   }
@@ -331,7 +355,8 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
         if (line === '') continue
         try {
           const a = JSON.parse(line) as WatchAlarm
-          status.record({ ...a, source: 't1' })
+          // 主体是宿主进程：T1 资源观测说的是「这个进程怎么了」，不属于任何插件，也不是 vet 自己。
+          emitAlarm(status, { ...a, source: 't1' }, { subject: HOST_SUBJECT, source: 'sentinel' }, config.domainProjection)
         } catch {
           ctx.logger.warn(`vet: 哨兵输出无法解析: ${line.slice(0, 120)}`)
         }
@@ -344,14 +369,7 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
       setSidecarSpawned(false)
       if (envSidecarPid() === child?.pid) delete process.env[SIDECAR_PID_ENV]
       ctx.logger.error(`vet: T1 哨兵启动失败：${String(err)}`)
-      status.record({
-        id: 't1:spawn-fail',
-        severity: 'yellow',
-        source: 't1',
-        kind: 'sentinel',
-        message: 'T1 哨兵启动失败，运行时内存/子进程/fd 监控未生效',
-        at: Date.now(),
-      })
+      sentinelRow(status, config.domainProjection, 't1:spawn-fail', 'T1 哨兵启动失败，运行时内存/子进程/fd 监控未生效')
     })
     child.on('exit', (code) => {
       sidecarAlive = false
@@ -364,14 +382,7 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
       ctx.logger.warn(`vet: T1 哨兵退出（code=${code ?? 'null'}，respawn=${respawn}）`)
       if (stopping) return
       // 监控器失活本身是黄灯报警（vet 自己的进程挂了，用户该知道守护断了）
-      status.record({
-        id: 't1:sentinel-down',
-        severity: 'yellow',
-        source: 't1',
-        kind: 'sentinel',
-        message: 'T1 哨兵意外退出，运行时内存/子进程/fd 监控中断',
-        at: Date.now(),
-      })
+      sentinelRow(status, config.domainProjection, 't1:sentinel-down', 'T1 哨兵意外退出，运行时内存/子进程/fd 监控中断')
       // 仅当 env 注册表仍指向本哨兵时才 respawn（off/接管场景不复活）
       if (respawn) {
         // S1：不耗预算的自杀——code 0 且刚接管过（killTimedOut）或快速退出（兄弟锁自杀）：
@@ -390,14 +401,7 @@ function installSidecar(ctx: Context, config: VetConfig, status: VetStatus): () 
       // 正确），但接管是否成功不可见——这里记一条 warn + 黄灯，让「监控被换手」可观测而非静默。
       if (!respawn && registered !== undefined && registered !== child?.pid && pidAlive(registered)) {
         ctx.logger.warn(`vet: 哨兵已被其他实例接管（env 注册表指向存活 pid=${registered}，本实例 child=${child?.pid ?? 'none'}）——旧报警通道废弃，接管方负责监控`)
-        status.record({
-          id: 't1:sentinel-taken-over',
-          severity: 'yellow',
-          source: 't1',
-          kind: 'sentinel',
-          message: 'T1 哨兵被其他实例接管，本实例监控通道失效（如重复安装 vet，建议只保留一份）',
-          at: Date.now(),
-        })
+        sentinelRow(status, config.domainProjection, 't1:sentinel-taken-over', 'T1 哨兵被其他实例接管，本实例监控通道失效（如重复安装 vet，建议只保留一份）')
       }
     })
   }
@@ -432,7 +436,7 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
         try { return readFileSync(path, 'utf8') } catch { return undefined }
       }, config.contract?.dir || undefined)
     : undefined
-  const { sink, emitLedger, recordCanary, recordKeyLeak, ledgerFsObserver, ledgerNetObserver, netCanaryScan } = createT2Sink(status, contractResolver)
+  const { sink, emitLedger, recordCanary, recordKeyLeak, ledgerFsObserver, ledgerNetObserver, netCanaryScan } = createT2Sink(status, contractResolver, config.domainProjection)
   const hookCfg = { ...DEFAULT_HOOK_CONFIG }
   // round-13（Phase 3）：本地 API 回环观测（默认关）——T2 网络包装侧按此开关追踪回环出站
   hookCfg.observeLoopback = config.observeLoopback === true
@@ -682,7 +686,7 @@ function installHookHeartbeat(ctx: Context, config: VetConfig, status: VetStatus
     if (result.ok) return
     const stripped = result.checks.filter(c => !c.intact).map(c => c.module + '.' + c.op).join('，')
     ctx.logger.warn('vet: 钩子完整性心跳失败——T2 挂钩被剥离/替换：' + stripped + '；运行时观测已降级（alarm-only 提示，请检查是否有插件篡改内置模块）')
-    status.record({
+    emitAlarm(status, {
       id: 't2:hook-heartbeat',
       severity: 'yellow',
       source: 't2',
@@ -690,7 +694,7 @@ function installHookHeartbeat(ctx: Context, config: VetConfig, status: VetStatus
       message: '钩子完整性心跳失败：T2 包装被剥离/替换（' + stripped + '）——运行时观测降级，疑似插件篡改内置模块',
       target: stripped.slice(0, 120),
       at: Date.now(),
-    })
+    }, { subject: SELF_SUBJECT, source: 'runtime_hook' }, config.domainProjection)
   }
   const heartbeatTimer = setInterval(runHookHeartbeat, heartbeatMs)
   heartbeatTimer.unref?.()

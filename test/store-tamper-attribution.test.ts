@@ -21,7 +21,7 @@ vi.mock('../lib/scanner/client.js', () => ({
   scan: vi.fn(async () => ({
     ok: true,
     report: {
-      engine: 'static-v26', sourceCount: 1, findings: [], staticScore: 100, verdict: 'clean',
+      engine: 'static-v27', sourceCount: 1, findings: [], staticScore: 100, verdict: 'clean',
       capabilities: { hosts: [], fsPaths: [], spawnCmds: [], imports: [], hasNetwork: false, hasExec: false },
     },
   })),

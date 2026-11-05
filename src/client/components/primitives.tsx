@@ -6,6 +6,21 @@ import type { ReactNode } from 'react'
 import type { ThemeTokens } from '../theme.ts'
 import { cardBg, cardInset } from '../theme.ts'
 
+/**
+ * 面板里那些「小卡片底」的统一写法：背景 + 描边 + 内高光。padding/字号各卡自己决定。
+ * 0.5.9 从 Shield.tsx 里抽出来——自检折叠原本又抄了一份，审计把它记成第 5 处重复块。
+ */
+export function subCardStyle(dark: boolean, pal: ThemeTokens, padding: string, fontSize?: number): Record<string, unknown> {
+  return {
+    background: cardBg(dark),
+    border: '1px solid ' + pal.borderSoft,
+    borderRadius: 8,
+    boxShadow: cardInset(dark),
+    padding,
+    ...(fontSize === undefined ? {} : { fontSize }),
+  }
+}
+
 export function SectionLabel({ pal, children }: { pal: ThemeTokens; children: ReactNode }): ReactNode {
   return (
     <div style={{ fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase', color: pal.faint, margin: '12px 0 6px', fontWeight: 700 }}>

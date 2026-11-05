@@ -1,9 +1,14 @@
 /**
  * T2 报警/台账/金丝雀/密钥/取证管道（P0-4 结构债拆分自 runtime-guard.ts）。
- * createT2Sink(status)：装配 T2 观测接线所需的全部闭包（sink 去重/归因/降噪、
+ * createT2Sink(status, resolver, mode)：装配 T2 观测接线所需的全部闭包（sink 去重/归因/降噪、
  * N3 台账、N4 金丝雀确认、密钥外泄内容匹配、P0-2 取证、N1 差分对账、N7 族 1 名单）。
  * 本模块只依赖上游模块（status/stats/capability-diff/exfil-ledger/canary/confirm-block/
  * forensics/runtime-hooks），不反向依赖 runtime-guard（无环）。
+ *
+ * 0.5.6：本模块的 8 个报警落点全部经 `emitAlarm`（注册表 + 投影器）——采集点只回答
+ * 「什么码、哪个主体、什么文案」，严重度/来源通道/合并键/pluginHint 由形状推出来。
+ * 旧字面量仍与投影结果逐字段比对（`domainProjection` 三种模式），所以这里保留的字面量
+ * 是**对照物**，不是第二份形状定义。
  */
 
 import type { VetStatus, VetAlarm } from './status.js'
@@ -17,6 +22,17 @@ import { isOfficialTrusted } from './runtime-hooks.js'
 import type { HookAlarm } from './runtime-hooks.js'
 import { checkAlarmInContract } from './contract.js'
 import type { Contract } from './contract.js'
+import { DomainProjectionMismatch, emitAlarm, type DomainProjectionMode } from './alarm-emit.js'
+import { npmSubject } from '../domain/project.js'
+import { HOST_SUBJECT, type SubjectRef } from '../domain/types.js'
+
+/**
+ * T2 观测的主体：归因到的插件就是主体；无主的 T2 观测主体是宿主进程（`kind: 'other'`
+ * 不给 pluginHint，面板不会把它挂到某个不存在的包上）。
+ */
+function t2Subject(plugin: string | undefined): SubjectRef {
+  return plugin === undefined ? HOST_SUBJECT : npmSubject(plugin)
+}
 
 /** P1-6：T2 报警去重 id——拼 pluginHint，避免不同插件同路径互吞报警。 */
 export function t2AlarmId(kind: string, target: string | undefined, pluginHint: string | undefined): string {
@@ -71,8 +87,24 @@ export interface T2SinkResult {
   netCanaryScan: (hint: string | undefined, text: string, where: 'url' | 'body') => void
 }
 
-/** 装配 T2 报警管道（sink + 台账/金丝雀/密钥/取证接线）。 */
-export function createT2Sink(status: VetStatus, contractResolver?: ContractResolver): T2SinkResult {
+/**
+ * 装配 T2 报警管道（sink + 台账/金丝雀/密钥/取证接线）。
+ *
+ * @param mode 投影模式。缺省 `shadow`（与 `config.domainProjection` 的缺省一致）：输出仍是旧
+ *             字面量，但投影一遍并逐字段比对——测试里默认就能发现不等价，而不是要记得传。
+ */
+export function createT2Sink(status: VetStatus, contractResolver?: ContractResolver, mode: DomainProjectionMode = 'shadow'): T2SinkResult {
+  /**
+   * T2 落点专用：来源固定为 `runtime_hook`（T2 钩子观测）。其余事实留给各个落点。
+   *
+   * `mergeSubject` 的覆盖只在 `n3-*` 的 `code:subject` 合并里被消费，且只在无归因时给出：
+   * 旧字面量在无主 n3 上把 undefined 拼成了 `t2:n3-x:undefined`（模板串），而 ledger 对无主
+   * 事件直接返回空（`exfil-ledger` 的两处 `evt.plugin === undefined` 早退）——那一支不可达。
+   * 这里给空串，**不再复刻那四个字母**：真出现无主行时键是 `t2:n3-x:`。
+   */
+  const emit = (legacy: VetAlarm, facts: { readonly subject: SubjectRef; readonly mergeSubject?: string; readonly mergeExtra?: string }): void => {
+    emitAlarm(status, legacy, { source: 'runtime_hook', ...facts }, mode)
+  }
   // M1 契约（record 档）一次性记档去重：拒载/证伪各只记一次，越界按 (插件,字段) 合并。
   const rejectedNoted = new Set<string>()
   const distrustedNoted = new Set<string>()
@@ -82,7 +114,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
     if (r.kind === 'loaded') return r.contract
     if (r.kind === 'rejected' && !rejectedNoted.has(plugin)) {
       rejectedNoted.add(plugin)
-      status.record({
+      emit({
         id: 'm1:contract-rejected:' + plugin,
         severity: 'yellow',
         source: 't2',
@@ -90,7 +122,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
         message: '契约被拒载（M1）：插件 ' + plugin + ' 的契约未通过宽松度校验，已按无契约处理——当前行为仍由静态/运行时观测判定',
         pluginHint: plugin,
         at: Date.now(),
-      })
+      }, { subject: npmSubject(plugin) })
     }
     return undefined
   }
@@ -112,17 +144,21 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
     // level，但不再刷黄警。锚内真官方（上方早退）与第三方归因（未打标）不受影响；只兜
     // 首见验证/离线窗口——这一层是「名称级去噪走廊」，不触碰读/写/删/金丝雀等判定面。
     if (alarm.officialHousekeeping === true && alarm.pluginHint !== undefined && alarm.target !== undefined) {
-      status.record({
+      // 0.5.6：kind 从底层的探针码（fs-probe）改成它自己的码。这一行不是「某个插件的探针」，
+      // 是「官方归因的家务观测，info、跨包聚合为一条」——把底层的 fs-probe 借来当 kind，等于
+      // 让面板上一条 info 观察和真正的侦察报警同名，而它的合并键（literal）又只有这个专码能表达。
+      // id 与 mergeKey 都不变：去重桶与「已忽略」持久化键沿用历史值。
+      emit({
         id: 't2:official-housekeeping:' + alarm.kind + ':' + alarm.pluginHint,
         severity: 'info',
         source: 't2',
-        kind: alarm.kind,
+        kind: 'official-housekeeping-probe',
         message: alarm.message + '（官方归因的 DSH 家务探针，info 观察——非风险报警）',
         target: alarm.target,
         pluginHint: alarm.pluginHint,
         mergeKey: 't2:official-housekeeping-probe',
         at: Date.now(),
-      })
+      }, { subject: npmSubject(alarm.pluginHint) })
       return
     }
     // N7 族 3/4 报警只对第三方归因有效（宿主/用户自己写 bashrc、npm install 等无主操作不报）
@@ -146,17 +182,22 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
       sessionLog: alarm.sessionLog,
       // 关联签名类（n3-）按 (kind,plugin) 合并去重：跨主机/跨密钥的同类报警折叠为一条、累计次数。
       // T2 hook 报警（fs-destroy/net 等）不带 mergeKey，保留按精确 id 的原有去重语义。
-      mergeKey: alarm.kind.startsWith('n3-') ? `t2:${alarm.kind}:${alarm.pluginHint}` : undefined,
+      // 0.5.6：`?? ''`——旧式模板串会把无主 n3 拼成 `t2:n3-x:undefined`（四个字母当主体名）。
+      // 该分支不可达（ledger 对无主事件直接返回空），所以没有历史键会因此失效。
+      mergeKey: alarm.kind.startsWith('n3-') ? `t2:${alarm.kind}:${alarm.pluginHint ?? ''}` : undefined,
       at: Date.now(),
     }
-    status.record(entry)
+    emit(entry, {
+      subject: t2Subject(alarm.pluginHint),
+      mergeSubject: alarm.pluginHint === undefined ? '' : undefined,
+    })
     // M1 契约对账（record 档：越界小声记 info，绝不动既有报警/拦截；无契约 = 零开销）
     if (alarm.pluginHint !== undefined) {
       const contract = m1Contract(alarm.pluginHint)
       if (contract !== undefined) {
         const chk = checkAlarmInContract(alarm.kind, alarm.target, contract)
         if (chk !== null && !chk.within) {
-          status.record({
+          emit({
             id: 'm1:contract-violation:' + alarm.pluginHint + ':' + chk.field + ':' + (alarm.target ?? '').slice(0, 120),
             severity: 'info',
             source: 't2',
@@ -166,7 +207,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
             pluginHint: alarm.pluginHint,
             mergeKey: 't2:m1-contract-violation:' + alarm.pluginHint + ':' + chk.field,
             at: Date.now(),
-          })
+          }, { subject: npmSubject(alarm.pluginHint), mergeExtra: chk.field })
         }
       }
     }
@@ -181,7 +222,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
         value: alarm.target,
       })
       if (hidden !== null) {
-        status.record({
+        emit({
           id: `n1-hidden:${hidden.plugin}:${hidden.kind}`,
           severity: 'red',
           source: 't2',
@@ -190,13 +231,13 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
           target: hidden.value,
           pluginHint: hidden.plugin,
           at: Date.now(),
-        })
+        }, { subject: t2Subject(hidden.plugin) })
         // M1：代码事实（N1 隐藏能力）证伪契约 → 契约不可信 yellow（只记一次；契约压不过代码事实）
         if (hidden.plugin !== undefined && !distrustedNoted.has(hidden.plugin)) {
           const contract = m1Contract(hidden.plugin)
           if (contract !== undefined) {
             distrustedNoted.add(hidden.plugin)
-            status.record({
+            emit({
               id: 'm1:contract-distrusted:' + hidden.plugin,
               severity: 'yellow',
               source: 't2',
@@ -204,13 +245,16 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
               message: '契约与代码事实相悖（M1）：插件 ' + hidden.plugin + ' 的承诺书宣称该能力在范围内，但代码事实（N1 隐藏能力）证伪——按代码事实为准，契约不可信',
               pluginHint: hidden.plugin,
               at: Date.now(),
-            })
+            }, { subject: npmSubject(hidden.plugin) })
           }
         }
       }
     }
-    } catch {
-      // 观测失败静默（不记 warn——warn 本身也可能抛；观测是增强，绝不影响主流程）
+    } catch (error) {
+      // 观测失败静默（不记 warn——warn 本身也可能抛；观测是增强，绝不影响主流程）。
+      // 唯一例外是严格投影模式下的不等价：那是 CI 断言，被这里吞掉就是假绿——面板行为照旧、
+      // 测试全过、等价性已经破了。它不是「观测故障」，所以不属于这条静默规则。
+      if (error instanceof DomainProjectionMismatch) throw error
     }
   }
   // N3 台账接线：T2 观测 → 字节台账 + 破坏签名（官方归因不建桶；报警经同一 sink 去重/归因）
@@ -233,7 +277,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
     if (plugin !== undefined) armForensics(plugin)
     // N7 族 1 触发：canary 泄漏 = 100% 破坏确认 → 拦截名单
     if (plugin !== undefined) confirmBlock.markFamily1(plugin)
-    status.record({
+    emit({
       id: `n4-canary:${hashShort(hit)}:${plugin ?? ''}`,
       severity: 'red',
       source: 't2',
@@ -243,7 +287,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
       pluginHint: plugin,
       mergeKey: `t2:canary-leak:${plugin ?? ''}`,
       at: Date.now(),
-    })
+    }, { subject: t2Subject(plugin), mergeSubject: plugin === undefined ? '' : undefined })
   }
   // 0.1.20：密钥外泄内容匹配（PEM/AWS key 格式；纯函数 detectKeyLeaks 于 exfil-ledger）
   const recordKeyLeak = (where: 'url' | 'body', text: string, plugin: string | undefined): void => {
@@ -278,7 +322,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
       // 彻底消失（0.2.1 文档承诺的「已忽略分区可恢复」失效），且后续真实外泄静默（用户以为
       // 已处置，实则通道仍开）。改由 VetStatus.record/snapshot 统一按 isDismissed 折叠进
       // 「已忽略」区：跳过 level/alarmCount 但保留可见、可恢复；mergeKey 聚合最坏量级 = 一条。
-      status.record({
+      emit({
         id: alertId,
         severity: 'red',
         source: 't2',
@@ -290,7 +334,7 @@ export function createT2Sink(status: VetStatus, contractResolver?: ContractResol
         pluginHint: plugin,
         mergeKey: `t2:n3-key-leak:${plugin ?? ''}`,
         at: Date.now(),
-      })
+      }, { subject: t2Subject(plugin), mergeSubject: plugin === undefined ? '' : undefined })
     }
   }
   const ledgerFsObserver = (evt: LedgerFsEvent): void => {

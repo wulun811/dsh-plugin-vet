@@ -58,8 +58,10 @@ const SNAPSHOT_ROOT = resolveStoreRoot()
 
 let storeRootOverride: string | undefined
 
-/** vet 存储根目录：capabilities/baseline/stats/scan-summaries/known-boundaries/
- * official-catalog/forensics/contracts/audits/dismissed-alerts 全在其下。 */
+/** vet 存储根目录：capabilities/baseline/stats/scan-summaries/official-catalog/
+ * forensics/contracts/audits/dismissed-alerts 全在其下。
+ * 注：`known-boundaries.json` 是 0.3.3–0.5.2 的 C2 边界去重状态，0.5.3 起不再读写
+ * （边界改由覆盖面表达）；老用户盘上的这个文件留着无害，删掉也无害。 */
 export function vetStoreRoot(): string {
   return storeRootOverride ?? SNAPSHOT_ROOT
 }

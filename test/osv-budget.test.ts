@@ -55,6 +55,10 @@ describe('OSV budget bounding (P2-10)', () => {
     expect(dt).toBeLessThan(2500)
     // 预算触发提前 break：并非全部 9 个目标都被查询
     expect(calls()).toBeLessThan(9)
+    // 0.5.4：统计说的是同一件事——目标 9 个、发出去的不到 9 个，宿主据此写 partial + osv-unqueried
+    expect(res.report!.osv?.phase).toBe('ran')
+    expect(res.report!.osv?.targets).toBe(9)
+    expect(res.report!.osv?.attempted).toBeLessThan(9)
   })
 
   it('large budget still queries all targets and returns findings', async () => {
@@ -69,6 +73,8 @@ describe('OSV budget bounding (P2-10)', () => {
     expect(calls()).toBe(9) // pkg + 8 deps（directDepsOf 上限 8）
     const osvFindings = res.report!.findings.filter(f => f.rule === 'OSV')
     expect(osvFindings.length).toBe(9)
+    // 全问全答：这是 intel_osv 唯一能写 covered 的形状
+    expect(res.report!.osv).toEqual({ phase: 'ran', targets: 9, attempted: 9, answered: 9 })
   })
 
   it('osv disabled → no network calls, static-only ok', async () => {
@@ -81,6 +87,7 @@ describe('OSV budget bounding (P2-10)', () => {
 
     expect(res.ok).toBe(true)
     expect(calls()).toBe(0) // osv!==true 不触发 OSV 查询
+    expect(res.report!.osv).toBeUndefined()
   })
 
   // 0.3.14（用户实测回归：@deepseek-ai/dsh-mcp-client 重启首扫报
@@ -101,6 +108,8 @@ describe('OSV budget bounding (P2-10)', () => {
     expect(res.report).toBeDefined()
     expect(res.report!.verdict).toBe('clean') // 静态结果照常给出（OSV 静默降级）
     expect(dt).toBeLessThan(3000) // 旧行为：25s+ 不返回 → 宿主 SIGKILL → 整个扫描丢失
+    // 0.5.4：相位被硬护栏掐断 → phase=overran，宿主据此知道「计数是断点前的事实」而不是结论
+    expect(res.report!.osv?.phase).toBe('overran')
   })
 
   it('余量不足（宿主超时太小）→ 整段跳过 OSV：零网络调用，静态报告照常返回', async () => {
@@ -116,5 +125,7 @@ describe('OSV budget bounding (P2-10)', () => {
     expect(res.ok).toBe(true)
     expect(calls()).toBe(0) // 余量 < OSV_MIN_BUDGET_MS → 不冒险贴 kill 线
     expect(dt).toBeLessThan(2000)
+    // 0.5.4：整段没跑要能说出来——三个计数为 0 不代表「没有可查的目标」，phase 才是那句话
+    expect(res.report!.osv).toEqual({ phase: 'skipped', targets: 0, attempted: 0, answered: 0 })
   })
 })

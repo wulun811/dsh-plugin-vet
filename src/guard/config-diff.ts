@@ -22,6 +22,8 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
+import { emitAlarm } from './alarm-emit.js'
+import { HOST_SUBJECT } from '../domain/types.js'
 import type { VetConfig } from '../config.js'
 import type { VetStatus } from './status.js'
 
@@ -238,7 +240,7 @@ export function installConfigDiff(ctx: { baseUrl?: string; logger?: { warn(m: st
       return
     }
     for (const field of diffTelemetry(prev, next)) {
-      status.record({
+      emitAlarm(status, {
         id: 'telemetry-config-change:' + field,
         severity: 'yellow',
         source: 'scan',
@@ -248,7 +250,8 @@ export function installConfigDiff(ctx: { baseUrl?: string; logger?: { warn(m: st
           '）——热重载 15s 生效，需重启校验 exporter 端点（G-3 形态）',
         target: field,
         at: Date.now(),
-      })
+      // 主体是宿主（观测的是 profile 目录里的遥测配置），不是某个插件——无 pluginHint。
+      }, { subject: HOST_SUBJECT, source: 'local_scan' }, config.domainProjection)
     }
     prev = next
   }

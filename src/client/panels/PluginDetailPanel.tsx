@@ -145,7 +145,11 @@ function DetailBody({ pal, dark, t, data }: { pal: ThemeTokens; dark: boolean; t
     },
     {
       icon: '\ud83d\udce2', label: t('nut.esm'),
-      value: (cap?.esmNamedBuiltins ?? false) ? 'T2 blind' : t('nut.none'),
+      // 0.5.3：扫描器给出了命中的模块就点出来——「T2 盲区：fs,child_process」比一个布尔有用得多。
+      // 旧记录没有模块表，退回原来的 'T2 blind'（不编，也不假装知道）。
+      value: (cap?.esmNamedBuiltins ?? false)
+        ? ((cap?.esmNamedBuiltinModules?.length ?? 0) > 0 ? 'T2 blind: ' + cap!.esmNamedBuiltinModules!.join(',') : 'T2 blind')
+        : t('nut.none'),
       hit: cap?.esmNamedBuiltins ?? false,
       detail: '',
     },

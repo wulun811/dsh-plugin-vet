@@ -1,26 +1,30 @@
 /**
  * 钩子完整性心跳（P0-2 #2）
- * P0-4 结构债拆分自 runtime-hooks.ts（T2 包装品牌：本模块闭包私有 Symbol，不可复制/伪造；只观测不拦截）
+ * P0-4 结构债拆分自 runtime-hooks.ts（T2 包装品牌；只观测不拦截）
  */
 // ── P0-2 #2（0.1.21）：钩子完整性心跳 ──────────────────────────────────────
 // 目标：让「T2 包装被剥离/替换」（插件改写 require.cache 后的模块导出、或直接覆盖导出）可被确定性观测。
-// 标记选型（ROADMAP #2 的意图落地）：本模块闭包私有的 Symbol 品牌，而非「源码注入哨兵串 + toString() 比对」——
-// toString 哨兵是源码可复制的（攻击者把包装器源码拷走再造外观一致的函数即可绕过），闭包私有、
-// 非配置/非可写/非可枚举的 Symbol 品牌无法被复制/伪造，是唯一可靠的「可析出标记」。
-const HOOK_BRAND = Symbol('vet-hook-brand')
+//
+// **0.5.15 修：品牌从「函数上一个 Symbol 属性」改为「按函数身份的 WeakSet」。**
+//
+// 旧实现（0.1.21–0.5.14）注释写的是「闭包私有的 Symbol 品牌无法被复制/伪造，是唯一可靠的
+// 可析出标记」。这个判断是错的：`Symbol()` 只是不打进全局注册表，函数上的 symbol 属性
+// **可枚举**——`Object.getOwnPropertySymbols(fn)` 就能抄走，贴到自己的假函数上，
+// `isVetHook(fake)` 随即返回 true（已实测复现）。攻击者因此可以把 vet 的包装整个换成自己的
+// 函数、让心跳报 55/55 完好，而面板永久绿——「可析出标记」变成了「可伪造标记」。
+//
+// WeakSet 按**对象身份**判定：没有可抄走的属性面，复制属性不会让另一个函数变成同一个对象。
+// 这是唯一能把「这个函数是我们造的」与「这个函数长得像我们造的」区分开的机制。
+const hookBrandSet = new WeakSet<(...a: unknown[]) => unknown>()
 
 /** 给一个 vet 包装函数打品牌（patchModule/patchNetworkModule 内部 + runtime-guard 的手工包装共用）。 */
 export function brandVetHook(fn: (...a: unknown[]) => unknown): void {
-  try {
-    Object.defineProperty(fn, HOOK_BRAND, { value: true, writable: false, configurable: false, enumerable: false })
-  } catch {
-    // 无法打标（冻结函数等极端场景）：该包装对心跳视为未标记——心跳宁可报「疑似剥离」也不漏报
-  }
+  hookBrandSet.add(fn)
 }
 
-/** 判断一个函数是否为 vet 钩子包装（带品牌标记）。 */
+/** 判断一个函数是否为 vet 钩子包装（按函数身份，不看属性）。 */
 export function isVetHook(fn: unknown): boolean {
-  return typeof fn === 'function' && (fn as unknown as Record<symbol, unknown>)[HOOK_BRAND] === true
+  return typeof fn === 'function' && hookBrandSet.has(fn as (...a: unknown[]) => unknown)
 }
 
 /** 钩子注册表：patchModule / patchNetworkModule / registerHookTarget 登记的目标（模块名 → 实际导出的 mod 对象），

@@ -14,6 +14,9 @@ export interface VetConfig {
   /** 安全档位（默认 standard = 现状行为；hardened/paranoid 展开预设，详见 PROFILE_PRESETS）。 */
   profile: VetProfile
   mode: 'report' | 'deny'
+  /** 新插件（internal/plugin）加载时自动静态扫描。0.5.19 起它**只**管「要不要走包目录树」：
+   * 关掉之后静态扫描、官方包内容哈希基线、三方基线一起停（三者都要走树），但**审计门槛
+   * （requireAudit）照常生效**——门槛只读一个档案目录，不该被性能开关连带关掉（F19）。 */
   autoScan: boolean
   scannerTimeoutMs: number
   rules: Record<string, boolean>
@@ -28,8 +31,16 @@ export interface VetConfig {
   runtimeForkBurstN: number
   runtimeFdLimit: number
   /** D22 补漏：窗口内 RSS 净增长超限 → yellow（持续膨胀/疑似泄漏）。 */
+  /** T1 持续膨胀阈值（MB / `runtimeGrowthWindowMs` 窗口）。0.5.21 起默认 2048：
+   * 256 那档把「十分钟涨了 260 MB」当成泄漏，而正常宿主在装插件、跑任务时就是这个量级——
+   * 报警成了背景噪音，噪音会教人忽略报警。绝对值仍有 4096 MB 的上限在管。 */
   runtimeGrowthMb: number
   runtimeGrowthWindowMs: number
+  /** 0.5.22：T1 启动暖机窗口（ms）——宿主冷启动 RSS 会短时冲高，窗口内不出 T1 报警。可选：
+   * 老配置对象/直接构造的 VetConfig 没有这个键时按 180000 处理（缺省值只在 schema 与哨兵里各写一次）。 */
+  runtimeWarmupMs?: number
+  /** 0.5.22：内存越线必须连续满这么久才报（ms）；瞬时尖峰（实测 4413 MB 只撑了 4 拍 ≈8 秒）不报。 */
+  runtimeMemSustainMs?: number
   /** OSV 已知漏洞核对（谷歌漏洞库，npm 生态）：扫描 package.json 时自动查询已知漏洞（网络，失败静默降级）。 */
   osvCheck: boolean
   /** D27：蜜罐诱饵（opt-in，需 runtimeGuard: watch 才生效）：往 honeypot.dir 放假密钥诱饵，T2 对诱饵路径的触碰单独报警。 */
@@ -65,6 +76,12 @@ export interface VetConfig {
    * 记录首装内容哈希，后续加载内容变化（同版本字节不一致）→ red（可经 acknowledgedPackageHashes 豁免）。
    * 定位是"变更检测"而非信任锚：first-seen 自动信任仍有窗口，叠加 deny/requireAudit 才完整。 */
   thirdPartyBaseline: boolean
+  /** 0.5.14（用户反馈后改回默认）：控制面写入口默认**只做同源校验**（与 0.5.12 一致）。
+   * 置 true 再加一道「对端必须是本机」（回环 ∪ 本机网卡地址）——同源校验读的是 Origin/Host，
+   * 非浏览器客户端可以自己拼；对端地址由内核填，拼不了。代价是：从另一台机器开面板就不能改
+   * 档位/开关了（局域网内也是一样），所以默认关，留给在意这一层的人显式打开。
+   * 0.5.13 一度默认开着，用户实测「从另一台机器点不动按钮」后改回。 */
+  controlLocalOnly: boolean
   /** 0.4.1：自动更新适配提示（默认开）。离线兼容层零网络永远生效（运行中的 DSH 超出本版
    * `dshCompat.tested` → 面板黄字提示）；在线层节流 24h 查 registry 上最新 vet 声明的已复验
    * 范围，仅当「确有更新版 **且** 该版声明覆盖本机 DSH」才提示可升级（否则静默——绝不谎报
@@ -84,6 +101,10 @@ export interface VetConfig {
     /** 契约目录；空 = $HOME/.dsh/vet/contracts（env DSH_PLUGIN_VET_CONTRACTS_DIR 可覆盖）。 */
     dir: string
   }
+  /** 0.5.0 语义投影开关（施工图 §8）。'shadow'（默认）：输出仍走旧字面量，同时投影一遍并
+   * 逐字段比对（差异只计数）；'active'：输出走投影；'legacy'：不投影，完全退回 0.4.x 路径。
+   * 影子期保留一个版本——回滚是改配置而不是回滚代码。 */
+  domainProjection: 'shadow' | 'active' | 'legacy'
 }
 
 /** 各键的 schema 默认值（与 VetConfigSchema 单一同源；applyProfile 用它判断「键仍处默认 → 可被档位覆盖」）。 */
@@ -98,11 +119,13 @@ export const VET_CONFIG_DEFAULTS = {
   requireAudit: false,
   runtimeGuard: 'off',
   runtimeIntervalMs: 2000,
-  runtimeMemLimitMb: 2048,
+  runtimeMemLimitMb: 4096,
   runtimeForkBurstN: 5,
   runtimeFdLimit: 512,
-  runtimeGrowthMb: 256,
+  runtimeGrowthMb: 2048,
   runtimeGrowthWindowMs: 600_000,
+  runtimeWarmupMs: 180_000,
+  runtimeMemSustainMs: 30_000,
   osvCheck: true,
   honeypot: { enabled: false, dir: '' },
   contentBaseline: true,
@@ -113,11 +136,13 @@ export const VET_CONFIG_DEFAULTS = {
   observeLoopback: true,
   telemetryDiff: true,
   thirdPartyBaseline: false,
+  controlLocalOnly: false,
   updateCheck: true,
   confirmBlock: 'block',
   confirmBlockFamily3: 'alarm',
   confirmBlockFamily4: 'alarm',
   contract: { enabled: true, dir: '' },
+  domainProjection: 'active',
 } as const satisfies Record<string, unknown>
 
 /** 档位预设（hardened/paranoid；standard = 空 = 现状行为）。合并规则见 applyProfile。 */
@@ -184,11 +209,14 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   requireAudit: z.boolean().default(false),
   runtimeGuard: z.union([z.const('off'), z.const('watch')]).default('off'),
   runtimeIntervalMs: z.natural().min(1).default(2000),
-  runtimeMemLimitMb: z.natural().min(1).default(2048),
+  runtimeMemLimitMb: z.natural().min(1).default(4096),
   runtimeForkBurstN: z.natural().min(1).default(5),
   runtimeFdLimit: z.natural().min(1).default(512),
-  runtimeGrowthMb: z.natural().min(1).default(256),
+  runtimeGrowthMb: z.natural().min(1).default(2048),
   runtimeGrowthWindowMs: z.natural().min(1).default(600_000),
+  // 0.5.22：这两个允许 0 —— 0 = 关闭暖机 / 关闭持续判定（显式选择"每拍越线就报"）。
+  runtimeWarmupMs: z.natural().default(180_000),
+  runtimeMemSustainMs: z.natural().default(30_000),
   osvCheck: z.boolean().default(true),
   honeypot: z.object({
     enabled: z.boolean().default(false),
@@ -205,6 +233,7 @@ export const VetConfigSchema: z<VetConfig> = z.object({
   observeLoopback: z.boolean().default(true),
   telemetryDiff: z.boolean().default(true),
   thirdPartyBaseline: z.boolean().default(false),
+  controlLocalOnly: z.boolean().default(false),
   updateCheck: z.boolean().default(true),
   confirmBlock: z.union([z.const('block'), z.const('alarm'), z.const('off')]).default('block'),
   confirmBlockFamily3: z.union([z.const('alarm'), z.const('block')]).default('alarm'),
@@ -213,4 +242,5 @@ export const VetConfigSchema: z<VetConfig> = z.object({
     enabled: z.boolean().default(true),
     dir: z.string().default(''),
   }).default({ enabled: true, dir: '' }),
+  domainProjection: z.union([z.const('shadow'), z.const('active'), z.const('legacy')]).default('active'),
 })

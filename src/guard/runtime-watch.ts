@@ -30,6 +30,17 @@ export interface WatchConfig {
   growthMb: number
   /** 膨胀检测窗口（ms）。 */
   growthWindowMs: number
+  /**
+   * 启动暖机窗口（ms）：宿主刚起来时加载 bundle / 进程内构建 client 包，RSS、子进程数、fd
+   * 都在爬升（实测：稳态 ~2.1 GB，冷启动峰值 4.4 GB）。这一窗口内不产生任何 T1 报警——
+   * 采样照做、prev 照常推进，窗口结束后恢复逐拍判定；那时仍越线照样会报。
+   */
+  warmupMs: number
+  /**
+   * 内存超限的**持续**判定窗口（ms）：连续越线满这么久才报。绝对阈值管的是"内存炸弹"，
+   * 但瞬时尖峰与 GC 抖动不是炸弹（实测一次 4413 MB 只维持了 4 拍 ≈8 秒）。
+   */
+  memSustainMs: number
 }
 
 export interface WatchAlarm {
@@ -44,11 +55,15 @@ export interface WatchAlarm {
 
 export const DEFAULT_WATCH_CONFIG: WatchConfig = {
   intervalMs: 2000,
-  memLimitMb: 2048,
+  memLimitMb: 4096,
   forkBurstN: 5,
   fdLimit: 512,
-  growthMb: 256,
+  growthMb: 2048,
   growthWindowMs: 600_000,
+  // 0.5.22：宿主冷启动会短时冲高（这次实测 4413 MB），3 分钟足够等到稳态；
+  // 内存越线还要连续 30 秒才算数，避免把 GC 抖动当成内存炸弹。
+  warmupMs: 180_000,
+  memSustainMs: 30_000,
 }
 
 /** 读 /proc/<pid> 快照；不可用（非 Linux / 权限不足）返回 null。 */
@@ -201,7 +216,8 @@ export function detectGrowth(
       severity: 'yellow',
       source: 't1',
       kind: 'growth',
-      message: `内存持续膨胀 ${Math.round(growthKb / 1024)} MB（窗口 ${cfg.growthWindowMs / 60000} 分钟，疑似泄漏）`,
+      // 文案带上门槛：用户看到一条「涨了 X MB」时，第一个问题永远是「那涨多少才算」。
+      message: `内存持续膨胀 ${Math.round(growthKb / 1024)} MB（窗口 ${cfg.growthWindowMs / 60000} 分钟，阈值 ${cfg.growthMb} MB，疑似泄漏）`,
       target: `growth=${Math.round(growthKb / 1024)}MB`,
       at: now,
     }],
@@ -209,17 +225,37 @@ export function detectGrowth(
   }
 }
 
+/**
+ * 内存越线是否已持续满判定窗口（纯函数，0.5.22）。`overSince` = 本轮**连续**越线的起点
+ * （第一次越线的采样时刻；回到阈值内即置 null）。持续时长从第一次越线算起——不是从
+ * "报警那一刻"往回数，否则永远差一拍。
+ */
+export function sustainReached(overSince: number | null, now: number, sustainMs: number): boolean {
+  return overSince !== null && now - overSince >= sustainMs
+}
+
 /** 相邻两样本差分判定（纯函数）：返回本轮报警（跨轮去重由 VetStatus.record 负责）。 */
-export function analyzeSample(prev: ProcSample | null, curr: ProcSample, cfg: WatchConfig): WatchAlarm[] {
+export interface AnalyzeOptions {
+  /** 内存越线尚未持续满 `memSustainMs`（或仍在暖机）时为 true —— 本轮不出 mem 行。
+   * 只影响这一拍要不要报，不影响 fork/fd 判定。 */
+  skipMem?: boolean
+}
+
+export function analyzeSample(
+  prev: ProcSample | null,
+  curr: ProcSample,
+  cfg: WatchConfig,
+  options: AnalyzeOptions = {},
+): WatchAlarm[] {
   const out: WatchAlarm[] = []
   const memMb = curr.rssKb / 1024
-  if (memMb > cfg.memLimitMb) {
+  if (options.skipMem !== true && memMb > cfg.memLimitMb) {
     out.push({
       id: `t1:mem:${cfg.memLimitMb}`,
       severity: 'red',
       source: 't1',
       kind: 'mem',
-      message: `宿主进程内存超限：${memMb.toFixed(0)} MB（阈值 ${cfg.memLimitMb} MB）`,
+      message: `宿主进程内存超限：${memMb.toFixed(0)} MB（阈值 ${cfg.memLimitMb} MB，连续超限 ≥${Math.round(cfg.memSustainMs / 1000)} 秒）`,
       target: `VmRSS=${curr.rssKb}kB`,
       at: curr.at,
     })
@@ -323,6 +359,8 @@ export function sidecarMain(cfg: WatchConfig, deps: { platform?: NodeJS.Platform
   let prev: ProcSample | null = null
   let samples: RssSample[] = []
   let growthMultiples = 0
+  /** 本轮连续内存越线的起点（0.5.22 持续判定；回到阈值内即清空）。 */
+  let overSince: number | null = null
   const startAt = Date.now()
   // darwin fd 降频缓存（初值 -1 = 尚无数据；第一拍即采一次）
   let fdCached = -1
@@ -354,8 +392,19 @@ export function sidecarMain(cfg: WatchConfig, deps: { platform?: NodeJS.Platform
       curr = readProcSample(hostPid)
     }
     if (curr === null) return
-    for (const alarm of analyzeSample(prev, curr, cfg)) {
-      process.stdout.write(JSON.stringify(alarm) + '\n')
+    // 0.5.22：暖机窗口内不出任何 T1 报警。宿主刚起来时加载 bundle、进程内构建 client 包，
+    // RSS 会短时冲高（实测 4413 MB），`/proc` 读到的就是这个爬升过程——报"内存超限"没有信息量。
+    // 采样与 prev 照常推进：窗口结束后逐拍判定立刻恢复，那时仍越线照样会报。
+    const warming = curr.at - startAt < cfg.warmupMs
+    if (!warming) {
+      // 0.5.22：内存越线要连续满 memSustainMs 才算数（瞬时尖峰/GC 抖动不报）。
+      const over = curr.rssKb / 1024 > cfg.memLimitMb
+      if (!over) overSince = null
+      else if (overSince === null) overSince = curr.at
+      const skipMem = !sustainReached(overSince, curr.at, cfg.memSustainMs)
+      for (const alarm of analyzeSample(prev, curr, cfg, { skipMem })) {
+        process.stdout.write(JSON.stringify(alarm) + '\n')
+      }
     }
     prev = curr
     // 持续膨胀检测：冷启动阶段（dsh web 加载 bundle / 进程内构建 client bundle）RSS 会在
@@ -391,5 +440,9 @@ if (sidecarIdx !== -1) {
   const fdLimit = gt0(Number(process.argv[sidecarIdx + 4] ?? DEFAULT_WATCH_CONFIG.fdLimit), DEFAULT_WATCH_CONFIG.fdLimit)
   const growthMb = gt0(Number(process.argv[sidecarIdx + 5] ?? DEFAULT_WATCH_CONFIG.growthMb), DEFAULT_WATCH_CONFIG.growthMb)
   const growthWindowMs = gt0(Number(process.argv[sidecarIdx + 6] ?? DEFAULT_WATCH_CONFIG.growthWindowMs), DEFAULT_WATCH_CONFIG.growthWindowMs)
-  sidecarMain({ intervalMs, memLimitMb, forkBurstN, fdLimit, growthMb, growthWindowMs })
+  // 0.5.22：暖机 / 内存持续判定允许 0（= 关闭），与其它参数不同——所以用 nonNeg 而非 gt0。
+  const nonNeg = (v: number, fallback: number): number => (Number.isFinite(v) && v >= 0 ? v : fallback)
+  const warmupMs = nonNeg(Number(process.argv[sidecarIdx + 7] ?? DEFAULT_WATCH_CONFIG.warmupMs), DEFAULT_WATCH_CONFIG.warmupMs)
+  const memSustainMs = nonNeg(Number(process.argv[sidecarIdx + 8] ?? DEFAULT_WATCH_CONFIG.memSustainMs), DEFAULT_WATCH_CONFIG.memSustainMs)
+  sidecarMain({ intervalMs, memLimitMb, forkBurstN, fdLimit, growthMb, growthWindowMs, warmupMs, memSustainMs })
 }

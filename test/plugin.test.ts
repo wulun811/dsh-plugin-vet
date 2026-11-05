@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, realpathSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -9,16 +9,19 @@ import { apply } from '../lib/index.js'
 import { scan } from '../lib/scanner-bin/engine.js'
 import { buildRequest, createScanPluginTool, detectTargetKind } from '../lib/tools/scan-plugin.js'
 import { installToolExecuteGuard } from '../lib/guards/tool-execute.js'
-import { installInternalPluginGuard, classifyLocalEntry } from '../lib/guards/internal-plugin.js'
+import { installInternalPluginGuard, classifyLocalEntry, isThirdPartyForAuditGate } from '../lib/guards/internal-plugin.js'
 import { installInvariant, PACKAGE_NAME } from '../lib/invariant.js'
 import { resolvePackageRoot } from '../lib/scanner/package-sources.js'
 import { VetConfigSchema } from '../lib/config.js'
 import { VetStatus } from '../lib/guard/status.js'
 import { setArchiveDirForTest, hasAuditRecord, setArchiveIoWarn } from '../lib/audit/archive.js'
 import { computePackageHash, setBaselineDirForTest } from '../lib/guards/content-baseline.js'
-import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
+import { setSummariesDirForTest, recordScanSummary } from '../lib/guard/scan-summaries.js'
+import { getStats, setStatsDirForTest } from '../lib/guard/stats.js'
+import { attemptCount, lastReceiptOf, resetReceiptOracle } from '../lib/guard/receipt-oracle.js'
 import { setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
 import { setCatalogAutoRefresh } from '../lib/guards/official-catalog.js'
+import { CURRENT_ENGINE } from '../lib/scanner/protocol.js'
 import type { VetConfig } from '../lib/config.js'
 import { explainScore, renderScorecard } from '../lib/report/render.js'
 
@@ -149,6 +152,13 @@ describe('scan_plugin tool', () => {
     expect(value.static.capabilities).toBeDefined()
   })
 
+  it('0.5.20：结果带引擎标识——审计档案的 rule_set_version 只能从这里拿', async () => {
+    const tool = createScanPluginTool()
+    const value = await tool.execute({ target: 'dynamic-code', source: CLEAN }, fakeExec('scan_plugin', {}) as never)
+    // 没有这个字段，AUDIT_PROTOCOL 让 agent 写的那一行就成了「自己猜一个版本号」。
+    expect(value.static.engine).toBe(CURRENT_ENGINE)
+  })
+
   it('render 输出评分卡文本', () => {
     const text = renderScorecard({
       pluginName: 'x', scannedAt: 'now',
@@ -214,6 +224,18 @@ describe('tools/execute guard', () => {
     installToolExecuteGuard(ctx as never, config)
     return { ctx, handler: ctx.handlers.get('tools/execute')![0] }
   }
+  // 0.5.5：拦截现在会 incrementBlocked + 写回执——统计目录与 oracle 都要隔离，
+  // 否则用例之间互相看见对方的判定次数（operationId 会串号）。
+  let statsSandbox: string
+  beforeAll(() => {
+    statsSandbox = mkdtempSync(join(tmpdir(), 'vet-tool-stats-'))
+    setStatsDirForTest(statsSandbox)
+  })
+  afterAll(() => {
+    setStatsDirForTest(undefined)
+    rmSync(statsSandbox, { recursive: true, force: true })
+  })
+  afterEach(() => resetReceiptOracle())
 
   it('report 模式：run_code 逃逸代码 → 结果加 VET 前缀，不拦截', async () => {
     const { handler } = install(cfg())
@@ -222,15 +244,25 @@ describe('tools/execute guard', () => {
     expect(next).toHaveBeenCalled()
     expect(result.isError).toBe(false)
     expect(result.content[0].text).toMatch(/^VET run_code: critical/)
+    // 没有拦截就没有回执：回执只描述「边界上实际发生了什么」，不是每次调用都发一张。
+    expect(lastReceiptOf('tool_call')).toBeUndefined()
   })
 
   it('deny 模式 + verdict ≥ denyOn → isError 拦截，不调 next', async () => {
     const { handler } = install(cfg({ mode: 'deny', denyOn: 'critical' }))
     const next = vi.fn(async () => okResult)
+    const blockedBefore = getStats().blockedCount
     const result = await handler(fakeExec('run_code', { code: ESCAPE, description: 'x' }), next)
     expect(next).not.toHaveBeenCalled()
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toMatch(/^VET BLOCKED/)
+    // 0.5.5：这句话现在有回执撑着——applied 要求 deny + 边界之前 + 这次判定的原调用计数未增。
+    const receipt = lastReceiptOf('tool_call')!
+    expect(receipt.result).toBe('applied')
+    expect(receipt.boundary).toBe('tool_call')
+    expect(receipt.operationId).toBe('tool_call#1')
+    // 0.5.5 补漏：工具面拦截此前不计入 stats.blockedCount（面板「拦截次数」长期漏记）。
+    expect(getStats().blockedCount).toBe(blockedBefore + 1)
   })
 
   it('deny 模式 + 干净代码 → 放行', async () => {
@@ -246,6 +278,8 @@ describe('tools/execute guard', () => {
     const next = vi.fn(async () => okResult)
     const result = await handler(fakeExec('bash', { command: 'ls' }), next)
     expect(result.content[0].text).toBe('OK')
+    // 非目标工具根本不进判定点：attempts 不该为它涨（否则 operationId 全是噪声）
+    expect(attemptCount('tool_call')).toBe(0)
   })
 
   it('workflow 工具 script 参数也被拦截（A4）', async () => {
@@ -640,6 +674,167 @@ describe('internal/plugin guard', () => {
     expect(classifyLocalEntry('file:///a/b%20c.mjs')).toBe('/a/b c.mjs')
     expect(classifyLocalEntry('file:/a/b.mjs')).toBe('/a/b.mjs')
     expect(classifyLocalEntry('link:/x/y')).toBe('/x/y')
+  })
+
+  /**
+   * 0.5.20：`standard_changed` 第一次有了生产者，端到端走一遍门槛。
+   *
+   * 档案写着「这条结论是 static-v26 那套规则给的，当时判 clean」；当前规则集对这个包的
+   * 最近一次扫描判 critical。结论所依赖的标准已经不成立 → 门槛拦下，并且**说的是规则集**，
+   * 不是「摘要对不上」（摘要是对的，那句文案在 0.5.20 之前会变成假话）。
+   */
+  it('0.5.20：档案产自旧规则集且新规则集判得更差 → deny 拒载，理由是规则集变了', () => {
+    const bdir = mkdtempSync(join(tmpdir(), 'vet-standard-gate-'))
+    setArchiveDirForTest(join(bdir, 'audits'))
+    setSummariesDirForTest(bdir)
+    try {
+      mkdirSync(join(bdir, 'audits'), { recursive: true })
+      writeFileSync(
+        join(bdir, 'audits', 'vet-test-stale-1.0.0-20260101-000000.md'),
+        '# 健康档案\nsubject_sha256: ' + 'a'.repeat(64) + '\nrule_set_version: static-v26\nscan_verdict: clean\n',
+      )
+      recordScanSummary({ name: '@vet-test/stale', version: '1.0.0', at: 1, verdict: 'critical', staticScore: 92, ruleCodes: ['R5'], engine: CURRENT_ENGINE })
+      const ctx = new FakeCtx()
+      const status = new VetStatus()
+      installInternalPluginGuard(ctx as never, cfg({ mode: 'deny', requireAudit: true }), status)
+      const h = ctx.handlers.get('internal/plugin')![0]
+      const f = fiber({ entry: { options: { name: '@vet-test/stale' } } })
+      expect(() => h(f)).toThrow(/规则集/)
+      expect(() => h(f)).toThrow(/需要重新审查/)
+      expect(f.dispose).toHaveBeenCalled()
+      // 报警文案同样说的是规则集——面板与日志不能各说一套
+      const msg = status.snapshot().alarms.find(a => a.kind === 'audit-required')?.message ?? ''
+      expect(msg).toContain('规则集')
+      expect(msg).not.toContain('内容摘要')
+    } finally {
+      setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+      setSummariesDirForTest(undefined)
+      rmSync(bdir, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * 0.5.19（F19）：`autoScan` 与 `requireAudit` 是两个独立配置键，posture 里也是两个独立面
+   * （`preload_scan` / `audit_gate`）。但 0.5.18 及以前 `if (!config.autoScan) return` 的早退
+   * 排在审计门槛之前，于是「我不想每次装包都静态扫描」被静默解释成「我不要求任何人工审计」：
+   * 开着 requireAudit 的人一关 autoScan，未审计的第三方插件直接加载，而面板 `audit_gate`
+   * 仍显示 desired=true——想要却没生效，且没有任何告警解释这个差异。
+   *
+   * 这一组钉住解耦之后的三件事：门槛活着、扫描确实停了、官方名（种类不同）不被误伤。
+   * 回退（把 auditGate 挪回早退之后）会让前两条红。
+   */
+  describe('autoScan 与 requireAudit 解耦（0.5.19，F19）', () => {
+    it('report：autoScan:false 下未审计的第三方插件照常报警（回退会让它红）', () => {
+      const bdir = mkdtempSync(join(tmpdir(), 'vet-noscan-audit-'))
+      setArchiveDirForTest(join(bdir, 'audits')) // 空档案目录：有门槛就必然报警
+      try {
+        const ctx = new FakeCtx()
+        const status = new VetStatus()
+        installInternalPluginGuard(
+          ctx as never,
+          cfg({ mode: 'report', requireAudit: true, autoScan: false }),
+          status,
+        )
+        const h = ctx.handlers.get('internal/plugin')![0]
+        expect(() => h(fiber({ entry: { options: { name: '@vet-test/gap-unaudited' } } }))).not.toThrow()
+        expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
+        const snap = status.snapshot()
+        expect(snap.alarms.map(a => a.kind)).toEqual(['audit-required'])
+        expect(snap.alarms[0].severity).toBe('yellow')
+        // 门槛活着 ≠ 扫描活了：修的只是门槛的位置，不是把 autoScan 一并废掉。
+        expect(ctx.logger.info).not.toHaveBeenCalledWith(expect.stringContaining('auto-scan'))
+        expect(snap.lastScan).toBeUndefined()
+      } finally {
+        setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+        rmSync(bdir, { recursive: true, force: true })
+      }
+    })
+
+    it('deny：autoScan:false 下未审计的第三方插件被拒载（门槛不是只报警）', () => {
+      const bdir = mkdtempSync(join(tmpdir(), 'vet-noscan-deny-'))
+      setArchiveDirForTest(join(bdir, 'audits'))
+      try {
+        const ctx = new FakeCtx()
+        installInternalPluginGuard(
+          ctx as never,
+          cfg({ mode: 'deny', requireAudit: true, autoScan: false }),
+        )
+        const h = ctx.handlers.get('internal/plugin')![0]
+        const f = fiber({ entry: { options: { name: '@vet-test/gap-denied' } } })
+        expect(() => h(f)).toThrow(/尚未完成审计/)
+        expect(f.dispose).toHaveBeenCalled()
+      } finally {
+        setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+        rmSync(bdir, { recursive: true, force: true })
+      }
+    })
+
+    it('autoScan:false + 有档案：照常加载（门槛不是「一律拒载」）', () => {
+      const bdir = mkdtempSync(join(tmpdir(), 'vet-noscan-ok-'))
+      setArchiveDirForTest(join(bdir, 'audits'))
+      try {
+        mkdirSync(join(bdir, 'audits'), { recursive: true })
+        writeFileSync(join(bdir, 'audits', 'vet-test-needs-audit-1.0.0-20260815-120000.md'), '# VET 健康档案')
+        const ctx = new FakeCtx()
+        installInternalPluginGuard(
+          ctx as never,
+          cfg({ mode: 'deny', requireAudit: true, autoScan: false }),
+        )
+        const h = ctx.handlers.get('internal/plugin')![0]
+        const f = fiber({ entry: { options: { name: '@vet-test/needs-audit' } } })
+        expect(() => h(f)).not.toThrow()
+        expect(f.dispose).not.toHaveBeenCalled()
+      } finally {
+        setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+        rmSync(bdir, { recursive: true, force: true })
+      }
+    })
+
+    it('autoScan:false：官方命名空间不设门槛，但解析不到包根的官方名照拦（冒名形态）', () => {
+      const profile = mkdtempSync(join(tmpdir(), 'vet-noscan-official-'))
+      const bdir = mkdtempSync(join(tmpdir(), 'vet-noscan-bl-'))
+      const pkg = join(profile, 'node_modules', '@deepseek-ai', 'ok-official')
+      mkdirSync(pkg, { recursive: true })
+      writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/ok-official', version: '1.0.0', main: 'index.js' }))
+      writeFileSync(join(pkg, 'index.js'), 'module.exports = 1')
+      setArchiveDirForTest(join(bdir, 'audits'))
+      try {
+        const ctx = new FakeCtx()
+        ctx.baseUrl = profile
+        const status = new VetStatus()
+        installInternalPluginGuard(
+          ctx as never,
+          cfg({ mode: 'report', requireAudit: true, autoScan: false, contentBaseline: false }),
+          status,
+        )
+        const h = ctx.handlers.get('internal/plugin')![0]
+        // 根能解析 → 没有哈希就无法证明它不是官方 → 按官方处理，不落到人工档案上
+        h(fiber({ entry: { options: { name: '@deepseek-ai/ok-official' } } }))
+        expect(ctx.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
+        // 同命名空间但解析不到根：名字自证不了身份（round-16 SA2-6 的冒名形态）→ 设门槛
+        h(fiber({ entry: { options: { name: '@deepseek-ai/definitely-not-installed' } } }))
+        expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining('尚未完成审计'))
+        expect(status.snapshot().alarms.map(a => a.kind)).toEqual(['audit-required'])
+      } finally {
+        setArchiveDirForTest(join(homedir(), '.dsh', 'vet', 'audits'))
+        rmSync(profile, { recursive: true, force: true })
+        rmSync(bdir, { recursive: true, force: true })
+      }
+    })
+
+    it('isThirdPartyForAuditGate：三个便宜事实的边界', () => {
+      const c = { allowlist: ['@vet-test/allowlisted', 'allowed-plain'] }
+      // 不是可安装插件 / 用户显式放行 → 不设门槛
+      expect(isThirdPartyForAuditGate('cordis:group', undefined, c)).toBe(false)
+      expect(isThirdPartyForAuditGate('@vet-test/allowlisted', undefined, c)).toBe(false)
+      expect(isThirdPartyForAuditGate('allowed-plain', '/x', c)).toBe(false)
+      // 非官方命名空间：无条件第三方（与 classifyOfficial 同判）
+      expect(isThirdPartyForAuditGate('lodash', '/x', c)).toBe(true)
+      expect(isThirdPartyForAuditGate('@vet-test/x', undefined, c)).toBe(true)
+      // 官方命名空间：只有「根解析不出来」这一形按第三方设门槛
+      expect(isThirdPartyForAuditGate('@deepseek-ai/ok-x', '/x', c)).toBe(false)
+      expect(isThirdPartyForAuditGate('@deepseek-ai/ok-x', undefined, c)).toBe(true)
+    })
   })
 })
 

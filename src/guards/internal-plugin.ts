@@ -1,26 +1,31 @@
 import { readFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { ScanResponse } from '../scanner/protocol.js'
 import type { VetConfig } from '../config.js'
 import { scan, scanSync, scanBudget } from '../scanner/client.js'
-import { listSourceFiles, listInstructionFiles, resolvePackageRoot } from '../scanner/package-sources.js'
+import { buildFileScanRequest } from '../scanner/scan-request.js'
+import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../package-meta.js'
 import { isVetSelfPath } from '../pkg-root.js'
 import { incrementScanned, incrementBlocked } from '../guard/stats.js'
-import { hasAuditRecord, auditRequiredMessage, setArchiveIoWarn } from '../audit/archive.js'
+import { probeQualification, auditRequiredMessage, setArchiveIoWarn } from '../audit/archive.js'
+import { canLoad } from '../domain/qualify.js'
 import { withVetSelfIo, markOfficialTrusted } from '../guard/runtime-hooks.js'
 import { capabilityDiff } from '../guard/capability-diff.js'
 import { recordScan as recordVersionScan, isEmptyManifest, consumeCapabilitiesTamper } from '../guard/version-diff.js'
 import { classifyStoreRewrite } from '../guard/store-stamp.js'
 import { recordScanSummary } from '../guard/scan-summaries.js'
-import { isKnownBoundary, markKnownBoundary } from '../guard/known-boundaries.js'
 import type { VetStatus } from '../guard/status.js'
 import { computePackageHash, checkBaseline, recordBaseline, saveBaseline, getBaseline, consumeBaselineTamper, setRecordSuspected, isRecordSuspected } from './content-baseline.js'
 import { verifyAgainstRegistry } from './registry-verify.js'
 import { isOfficialPackageName, refreshOfficialCatalogFromRegistry } from './official-catalog.js'
 import { parseOsvEvidence } from '../guard/scan-verdict.js'
+import { emitAlarm } from '../guard/alarm-emit.js'
+import { localSubject, npmSubject } from '../domain/project.js'
+import { captureSnapshot, detectDrift } from '../guard/snapshot.js'
+import { coverageForScan } from '../guard/coverage.js'
+import { SELF_SUBJECT } from '../domain/types.js'
 
 /** typert loader 为 Fiber 附加的 entry 元数据（loader.ts:412 同款访问）。 */
 type VetFiber = Fiber & { entry?: { options?: { name?: string } } }
@@ -29,11 +34,20 @@ type VetFiber = Fiber & { entry?: { options?: { name?: string } } }
  * 0.3 档位观察抬升（round-16）：hardened/paranoid 下把 R17/R18/R19 的 info 观测报告为黄牌
  * （alarm-only；verdict 不变——静态层产出恒为 info 观测，这里只是把「已经看见的」抬到报警面，
  * 不改任何判定）。standard 档不产生任何额外报警。
+ *
+ * 0.5.22：R17 的**存在性**观测不抬升。那条记录只说「这个配置里有 !!js」，不含量级也不含动作：
+ * 官方 bundle 自己就用 !!js 做合法配置（实测 DSH 本体 13 处），把它抬成黄牌等于按使用宿主
+ * 能力报红——用户唯一能做的动作是关掉这个功能，这不叫报警。带危险动词的观测仍然抬升。
  */
 export interface ObservationAlarm {
   kind: 'r17-observation' | 'r18-observation' | 'r19-observation'
   message: string
 }
+
+/** R17 存在性观测的文案前缀。与 scanner-bin/rules/config-scan.ts 的 CONFIG_PRESENCE_MESSAGE
+ * 同源；两个编译单元不能互相 import，一致性由 test/config-profile.test.ts 拿真实
+ * runConfigScan 产物钉住（不是再抄一遍字符串互相比对）。 */
+const R17_PRESENCE_PREFIX = '配置含 !!js 表达式'
 
 export function observationAlarmsFor(
   findings: readonly { rule: string; severity: string; message?: string; evidence?: string }[],
@@ -41,6 +55,7 @@ export function observationAlarmsFor(
   const groups = new Map<string, { rule: string; n: number; sample: string }>()
   for (const f of findings) {
     if (f.severity !== 'info') continue
+    if (f.rule === 'R17' && (f.message ?? '').startsWith(R17_PRESENCE_PREFIX)) continue
     if (f.rule === 'R17' || f.rule === 'R18' || f.rule === 'R19') {
       const g = groups.get(f.rule) ?? { rule: f.rule, n: 0, sample: '' }
       g.n += 1
@@ -177,7 +192,7 @@ function classifyOfficial(packageName: string, packageRoot: string | undefined, 
     // round-16 review（S10）：落盘失败不再静默——基线不落盘 = 每次加载都 first-seen
     // （严格全扫，安全方向，但性能退化 + 用户无感知）；黄色告警让事实可见。
     if (!saveBaseline(store)) {
-      status?.record({
+      emitAlarm(status, {
         id: 'baseline-save-fail:' + packageName,
         severity: 'yellow',
         source: 'scan',
@@ -186,7 +201,7 @@ function classifyOfficial(packageName: string, packageRoot: string | undefined, 
         target: packageName,
         pluginHint: packageName,
         at: Date.now(),
-      })
+      }, { subject: npmSubject(packageName, version), official: true }, config.domainProjection)
     }
     // 首次见到：携带 hash/version 供调用方做首见入锚验证（verifyFirstSeenOfficial——
     // 目录内 + registry 字节一致 → 本进程即入内容信任锚，TOFU 窗口合上；不再强制等第二次 match）
@@ -207,7 +222,7 @@ function classifyOfficial(packageName: string, packageRoot: string | undefined, 
       const ackList = config.acknowledgedPackageHashes[`${packageName}@${version}`] ?? []
       if (ackList.includes(hash)) {
         markOfficialTrusted(packageName)
-        status?.record({
+        emitAlarm(status, {
           id: `baseline-patch-ack:${packageName}`,
           severity: 'info',
           source: 'scan',
@@ -216,9 +231,9 @@ function classifyOfficial(packageName: string, packageRoot: string | undefined, 
           target: packageName,
           pluginHint: packageName,
           at: Date.now(),
-        })
+        }, { subject: npmSubject(packageName, version), official: true }, config.domainProjection)
       } else {
-        status?.record({
+        emitAlarm(status, {
           id: `official-match-suspected:${packageName}`,
           severity: 'yellow',
           source: 'scan',
@@ -227,7 +242,7 @@ function classifyOfficial(packageName: string, packageRoot: string | undefined, 
           target: packageName,
           pluginHint: packageName,
           at: Date.now(),
-        })
+        }, { subject: npmSubject(packageName, version), official: true }, config.domainProjection)
       }
       return { kind: 'exempt', reason: 'match', hash, version }
     }
@@ -243,8 +258,19 @@ function classifyOfficial(packageName: string, packageRoot: string | undefined, 
  * 0.3.5（用户决策）：官方侧一律黄牌（不红）——哈希对不上先按「可能误报」对待，误报比漏报更
  * 消耗信任；第三方 P7 安装后基线（变更检测，高置信供应链信号）仍传 'red'。
  */
-function recordMismatchAlarm(status: VetStatus | undefined, name: string, version: string, hash: string, why: string, severity: 'red' | 'yellow' = 'red'): void {
-  status?.record({
+function recordMismatchAlarm(
+  status: VetStatus | undefined,
+  name: string,
+  version: string,
+  hash: string,
+  why: string,
+  config: VetConfig,
+  opts: { readonly severity?: 'red' | 'yellow'; readonly official?: boolean } = {},
+): void {
+  // 严重度与 official 是同一件事的两面：官方侧黄牌（先按可能误报）、第三方红牌（变更检测）。
+  // 分成两个参数是因为投影器要的是「这个主体是不是官方」，不是「我打算报什么颜色」。
+  const severity = opts.severity ?? 'red'
+  emitAlarm(status, {
     id: `baseline-mismatch:${name}`,
     severity,
     source: 'scan',
@@ -253,7 +279,7 @@ function recordMismatchAlarm(status: VetStatus | undefined, name: string, versio
     target: name,
     pluginHint: name,
     at: Date.now(),
-  })
+  }, { subject: npmSubject(name, version), official: opts.official === true }, config.domainProjection)
 }
 
 /**
@@ -276,7 +302,7 @@ export function checkThirdPartyBaseline(packageName: string, packageRoot: string
     recordBaseline(packageName, v, hashResult.hash, store)
     // S10：落盘失败可见（磁盘满/权限）；基线不落盘 = 每次加载重复 first-seen 判定（安全方向）
     if (!saveBaseline(store)) {
-      status?.record({
+      emitAlarm(status, {
         id: 'baseline-save-fail:' + packageName,
         severity: 'yellow',
         source: 'scan',
@@ -285,14 +311,14 @@ export function checkThirdPartyBaseline(packageName: string, packageRoot: string
         target: packageName,
         pluginHint: packageName,
         at: Date.now(),
-      })
+      }, { subject: npmSubject(packageName, v) }, config.domainProjection)
     }
     return 'first-seen'
   }
   if (result === 'match') return 'ok'
   const ackList = config.acknowledgedPackageHashes[`${packageName}@${v}`] ?? []
   if (ackList.includes(hashResult.hash)) {
-    status?.record({
+    emitAlarm(status, {
       id: `third-party-patch-ack:${packageName}`,
       // 0.3.13：与官方侧同档——已登记补丁 = 用户声明负责，info 观察（面板可见、不计盾牌）
       severity: 'info',
@@ -302,10 +328,10 @@ export function checkThirdPartyBaseline(packageName: string, packageRoot: string
       target: packageName,
       pluginHint: packageName,
       at: Date.now(),
-    })
+    }, { subject: npmSubject(packageName, v) }, config.domainProjection)
     return 'acknowledged'
   }
-  recordMismatchAlarm(status, packageName, v, hashResult.hash, '第三方包内容被修改（首装基线不一致，P7 形态）')
+  recordMismatchAlarm(status, packageName, v, hashResult.hash, '第三方包内容被修改（首装基线不一致，P7 形态）', config)
   return 'mismatch'
 }
 
@@ -316,7 +342,7 @@ export function checkThirdPartyBaseline(packageName: string, packageRoot: string
  *   也只是黄，别红了」；误报比漏报更消耗信任）；
  * - 对账不可用 → 黄牌（fail-open，提示可登记补丁；不再红——对账不可用 ≠ 篡改坐实）。
  */
-async function reconcileMismatch(status: VetStatus | undefined, name: string, verdict: Extract<OfficialVerdict, { kind: 'mismatch' }>): Promise<void> {
+async function reconcileMismatch(status: VetStatus | undefined, name: string, verdict: Extract<OfficialVerdict, { kind: 'mismatch' }>, config: VetConfig): Promise<void> {
   const v = await verifyAgainstRegistry(name, verdict.version)
   if (v.status === 'resolved' && v.officialHash === verdict.hash) {
     const store = getBaseline()
@@ -328,7 +354,7 @@ async function reconcileMismatch(status: VetStatus | undefined, name: string, ve
     // 0.3.5（审查加固）：字节已与官方一致 → 清除疑标（若此前置位）
     setRecordSuspected(name, verdict.version, false)
     if (!saveBaseline(store)) {
-      status?.record({
+      emitAlarm(status, {
         id: 'baseline-save-fail:' + name,
         severity: 'yellow',
         source: 'scan',
@@ -337,9 +363,9 @@ async function reconcileMismatch(status: VetStatus | undefined, name: string, ve
         target: name,
         pluginHint: name,
         at: Date.now(),
-      })
+      }, { subject: npmSubject(name, verdict.version) }, config.domainProjection)
     }
-    status?.record({
+    emitAlarm(status, {
       id: `baseline-refreshed:${name}`,
       severity: 'yellow',
       source: 'scan',
@@ -348,15 +374,15 @@ async function reconcileMismatch(status: VetStatus | undefined, name: string, ve
       target: name,
       pluginHint: name,
       at: Date.now(),
-    })
+    }, { subject: npmSubject(name, verdict.version) }, config.domainProjection)
     return
   }
   if (v.status === 'resolved') {
-    recordMismatchAlarm(status, name, verdict.version, verdict.hash, '与官方 registry 字节也不一致', 'yellow')
+    recordMismatchAlarm(status, name, verdict.version, verdict.hash, '与官方 registry 字节也不一致', config, { severity: 'yellow', official: true })
     // 0.3.5（审查加固）：registry 坐实本机 ≠ 官方 → 置疑标（后续 match 自证不再入锚）
     setRecordSuspected(name, verdict.version, true)
   } else {
-    recordMismatchAlarm(status, name, verdict.version, verdict.hash, `registry 对账不可用：${v.detail ?? 'unknown'}`, 'yellow')
+    recordMismatchAlarm(status, name, verdict.version, verdict.hash, `registry 对账不可用：${v.detail ?? 'unknown'}`, config, { severity: 'yellow', official: true })
   }
 }
 
@@ -374,12 +400,13 @@ async function verifyFirstSeenOfficial(
   name: string,
   version: string,
   localHash: string,
+  config: VetConfig,
 ): Promise<void> {
   await withVerifySlot(async () => {
     const v = await verifyAgainstRegistry(name, version)
     if (v.status !== 'resolved') return // 离线/不可用：维持观察（fail-open，绝不误伤）
     if (v.officialHash !== localHash) {
-      status?.record({
+      emitAlarm(status, {
         id: `official-verify-mismatch:${name}`,
         severity: 'yellow',
         source: 'scan',
@@ -388,7 +415,7 @@ async function verifyFirstSeenOfficial(
         target: name,
         pluginHint: name,
         at: Date.now(),
-      })
+      }, { subject: npmSubject(name, version) }, config.domainProjection)
       // 审查加固：疑标持久化——下次加载的本地基线自证 match 不再自动授予内容信任锚
       // （黄必须粘滞，否则伪造包第二载即获运行时全域静默）；落盘失败 fail-open（下次加载
       // 重新首见校验路径，黄牌重来一次，安全方向不损失）。
@@ -399,7 +426,7 @@ async function verifyFirstSeenOfficial(
     // 疑标在位时顺带清除（字节已更新为官方）。
     markOfficialTrusted(name)
     setRecordSuspected(name, version, false)
-    status?.record({
+    emitAlarm(status, {
       id: `official-verified:${name}`,
       severity: 'info',
       source: 'scan',
@@ -408,7 +435,7 @@ async function verifyFirstSeenOfficial(
       target: name,
       pluginHint: name,
       at: Date.now(),
-    })
+    }, { subject: npmSubject(name, version) }, config.domainProjection)
   })
 }
 
@@ -433,19 +460,96 @@ async function withVerifySlot<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * C2 边界提示的会话级去重（0.1.20 引入，0.3.3 升级）：
- * ESM 具名导入的 T2 不覆盖是架构性限制（C2 边界），反复提醒只会造成警报疲劳。
- * 0.3.3（P3 持久化状态化去重）：主去重层移到 known-boundaries 落盘（(kind, pkg,
- * version, capabilitiesHash) 版本不变不重报）；本 Map 保留两层兜底语义——
- * - known 落盘失败时（此时 isKnownBoundary 恒 false）防会话内同能力刷屏；
- * - 记录值 = 上次已报的 capabilitiesHash：能力差分变化时（hash 不同）允许重报，
- *   与 N6 差分同一变化源（「版本/能力未变不重报，变化才重启」在两级去重下都成立）。
+ * 审计门槛（D30）的「这个包要不要人工档案」判据。
+ *
+ * 完整判据是 `classifyOfficial().kind === 'not-official'`，但它要算包内容哈希——正是
+ * `autoScan: false` 要省掉的那一件事。门槛这里只用三个便宜事实：命名空间、allowlist、
+ * 包根能不能解析。三者的取舍都对着「官方包不要求人工档案」这条文档口径：
+ * - `cordis:` 内置分组入口不是可安装插件，allowlist 是用户显式放行；两者都不设门槛。
+ * - 非 `@deepseek-ai/` 命名空间：一定第三方（`classifyOfficial` 对此无条件返回 not-official）。
+ * - 官方命名空间 + 包根解析不出来：与 `classifyOfficial` 的 `root === undefined` 分支同判——
+ *   名字自证不了身份，按第三方设门槛（round-16 SA2-6 的冒名构造正是这一形）。
+ * - 官方命名空间 + 包根解析得到：没有哈希就证明不了它不是官方，按官方处理、不设门槛。
+ *
+ * 与完整判据相比只有两处偏离，都不是「把手伸开」：多拦「根不可解析的官方名」（更严），
+ * 不再拦「包根超预算/超时导致哈希算空」（更松）——后者本来也落在文档口径之外：官方包
+ * 靠内容哈希基线 + 静态扫描，不靠人工档案。
  */
-const esmGuardReported = new Map<string, string>()
+export function isThirdPartyForAuditGate(
+  entryName: string,
+  root: string | undefined,
+  config: Pick<VetConfig, 'allowlist'>,
+): boolean {
+  if (entryName.startsWith('cordis:')) return false
+  if (config.allowlist.includes(entryName)) return false
+  if (!entryName.startsWith('@deepseek-ai/')) return true
+  return root === undefined
+}
 
-/** 能力清单的确定性指纹（P3 变化源）：结构化序列化 + sha256。CLI 工具/测试可复用。 */
-export function hashCapabilities(capabilities: unknown): string {
-  return createHash('sha256').update(JSON.stringify(capabilities ?? null)).digest('hex')
+interface AuditGateInput {
+  readonly logger: { warn(msg: string): void }
+  readonly config: VetConfig
+  readonly status: VetStatus | undefined
+  readonly fiber: Fiber
+  readonly entryName: string
+  readonly root: string | undefined
+  readonly installedVersion: string | undefined
+}
+
+/**
+ * D30 强制层：`requireAudit` 开启时，没有可加载健康档案的第三方插件在加载时被拦截（deny）
+ * / 报警（report）。门槛独立于扫描——档案存在与否只取决于 agent 是否按协议审查过。
+ *
+ * 0.5.19（F19）：这段逻辑原先内联在 `if (!config.autoScan) return` 之后，于是「不想每次
+ * 装包都静态扫描」被静默解释成「不要求任何人工审计」：开着 requireAudit 的人一关 autoScan，
+ * 未审计的第三方插件直接加载，而面板的 `audit_gate` 仍显示 desired=true——想要却没生效，
+ * 且没有任何告警解释这个差异。现在它排在早退之前，`autoScan` 只剩「要不要走包目录树」。
+ *
+ * 代价（诚实记账）：autoScan:false 下，**有**档案且档案写了 `subject_sha256` 的包仍会被
+ * 哈希一次（`probeQualification` 按需调用）——否则「档案说 A、盘上是 B」验不出来，门槛
+ * 就只剩存在性。没有档案的包不哈希。
+ */
+function auditGate(input: AuditGateInput): void {
+  const { config, status, fiber, entryName, root, installedVersion } = input
+  if (!config.requireAudit) return
+  if (!isThirdPartyForAuditGate(entryName, root, config)) return
+  const qualification = probeQualification({
+    name: entryName,
+    ...(installedVersion !== undefined ? { version: installedVersion } : {}),
+    ...(root !== undefined ? { contentDigest: () => computePackageHash(root)?.hash } : {}),
+  })
+  if (canLoad(qualification.state)) return
+  // 0.5.20：recheck_required 有两条来路——内容变了，或规则集变了且新规则集判得更差。
+  // 以前只有前者，于是 hint 写死成「摘要不一致」；后者接上之后那句话就成了假话
+  // （用户会去比对摘要，而摘要是对的）。按 reason 分流，别让一句解释去猜原因。
+  const reasons = qualification.state.reasons
+  const hint = reasons.includes('standard-changed')
+    ? '档案是在更早的规则集下作出的，而当前规则集对这个包的判定更差——结论建立的那套标准已经不成立了，需要重新审查'
+    : qualification.state.status === 'recheck_required'
+      ? '档案存在，但记录的内容摘要与当前字节不一致（同版本不同内容），需要重新审查'
+      : qualification.state.status === 'rejected'
+        ? '上一次审计结论为不通过'
+        : undefined
+  const msg = auditRequiredMessage(entryName, hint)
+  input.logger.warn(msg)
+  // round-15 review（持久化忽略可恢复修复）：不前置短路——入列后由 VetStatus 折叠进
+  // 「已忽略」区（可恢复；旧行为跨 session 静默消失）。
+  // alarm-only：未审计插件只记录黄色告警（观测/警报），不拦截——除非用户显式选择 deny。
+  emitAlarm(status, {
+    id: `audit-required:${entryName}`,
+    severity: 'yellow',
+    source: 'scan',
+    kind: 'audit-required',
+    message: msg,
+    target: entryName,
+    pluginHint: entryName,
+    at: Date.now(),
+  }, { subject: npmSubject(entryName, installedVersion) }, config.domainProjection)
+  if (config.mode === 'deny') {
+    incrementBlocked()
+    void fiber.dispose()
+    throw new Error(msg)
+  }
 }
 
 /**
@@ -462,23 +566,6 @@ let prevPluginListenerOff: (() => void) | undefined
  */
 export function installInternalPluginGuard(ctx: Context, config: VetConfig, status?: VetStatus): void {
   prevPluginListenerOff?.()
-  // P6（0.3.3）：启动扫描 C2 边界汇总——官方包边界观察按 info 聚合一条 + 三方包黄色
-  // 警报的计数，防抖输出一行话（避免每包一条刷屏、也让「14 官方包同一 C2 边界」的
-  // 合并认知可见：不是 14 处风险，是 1 处架构边界 × 14 包）。
-  const bootBoundary = { official: 0, third: 0 }
-  let boundarySummaryTimer: ReturnType<typeof setTimeout> | undefined
-  const scheduleBoundarySummary = (): void => {
-    if (boundarySummaryTimer !== undefined) clearTimeout(boundarySummaryTimer)
-    boundarySummaryTimer = setTimeout(() => {
-      boundarySummaryTimer = undefined
-      const { official, third } = bootBoundary
-      if (official + third === 0) return
-      ctx.logger.info(
-        `vet: 启动扫描 C2 边界汇总——官方包 ${official} 个（info 观察，面板折叠为一条；详情见插件页/营养标签），第三方包 ${third} 个（黄色警报：版本/能力差分变化才重报）`,
-      )
-    }, 800)
-    boundarySummaryTimer.unref?.()
-  }
   // S9：档案目录不可读告警接线（一次性，注入即可）
   setArchiveIoWarn((msg) => {
     try {
@@ -499,7 +586,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     const localPath = classifyLocalEntry(rawEntryName)
     if (localPath !== null) {
       if (!isVetSelfPath(localPath)) {
-        status?.record({
+        emitAlarm(status, {
           id: 'local-entry:' + localPath,
           severity: 'info',
           source: 'scan',
@@ -509,7 +596,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           target: localPath,
           pluginHint: localPath,
           at: Date.now(),
-        })
+        }, { subject: localSubject(localPath) }, config.domainProjection)
         // 0.3.9（审查修复）：deny 模式恢复 fail-closed——0.3.7 的早期 return 让本地文件条目
         // 绕过了下方 root===undefined 的 deny 拦截（SA2-6「声称名与实际安装位置分离」正是
         // 此类形态），deny 用户对自置文件条目的拦截语义被静默关停（0.3.6 及更早是拦截的）。
@@ -525,12 +612,13 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // rc.8 起部分插件 entryName 带子模块路径（如 @deepseek-ai/dsh-tool-subagent-control/list-agents），
     // 提取包名用于解析/豁免/档案匹配，保留原始名用于日志
     const entryName = extractPackageName(rawEntryName)
-    if (!config.autoScan) return
 
     // DSH 把插件装进 profile 的 node_modules（vet 可能被符号链接，realpath 解析不到）→
     // 用 loader 的解析基准（ctx.baseUrl = profile 目录）定位第三方插件根目录。
     // P-1：提前解析——requireAudit 需要装机版本做档案精确匹配（升级后旧档案不放行），
     // 扫描复用同一 root，避免重复 resolve。
+    // 0.5.19：这两步提到 `autoScan` 早退之前——它们只是 resolve + 读一个 package.json，
+    // 不走包目录树，而审计门槛要用它们；门槛不该被「关掉自动扫描」连带关掉。
     const profileDir = (ctx as { baseUrl?: string }).baseUrl
     const root = resolvePackageRoot(entryName, profileDir)
     // round-5 review（B-A1）：vet 自身豁免按「身份」而非「名字」——同名冒名包
@@ -544,6 +632,13 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // 换为「root 可解析且 realpath 命中 vet 本体」唯一豁免形态。
     if (entryName === PACKAGE_NAME && root !== undefined && isVetSelfPath(root)) return
     const installedVersion = root === undefined ? undefined : readInstalledVersion(root)
+
+    // D30 强制层：与扫描无关（只读一个档案目录），所以排在早退之前。
+    auditGate({ logger: ctx.logger, config, status, fiber, entryName, root, installedVersion })
+
+    // 下面一整段都在走包目录树：内容哈希基线、首见入锚、三方基线、静态扫描。
+    // `autoScan: false` 关掉的是这一整段——不包括上面已经跑过的审计门槛。
+    if (!config.autoScan) return
 
     // P-5：官方包内容哈希判定（0.1.21：report 模式 mismatch 异步对账 registry 定性）
     // round-16 review（决策 1）：first-seen/match 不再完全跳过——静态扫描是唯一能识别
@@ -566,7 +661,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       const reconcileNote = config.mode === 'deny'
         ? 'deny 模式零网络不自动核对（可切 report 模式核对确认）'
         : '将自动核对并入目录'
-      status?.record({
+      emitAlarm(status, {
         id: 'official-not-in-catalog:' + entryName,
         severity: 'yellow',
         source: 'scan',
@@ -575,16 +670,16 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
         target: entryName,
         pluginHint: entryName,
         at: Date.now(),
-      })
+      }, { subject: npmSubject(entryName, installedVersion) }, config.domainProjection)
       if (config.mode !== 'deny') {
         void refreshOfficialCatalogFromRegistry().then((merged) => {
           if (!merged.has(entryName)) return
           // 核对后已纳入目录：补首见验证（哈希一致 → 本进程入锚）或 info 提示
           if (official.kind === 'exempt' && (official.reason === 'first-seen' || official.reason === 'match')
             && official.hash !== undefined && official.version !== undefined) {
-            void verifyFirstSeenOfficial(status, entryName, official.version, official.hash)
+            void verifyFirstSeenOfficial(status, entryName, official.version, official.hash, config)
           } else {
-            status?.record({
+            emitAlarm(status, {
               id: 'official-catalog-merged:' + entryName,
               severity: 'info',
               source: 'scan',
@@ -593,7 +688,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
               target: entryName,
               pluginHint: entryName,
               at: Date.now(),
-            })
+            }, { subject: npmSubject(entryName, installedVersion) }, config.domainProjection)
           }
         }).catch(() => {
           // 核对网络异常：静默——维持黄牌观察（fail-open，不误伤）
@@ -605,7 +700,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // acknowledge/对账路径（已降黄）。
     if (inCatalog && official.kind === 'exempt' && official.reason === 'first-seen'
       && config.mode !== 'deny' && official.hash !== undefined && official.version !== undefined && official.version !== 'unknown') {
-      void verifyFirstSeenOfficial(status, entryName, official.version, official.hash).catch(() => {
+      void verifyFirstSeenOfficial(status, entryName, official.version, official.hash, config).catch(() => {
         // 对账异常静默（不影响加载主流程）
       })
     }
@@ -630,7 +725,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
         // 0.3.13（用户决策「已声明补丁纳入降噪」）：yellow → info——登记是用户自己的声明
         // 动作，状态已知且不可行动（已登记 hash 精确匹配当前字节，字节再变即回到 mismatch
         // 黄牌 + 严格扫描）；面板 logged 区仍可见、可 dismiss，只是不再计 alarmCount/盾牌。
-        status?.record({
+        emitAlarm(status, {
           id: alertId,
           severity: 'info',
           source: 'scan',
@@ -639,18 +734,18 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           target: entryName,
           pluginHint: entryName,
           at: Date.now(),
-        })
+        }, { subject: npmSubject(entryName, official.version) }, config.domainProjection)
         return
       }
       if (config.mode === 'deny') {
         // deny：同步记黄（不做网络对账——同步路径零网络，P2-7 同款约束；0.3.5 降黄不红）
-        recordMismatchAlarm(status, entryName, official.version, official.hash, 'deny 模式不做网络对账', 'yellow')
+        recordMismatchAlarm(status, entryName, official.version, official.hash, 'deny 模式不做网络对账', config, { severity: 'yellow', official: true })
       } else {
         // report：异步对账官方 registry 再定性（红 / 基线刷新黄）；独立于扫描路径，
         // 即使后续 files 为空提前返回也不会丢警报
-        void reconcileMismatch(status, entryName, official).catch((error: unknown) => {
+        void reconcileMismatch(status, entryName, official, config).catch((error: unknown) => {
           ctx.logger.error(`vet: registry 对账失败 ${entryName}: ${String(error)}`)
-          recordMismatchAlarm(status, entryName, official.version, official.hash, 'registry 对账异常', 'yellow')
+          recordMismatchAlarm(status, entryName, official.version, official.hash, 'registry 对账异常', config, { severity: 'yellow', official: true })
         })
       }
     }
@@ -661,46 +756,41 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       checkThirdPartyBaseline(entryName, root, installedVersion, config, status)
     }
 
-    // D30 强制层：requireAudit 开启时，无健康档案的第三方插件在加载时被拦截（deny）/报警（report）。
-    // 门槛独立于包解析与扫描——档案存在与否只取决于 agent 是否按协议审查过。
-    // round-17 修正（官方包告警风暴）：门槛严格限第三方——官方包（first-seen/match）的门槛是
-    // 内容哈希基线 + 静态扫描（决策 1：首见也全扫、只豁免 deny 升级），不要求人工落盘审计档案；
-    // round-16 放开官方包跳过路径后，requireAudit:true 的用户在 DSH 自带官方插件加载时会收到
-    // 一屏 audit-required（文档口径本就是「第三方插件」，与 round-16 前 exempt 短路行为一致）。
-    if (config.requireAudit && official.kind === 'not-official' && !hasAuditRecord(entryName, installedVersion)) {
-      const msg = auditRequiredMessage(entryName)
-      ctx.logger.warn(msg)
-      const alertId = `audit-required:${entryName}`
-      // round-15 review（持久化忽略可恢复修复）：同 baseline-patch-ack——不短路，
-      // 入列后由 VetStatus 折叠进「已忽略」区（可恢复；旧行为跨 session 静默消失）
-      // alarm-only：未审计插件只记录黄色告警（观测/警报），不拦截——除非用户显式选择 deny。
-      status?.record({
-        id: alertId,
-        severity: 'yellow',
-        source: 'scan',
-        kind: 'audit-required',
-        message: msg,
-        target: entryName,
-        pluginHint: entryName,
-        at: Date.now(),
-      })
-      if (config.mode === 'deny') {
-        incrementBlocked()
-        void fiber.dispose()
-        throw new Error(msg)
-      }
-    }
+    // D30 审计门槛（requireAudit）已前移到 `autoScan` 早退之前（0.5.19，F19）——见 auditGate()。
 
     // P0-4：扫描与后处理拆分——deny 用同步 scanSync（observer 内需要同步抛错回滚挂载），
     // report 用异步 scan()（spawn 子进程不阻塞事件循环；旧实现 report 也走 scanSync，
     // async IIFE 包不住同步阻塞，大包扫描会冻结整个 DSH 最长 scannerTimeoutMs）。
     const finish = (res: ScanResponse): void => {
+      // 步骤 4b：这次扫描到底覆盖了哪些面，随扫描一起落账。未知的面由 domain 补成 unknown，
+      // 这里只报真的知道的那几个（不知道就说不知道，是这一层的全部职责）。
+      // 0.5.3：C2 边界（ESM 具名导入）不再是独立黄牌，而是这个主体运行时面上的 partial——
+      // 黄牌说的是「有个风险」，这一行说的是「我们看不见这一面」，后者才是事实。
+      status?.setCoverage(coverageForScan({
+        osvEnabled: config.osvCheck === true,
+        // 0.5.4：OSV 相位的自述统计（问了/问到了）。deny 模式的同步扫描**故意**不发网络请求
+        // （P2-7：spawnSync 冻住宿主期间做网络查询会成倍放大冻结），那是「明确没问」，
+        // 与「问了没回报」不是一个事实——旧实现在这条路径上把两者混成了同一格。
+        osv: res.report?.osv,
+        ...(config.mode === 'deny' && config.osvCheck === true ? { osvSkipped: 'sync-mode' as const } : {}),
+        transitiveDeps: config.transitiveDeps === true,
+        runtimeGuard: config.runtimeGuard,
+        scanFailed: !res.ok || res.report === undefined,
+        sourceCount: res.report?.sourceCount ?? 0,
+        skippedFiles: (res.report?.findings ?? []).filter((f) => f.rule === 'R8').length,
+        esmNamedBuiltins: res.report?.capabilities?.esmNamedBuiltins,
+        esmNamedModules: res.report?.capabilities?.esmNamedBuiltinModules,
+        // 官方内容锚（first-seen/match）→ 已知架构边界；未验证的官方名/三方包 → 未承认。
+        esmAcknowledged: officialTrustedFamily,
+        networkEgress: config.networkEgress !== false,
+        observedAt: Date.now(),
+      }), entryName)
       if (!res.ok || res.report === undefined) {
         // M9：deny 模式扫描失败必须 fail-closed（拦截 + 告警），否则恶意包可借
         // 扫描超时/异常静默放行；report 模式记录告警（扫描器失活本身是异常信号）
         const msg = `vet: 扫描失败 ${entryName}：${res.error ?? 'unknown'}`
         ctx.logger.error(msg)
-        status?.record({
+        emitAlarm(status, {
           id: `scan-fail:${entryName}`,
           // 0.3.14（用户实测：官方包 OSV 相位挂死 → scan-fail 黄牌压盾牌）：官方家族降为
           // info 观察——官方身份与完整性由内容哈希基线 + registry 对账负责，扫描器自身的
@@ -714,7 +804,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           target: entryName,
           pluginHint: entryName,
           at: Date.now(),
-        })
+        }, { subject: npmSubject(entryName, installedVersion), official: officialTrustedFamily }, config.domainProjection)
         // round-16 review（决策 1）：官方包（first-seen/match）扫描失败只记告警不拦截——
         // 官方信任锚豁免 deny 升级；第三方仍 fail-closed（M9：恶意包可借扫描超时/异常静默放行）
         if (config.mode === 'deny' && !officialDenyExempt) {
@@ -723,6 +813,27 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           throw new Error(`vet: 扫描失败，拒绝加载 ${entryName}（fail-closed）`)
         }
         return
+      }
+      // 放行前重算快照：判定过的字节必须还是即将加载的字节。
+      const drift = detectDrift(snapshotAtScan, root)
+      if (drift.drifted) {
+        const driftMsg = `vet: 扫描后内容被替换 ${entryName}（${drift.detail ?? 'unknown'}）——扫描判定的是旧字节`
+        ctx.logger.error(driftMsg)
+        emitAlarm(status, {
+          id: `snapshot-drift:${entryName}`,
+          severity: 'red',
+          source: 'scan',
+          kind: 'snapshot-drift',
+          message: `${entryName} 在扫描与加载之间内容发生变化（${drift.detail ?? 'unknown'}）——判定过的字节不是即将加载的字节，扫描结论对当前内容不成立；请移除该包或重新安装后再试`,
+          target: entryName,
+          pluginHint: entryName,
+          at: Date.now(),
+        }, { subject: npmSubject(entryName, installedVersion) }, config.domainProjection)
+        if (config.mode === 'deny') {
+          incrementBlocked()
+          void fiber.dispose()
+          throw new Error(`${driftMsg}（deny 模式拒绝加载，fail-closed）`)
+        }
       }
       const { verdict, staticScore } = res.report
       ctx.logger.info(`vet: auto-scan ${entryName} → ${verdict} (${staticScore})`)
@@ -761,7 +872,8 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
         // 官方包 + 依赖命中：同一条公告折叠成一行。实测 0.2.1 有 54 个官方包钉同一个
         // zod@4.4.3——逐包一行会一次刷满 20 槽缓冲，且每行都要单独忽略。第三方包不聚合。
         ...(officialTrustedFamily && osvDependency !== undefined ? { aggregate: true } : {}),
-      })
+        // 0.5.8：这条派生告警同样过投影漏斗（主体=被扫的对象，来源=本地扫描）。
+      }, config.domainProjection)
       // P2：扫描摘要留档（详情页规则墙/OSV 行 + 「最近插件」列表数据源）。
       // 变化才落盘（verdict/版本/规则码集合），同版同结论重扫不重写（防写放大）。
       recordScanSummary({
@@ -771,6 +883,8 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
         verdict,
         staticScore,
         sourceCount: res.report.sourceCount,
+        // 0.5.12（不变式 4）：记下产出这条结论的规则集，跨重启也能看出它是不是旧引擎给的。
+        engine: res.report.engine,
         ruleCodes: [...new Set(findingsAll.map(f => f.rule))],
         // OSV 命中在报告里是 rule='OSV' 的 finding（scanner-bin checkOsv）
         ...(findingsAll.some(f => f.rule === 'OSV') ? { osv: findingsAll.find(f => f.rule === 'OSV')?.message } : {}),
@@ -779,7 +893,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       // 按 kind+插件聚合，重复扫描合并计数，不刷缓冲）
       if ((config.profile ?? 'standard') !== 'standard') {
         for (const obs of observationAlarmsFor(res.report.findings ?? [])) {
-          status?.record({
+          emitAlarm(status, {
             id: 'obs:' + obs.kind + ':' + entryName,
             severity: 'yellow',
             source: 'scan',
@@ -789,7 +903,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
             pluginHint: entryName,
             mergeKey: 'obs:' + obs.kind + ':' + entryName,
             at: Date.now(),
-          })
+          }, { subject: npmSubject(entryName), official: false }, config.domainProjection)
         }
       }
       // 0.1.20：防御统计——扫描计数（0.3.18 起按包名去重，统计实际覆盖的插件数）
@@ -808,7 +922,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       const degenerate = res.report.sourceCount === 0 && isEmptyManifest(res.report.capabilities)
       const nav = degenerate ? null : recordVersionScan(entryName, installedVersion, res.report.capabilities)
       if (nav !== null && nav.alarm !== null) {
-        status?.record({
+        emitAlarm(status, {
           id: 'upgrade-diff:' + entryName + ':' + (nav.from ?? 'cold') + ':' + nav.to,
           severity: nav.alarm.severity,
           source: 'scan',
@@ -818,7 +932,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
           pluginHint: entryName,
           mergeKey: 'scan:upgrade',
           at: Date.now(),
-        })
+        }, { subject: npmSubject(entryName, installedVersion) }, config.domainProjection)
       }
       // M7（0.1.16 加固；0.3.15 归因分流）：vet 存储被外部改写（capabilities/baseline 与自写
       // 字节不符）。0.3.15 实测事故（用户 live 报 vet-store-tamper 黄牌）：改写者其实是 vet 自己的
@@ -833,7 +947,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
         const rewrite = classifyStoreRewrite(tamper.foreign, process.pid)
         if (rewrite.kind === 'foreign-vet') {
           const w = rewrite.writer
-          status?.record({
+          emitAlarm(status, {
             id: 'vet-store-foreign-write',
             severity: 'info',
             source: 'scan',
@@ -841,9 +955,9 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
             message: `vet 存储被另一个 vet 进程改写（${tamper.file}；写入方 pid ${w.pid}，vet ${w.version}，${new Date(w.at).toLocaleString()}）——多进程写路径（vet CLI / 测试 / 第二个 DSH 实例）会接管同一份存储，已按当前内容重新接管基线；若你并未运行过上述进程，请按篡改处置（M7）`,
             target: '~/.dsh/vet',
             at: Date.now(),
-          })
+          }, { subject: SELF_SUBJECT }, config.domainProjection)
         } else {
-          status?.record({
+          emitAlarm(status, {
             id: 'vet-store-tamper',
             severity: 'yellow',
             source: 'scan',
@@ -851,61 +965,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
             message: `vet 存储文件被外部改写（${tamper.file} 与 vet 自写内容不一致，且改写方未留下「另一个 vet 进程」的自写标记）——疑似进程内插件篡改 vet 状态，升级差分/基线保护可能已失效（M7）`,
             target: '~/.dsh/vet',
             at: Date.now(),
-          })
-        }
-      }
-      // C2（0.1.16 加固）：插件使用内建模块的 ESM 具名导入 → T2 钩子对该绑定不生效（Node 快照互操作），
-      // 运行时防线仅剩 T1 哨兵——显式提示边界，不静默
-      // 0.1.20：session 级去重（架构性限制反复提醒 = 警报疲劳）；0.3.2 用户侧实测（14 官方包 +
-      // 1 fs-probe 黄色警报重启必复现、不可消解）→ 0.3.3 呈现层重构（P1/P2/P3）：
-      // - 官方包（内容信任锚 first-seen/match）：coverage 类观察降为 info——官方锚语义 =
-      //   接受其架构事实，呈现层不再把「已知边界」当风险从报（round-16 官方豁免的呈现级联
-      //   兑现；检测/留档层未关闭：插件详情页、营养标签持续可见，N6 升级差分照常重报）；
-      //   mergeKey 跨包折叠为一条聚合（count 累计），不计 alarmCount、不参与 level；
-      // - 三方包（含 mismatch 未确认的官方名——未验证即不享信任呈现）：维持 yellow（这条
-      //   边界正是三方审计价值所在），升级为持久化状态化去重（P3）：(kind, pkg, version,
-      //   capabilitiesHash) 落盘，版本/能力未变不重报；能力差分变化（唯一有信息量场景）重报。
-      if (res.report.capabilities?.esmNamedBuiltins === true && config.runtimeGuard === 'watch') {
-        const alertId = 'esm-guard-coverage:' + entryName
-        // 走到 finish 的官方豁免只可能是 first-seen/match（cordis/allowlist/config-off 已提前 return；
-        // mismatch 未确认不给信任呈现）
-        const officialTrusted = official.kind === 'exempt'
-        if (officialTrusted) {
-          status?.record({
-            id: alertId,
-            severity: 'info',
-            source: 'scan',
-            kind: 'esm-guard-coverage',
-            message: `官方包 ${entryName} 使用内建模块 ESM 具名导入（fs/child_process/网络）——内容信任锚内的已知架构边界（C2：T2 钩子对该绑定不生效，Node 互操作快照；运行时防线仅剩 T1 哨兵与审计协议）。此为观察提示非风险报警；详情见插件详情页与营养标签`,
-            target: entryName,
-            pluginHint: entryName,
-            mergeKey: 'scan:esm-guard-coverage:official',
-            at: Date.now(),
-          })
-          bootBoundary.official += 1
-          scheduleBoundarySummary()
-        } else {
-          // 三方包：P3 持久化去重（版本/能力差分未变 → 不重报；known 落盘失败时 session Map 兜底）
-          const v = installedVersion ?? 'unknown'
-          const capHash = hashCapabilities(res.report.capabilities)
-          if (!isKnownBoundary('esm-guard-coverage', entryName, v, capHash)) {
-            markKnownBoundary('esm-guard-coverage', entryName, v, capHash)
-            if (esmGuardReported.get(entryName) !== capHash) {
-              esmGuardReported.set(entryName, capHash)
-              status?.record({
-                id: alertId,
-                severity: 'yellow',
-                source: 'scan',
-                kind: 'esm-guard-coverage',
-                message: entryName + ' 使用内建模块 ESM 具名导入（fs/child_process/网络）——T2 运行时钩子对该绑定不生效（Node 互操作快照，C2 边界），运行时防线仅剩 T1 哨兵与审计协议',
-                target: entryName,
-                pluginHint: entryName,
-                at: Date.now(),
-              })
-              bootBoundary.third += 1
-              scheduleBoundarySummary()
-            }
-          }
+          }, { subject: SELF_SUBJECT }, config.domainProjection)
         }
       }
       // round-15 review（A#15 对齐）：unknown verdict 的 deny 判定——verdict 来自扫描器协议，
@@ -930,7 +990,9 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // vet 自身条目（非常规布局无法自证身份）不拦截——拦截会让引导承载方随 vet 一起失败，
     // 但同样不豁免（上方身份豁免已收窄到 realpath 命中）。
     if (root === undefined) {
-      const audited = config.requireAudit === true && hasAuditRecord(entryName, undefined)
+      // 根解析失败时算不出内容摘要，只能按「有没有历史档案」放行——这本来就是这条路径的
+      // 既有语义（档案是人的批准，无根时它是唯一的信任信号），0.5.1 不改它。
+      const audited = config.requireAudit === true && canLoad(probeQualification({ name: entryName }).state)
       if (config.mode === 'deny' && entryName !== PACKAGE_NAME && !audited) {
         incrementBlocked()
         void fiber.dispose()
@@ -938,31 +1000,27 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       }
       return
     }
-    const files = listSourceFiles(root)
-    // round-12（R17/R18 扫描面扩展）：配置面已由 listSourceFiles 根级配置名带出；
-    // 指令/技能文件按 config.scanSurface.instructionFiles 追加（默认开）
-    const surfaceFiles = config.scanSurface?.instructionFiles === false
-      ? files
-      : [...files, ...listInstructionFiles(root)]
-    if (surfaceFiles.length === 0) return
-    const request = {
-      kind: 'files' as const,
-      files: surfaceFiles,
-      osv: config.osvCheck === true,
-      // 0.3.13（DSH 0.1.7-rc.1 同步）：官方目录成员 + **字节未被本机改动**（first-seen/match）
-      // → 非授权源码产物（lib/dist/压缩/.d.ts）里的 critical/high 折 info——官方家族整体换
-      // 版本时（首见严格扫描）不再把盾牌压成黄色（实测 0.1.7-rc.1 首扫：277 官方包 27 个
-      // non-clean、live 记 5 个 suspicious）。
-      // 走到这里只可能是 exempt（mismatch 已在上方分流：已登记补丁 → 提前 return 不扫描 =
-      // 零产物噪音，比降档更彻底；未登记 → registry 对账/黄牌，不降噪）。
-      // 身份核验不受影响：内容哈希基线 + registry 对账 + official-not-in-catalog 黄牌照旧。
-      // 工具面（scan_plugin）对已登记补丁的 hash 照常严格扫描但按官方家族降噪——见
-      // classifyTarget 的 officialFamily 注释（显式审计请求仍给全量证据，只是机器产物降档）。
-      // 同一判据（officialTrustedFamily）也决定 scan-fail 的档位（见 finish）。
+    // round-12（R17/R18 扫描面扩展）：配置面由包根枚举带出；指令/技能文件按
+    // config.scanSurface.instructionFiles 决定要不要进面（默认开）。
+    // 0.5.10（不变式 9）：请求形状收口到 scan-request——与 scan_plugin / vet-gate 同一个构造点。
+    // 这里只给策略，不拼字段。targetKind 显式给 'plugin'：加载路径上这个包定义上就是 DSH 插件，
+    // 此前靠协议默认值"恰好相等"，一旦默认值变了就是静默分叉。缓存键把 'plugin' 与省略归到同一
+    // 槽位（scanner-bin/cache.ts），所以这次显式化不会让存量扫描缓存失效。
+    const request = buildFileScanRequest(root, {
+      ...(config.scanSurface?.instructionFiles !== undefined ? { instructionFiles: config.scanSurface.instructionFiles } : {}),
+      ...(config.scanSurface?.configFiles !== undefined ? { configFiles: config.scanSurface.configFiles } : {}),
+      ...(config.osvCheck === true ? { osv: true } : {}),
       ...(officialTrustedFamily ? { officialFamily: true } : {}),
-      // surface 显式传入（与缓存 key 联动）：关闭的面不参与扫描也不命中旧形状缓存
-      ...(config.scanSurface !== undefined ? { surface: { configFiles: config.scanSurface.configFiles, instructionFiles: config.scanSurface.instructionFiles } } : {}),
-    }
+      ...(config.rules !== undefined ? { rules: config.rules } : {}),
+      targetKind: 'plugin',
+    })
+    const files = request.files ?? []
+    if (files.length === 0) return
+    // 0.5.0（施工图步骤 4 / C02）：扫描判定绑定的是**扫描那一刻**的字节。这里在扫描前捕获
+    // 快照，finish 里放行前重算并比对——不比对的话，扫描后替换同路径内容就能拿 A 的报告
+    // 放行 B（TOCTOU）。只对非官方包做：官方包的内容信任锚另有基线，且官方包在启动时
+    // 有几百个，每次加载读两遍字节的代价不该付在那里。
+    const snapshotAtScan = official.kind === 'not-official' ? captureSnapshot(root) : null
     // P2-5：engine 的扫描预算 = files×2s；守卫超时若小于它，大包会在 engine 发出 R8-skip 前
     // 被 kill → 扫描静默失败。超时按文件数放大（上限 60s，round-5 review B-A5 收敛 scanBudget），
     // 让 engine 能优雅降级而不是被杀。

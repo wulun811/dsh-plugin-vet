@@ -81,6 +81,23 @@ function inSignalHandler(exitNode: ts.Node): boolean {
  * 注：scripts/ 不是测试/CI 目录——包里的 scripts/ 常是产品代码（CLI 工具、构建脚本），其内
  * 的 process.exit 是真实逃逸意图，不能降级（曾把 scripts/ 与测试目录等同 → 潜在漏报）。
  */
+/** 路径归一：入口集合与查询必须落在同一坐标系（Windows 反斜杠、重复分隔符）。 */
+export function normalizeScanPath(fileName: string): string {
+  return fileName.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+}
+
+/**
+ * 测试/CI 降级的唯一入口（0.5.24）：**声明优先于路径**。
+ *
+ * 旧实现只看路径，于是「`main`/`exports`/`bin` 指向 test/ 里」的包——发布物的真实入口就在
+ * test/ 里——被当成测试代码降成 info，verdict 从 critical 掉到 suspicious。与 `scripts/`
+ * 那条教训同族：目录名是命名，不是语义；**声明**才是语义。非入口的 test/ 文件照旧降级。
+ */
+export function isTestOnlyFile(fileName: string, entryFiles?: ReadonlySet<string>): boolean {
+  if (entryFiles !== undefined && entryFiles.has(normalizeScanPath(fileName))) return false
+  return isTestOrCiFile(fileName)
+}
+
 export function isTestOrCiFile(fileName: string): boolean {
   const segs = fileName.replace(/\\/g, '/').split('/').filter(Boolean)
   if (segs.some(s => s === 'test' || s === 'tests' || s === 'spec' || s === 'specs' || s === '__tests__' || s === '.github')) return true
@@ -163,7 +180,7 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
    * cwd/进程访问确实是产品功能）。 */
   const degrade = (severity: Severity, message: string): { severity: Severity; message: string } => {
     if (severity === 'info') return { severity, message }
-    const testOrCi = isTestOrCiFile(ctx.filePath ?? sf.fileName)
+    const testOrCi = isTestOnlyFile(ctx.filePath ?? sf.fileName, ctx.entryFiles)
     if (ctx.request.targetKind === 'generic' || cliEntryOf() || testOrCi) {
       const why = testOrCi ? '测试/CI 文件'
         : ctx.request.targetKind === 'generic' ? '非 DSH 插件包'
@@ -281,7 +298,7 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
     // （CLI 脚本永远独立运行）、应用型 CLI 入口（0.3.9 收窄——见 degrade 注释：appShape
     // 不再对全包所有文件降级，元数据自证不可系统性压低 verdict）。
     const cliEntry = ctx.cliFiles !== undefined && ctx.cliFiles.has(sf.fileName)
-    const testOrCi = isTestOrCiFile(ctx.filePath ?? sf.fileName)
+    const testOrCi = isTestOnlyFile(ctx.filePath ?? sf.fileName, ctx.entryFiles)
     if (severity !== 'info' && (ctx.request.targetKind === 'generic' || cliEntry || testOrCi
       || (ctx.appShape === true && cliEntry))) {
       const why = testOrCi ? '测试/CI 文件'

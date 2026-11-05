@@ -1,0 +1,1106 @@
+{
+  "note": "由 src/ 在 0.5.0 改动前抽出（scripts 一次性工具生成，见 test/domain-projection.test.ts 说明）。不要手改。",
+  "generatedFrom": "0.4.2 / 596153e",
+  "sites": [
+    {
+      "file": "src/guard/config-diff.ts",
+      "line": 241,
+      "kind": "telemetry-config-change",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "'telemetry-config-change:' + field"
+      },
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 446,
+      "kind": "n3-seq-read-spawn",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 455,
+      "kind": "n3-seq-read-net",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 475,
+      "kind": "n3-exfil-match",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 489,
+      "kind": "n3-exfil",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "近期读取敏感数据后向外发送数据流（读→写关联窗口内，N3 台账）"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 516,
+      "kind": "n3-mass-delete",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 519,
+      "kind": "n3-mass-rename",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 522,
+      "kind": "n3-in-place",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 525,
+      "kind": "n3-write-amplify",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 530,
+      "kind": "n3-ransom",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 540,
+      "kind": "n3-high-freq-read",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 549,
+      "kind": "n3-write-then-delete",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/exfil-ledger.ts",
+      "line": 579,
+      "kind": "n3-spawn-net-match",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 65,
+      "kind": "spawn",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 80,
+      "kind": "honeypot",
+      "severity": {
+        "expr": "severity"
+      },
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 91,
+      "kind": "integrity",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 106,
+      "kind": "persistence-write",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 110,
+      "kind": "install-write",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 116,
+      "kind": "fs-destroy",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 129,
+      "kind": "fs-write",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 144,
+      "kind": "fs-write",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 149,
+      "kind": "fs-write",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 152,
+      "kind": "fs-read",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-classify.ts",
+      "line": 156,
+      "kind": "fs-probe",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-guard.ts",
+      "line": 231,
+      "kind": "vet-self-broken",
+      "severity": "red",
+      "source": "t1",
+      "mergeKey": null,
+      "id": "vet-self-broken:sidecar-missing",
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-guard.ts",
+      "line": 347,
+      "kind": "sentinel",
+      "severity": "yellow",
+      "source": "t1",
+      "mergeKey": null,
+      "id": "t1:spawn-fail",
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "T1 哨兵启动失败，运行时内存/子进程/fd 监控未生效"
+    },
+    {
+      "file": "src/guard/runtime-guard.ts",
+      "line": 367,
+      "kind": "sentinel",
+      "severity": "yellow",
+      "source": "t1",
+      "mergeKey": null,
+      "id": "t1:sentinel-down",
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "T1 哨兵意外退出，运行时内存/子进程/fd 监控中断"
+    },
+    {
+      "file": "src/guard/runtime-guard.ts",
+      "line": 393,
+      "kind": "sentinel",
+      "severity": "yellow",
+      "source": "t1",
+      "mergeKey": null,
+      "id": "t1:sentinel-taken-over",
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "T1 哨兵被其他实例接管，本实例监控通道失效（如重复安装 vet，建议只保留一份）"
+    },
+    {
+      "file": "src/guard/runtime-guard.ts",
+      "line": 551,
+      "kind": "attribution-tampered",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "栈归因被篡改（Error.prepareStackTrace/stackTraceLimit 被修改）——fetch 网"
+    },
+    {
+      "file": "src/guard/runtime-guard.ts",
+      "line": 566,
+      "kind": "loopback-control",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-guard.ts",
+      "line": 685,
+      "kind": "hook-heartbeat",
+      "severity": "yellow",
+      "source": "t2",
+      "mergeKey": null,
+      "id": "t2:hook-heartbeat",
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-net.ts",
+      "line": 175,
+      "kind": "net-egress",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-net.ts",
+      "line": 185,
+      "kind": "net-egress",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-patch.ts",
+      "line": 73,
+      "kind": "attribution-tampered",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-patch.ts",
+      "line": 152,
+      "kind": "n7-block",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-patch.ts",
+      "line": 270,
+      "kind": "attribution-tampered",
+      "severity": "red",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "栈归因被篡改（Error.prepareStackTrace/stackTraceLimit 被修改）——网络操作无法归"
+    },
+    {
+      "file": "src/guard/runtime-patch.ts",
+      "line": 294,
+      "kind": "loopback-control",
+      "severity": "yellow",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-sink.ts",
+      "line": 85,
+      "kind": "m1-contract-rejected",
+      "severity": "yellow",
+      "source": "t2",
+      "mergeKey": null,
+      "id": {
+        "expr": "'m1:contract-rejected:' + plugin"
+      },
+      "hasTarget": false,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-sink.ts",
+      "line": 115,
+      "kind": {
+        "expr": "alarm.kind"
+      },
+      "severity": "info",
+      "source": "t2",
+      "mergeKey": "t2:official-housekeeping-probe",
+      "id": {
+        "expr": "'t2:official-housekeeping:' + alarm.kind + ':' + alarm.pluginHint"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-sink.ts",
+      "line": 137,
+      "kind": {
+        "expr": "alarm.kind"
+      },
+      "severity": {
+        "expr": "t2Severity(alarm, alarm.pluginHint)"
+      },
+      "source": "t2",
+      "mergeKey": {
+        "expr": "alarm.kind.startsWith('n3-') ? `t2:${alarm.kind}:${alarm.pluginHint}` : undefined"
+      },
+      "id": {
+        "expr": "t2AlarmId(alarm.kind, alarm.target, alarm.pluginHint)"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": true,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-sink.ts",
+      "line": 159,
+      "kind": "m1-contract-violation",
+      "severity": "info",
+      "source": "t2",
+      "mergeKey": {
+        "expr": "'t2:m1-contract-violation:' + alarm.pluginHint + ':' + chk.field"
+      },
+      "id": {
+        "expr": "'m1:contract-violation:' + alarm.pluginHint + ':' + chk.field + ':' + (alarm.target ?? '').slice(0, 120)"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-sink.ts",
+      "line": 184,
+      "kind": "n1-hidden",
+      "severity": "red",
+      "source": "t2",
+      "mergeKey": null,
+      "id": {
+        "expr": "`n1-hidden:${hidden.plugin}:${hidden.kind}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-sink.ts",
+      "line": 199,
+      "kind": "m1-contract-distrusted",
+      "severity": "yellow",
+      "source": "t2",
+      "mergeKey": null,
+      "id": {
+        "expr": "'m1:contract-distrusted:' + hidden.plugin"
+      },
+      "hasTarget": false,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-sink.ts",
+      "line": 221,
+      "kind": {
+        "expr": "a.kind"
+      },
+      "severity": {
+        "expr": "a.severity"
+      },
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-sink.ts",
+      "line": 236,
+      "kind": "canary-leak",
+      "severity": "red",
+      "source": "t2",
+      "mergeKey": {
+        "expr": "`t2:canary-leak:${plugin ?? ''}`"
+      },
+      "id": {
+        "expr": "`n4-canary:${hashShort(hit)}:${plugin ?? ''}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-sink.ts",
+      "line": 281,
+      "kind": "n3-key-leak",
+      "severity": "red",
+      "source": "t2",
+      "mergeKey": {
+        "expr": "`t2:n3-key-leak:${plugin ?? ''}`"
+      },
+      "id": {
+        "expr": "alertId"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-watch.ts",
+      "line": 199,
+      "kind": "growth",
+      "severity": "yellow",
+      "source": "t1",
+      "mergeKey": null,
+      "id": {
+        "expr": "`t1:growth:${cfg.growthMb}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-watch.ts",
+      "line": 217,
+      "kind": "mem",
+      "severity": "red",
+      "source": "t1",
+      "mergeKey": null,
+      "id": {
+        "expr": "`t1:mem:${cfg.memLimitMb}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-watch.ts",
+      "line": 229,
+      "kind": "fork",
+      "severity": "red",
+      "source": "t1",
+      "mergeKey": null,
+      "id": {
+        "expr": "`t1:fork:${cfg.forkBurstN}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/runtime-watch.ts",
+      "line": 240,
+      "kind": "fd",
+      "severity": "yellow",
+      "source": "t1",
+      "mergeKey": null,
+      "id": {
+        "expr": "`t1:fd:${cfg.fdLimit}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/scan-verdict.ts",
+      "line": 159,
+      "kind": "scan-verdict",
+      "severity": {
+        "expr": "e.verdict === 'critical' ? 'red' : 'yellow'"
+      },
+      "source": null,
+      "mergeKey": null,
+      "id": {
+        "expr": "scanVerdictAlarmId(e)"
+      },
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/status.ts",
+      "line": 224,
+      "kind": {
+        "expr": "alarm.kind"
+      },
+      "severity": {
+        "expr": "alarm.severity"
+      },
+      "source": "scan",
+      "mergeKey": {
+        "expr": "alarm.id"
+      },
+      "id": {
+        "expr": "alarm.id"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/version-diff.ts",
+      "line": 374,
+      "kind": "upgrade-diff",
+      "severity": {
+        "expr": "severity"
+      },
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guard/version-diff.ts",
+      "line": 412,
+      "kind": "upgrade-cold",
+      "severity": "info",
+      "source": null,
+      "mergeKey": null,
+      "id": null,
+      "hasTarget": false,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 180,
+      "kind": "baseline-save-fail",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "'baseline-save-fail:' + packageName"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 210,
+      "kind": "baseline-patch-ack",
+      "severity": "info",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "`baseline-patch-ack:${packageName}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 221,
+      "kind": "official-match-suspected",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "`official-match-suspected:${packageName}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 247,
+      "kind": "baseline-mismatch",
+      "severity": {
+        "expr": "severity"
+      },
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "`baseline-mismatch:${name}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 279,
+      "kind": "baseline-save-fail",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "'baseline-save-fail:' + packageName"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 295,
+      "kind": "baseline-patch-ack",
+      "severity": "info",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "`third-party-patch-ack:${packageName}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 331,
+      "kind": "baseline-save-fail",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "'baseline-save-fail:' + name"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 342,
+      "kind": "baseline-refreshed",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "`baseline-refreshed:${name}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 382,
+      "kind": "official-verify-mismatch",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "`official-verify-mismatch:${name}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 402,
+      "kind": "official-verified",
+      "severity": "info",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "`official-verified:${name}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 502,
+      "kind": "local-entry",
+      "severity": "info",
+      "source": "scan",
+      "mergeKey": "scan:local-entry",
+      "id": {
+        "expr": "'local-entry:' + localPath"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 569,
+      "kind": "official-not-in-catalog",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "'official-not-in-catalog:' + entryName"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 587,
+      "kind": "official-catalog-merged",
+      "severity": "info",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "'official-catalog-merged:' + entryName"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 633,
+      "kind": "baseline-patch-ack",
+      "severity": "info",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "alertId"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 677,
+      "kind": "audit-required",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "alertId"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 703,
+      "kind": "scan-fail",
+      "severity": {
+        "expr": "officialTrustedFamily ? 'info' : 'yellow'"
+      },
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "`scan-fail:${entryName}`"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 782,
+      "kind": {
+        "expr": "obs.kind"
+      },
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": {
+        "expr": "'obs:' + obs.kind + ':' + entryName"
+      },
+      "id": {
+        "expr": "'obs:' + obs.kind + ':' + entryName"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 811,
+      "kind": {
+        "expr": "nav.alarm.kind"
+      },
+      "severity": {
+        "expr": "nav.alarm.severity"
+      },
+      "source": "scan",
+      "mergeKey": "scan:upgrade",
+      "id": {
+        "expr": "'upgrade-diff:' + entryName + ':' + (nav.from ?? 'cold') + ':' + nav.to"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 836,
+      "kind": "vet-store-foreign-write",
+      "severity": "info",
+      "source": "scan",
+      "mergeKey": null,
+      "id": "vet-store-foreign-write",
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 846,
+      "kind": "vet-store-tamper",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": "vet-store-tamper",
+      "hasTarget": true,
+      "hasPluginHint": false,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 874,
+      "kind": "esm-guard-coverage",
+      "severity": "info",
+      "source": "scan",
+      "mergeKey": "scan:esm-guard-coverage:official",
+      "id": {
+        "expr": "alertId"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    },
+    {
+      "file": "src/guards/internal-plugin.ts",
+      "line": 895,
+      "kind": "esm-guard-coverage",
+      "severity": "yellow",
+      "source": "scan",
+      "mergeKey": null,
+      "id": {
+        "expr": "alertId"
+      },
+      "hasTarget": true,
+      "hasPluginHint": true,
+      "hasSessionLog": false,
+      "message": "(expr)"
+    }
+  ]
+}

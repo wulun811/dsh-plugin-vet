@@ -1,6 +1,7 @@
 /**
  * 市场扫描闸门类型定义（P0 特性）。
  */
+import type { Decision } from './domain/types.js'
 import type { Verdict, Finding } from './scanner/protocol.js'
 
 export interface GateRequest {
@@ -31,4 +32,13 @@ export interface GateResult {
   findings: Finding[]
   /** 是否被拦截（mode=deny 且命中阈值时为 true）。 */
   blocked: boolean
+  /**
+   * 本次闸门的决策对象（0.5.11）。
+   *
+   * 与 `blocked` **并排**而不是替代它（施工图 S2-03：先影子对照，真实执行仍走旧函数）。
+   * `blocked` 只回答「拦不拦」，`decision` 回答「凭什么、缺什么」：
+   * 同样的 `blocked: false`，`decision.action` 可能是 `report`（查了没事，或有事但没拦权），
+   * 也可能是 `allow`（九面齐全、什么都没缺）。安装器想区分这两种，只能读这里。
+   */
+  decision: Decision
 }

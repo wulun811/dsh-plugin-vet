@@ -364,10 +364,14 @@ describe('P8 sink：官方家务探针降 info 聚合（0.3.5）', () => {
     sink({ severity: 'yellow', kind: 'fs-probe', message: '探测 settings.yaml.lock', target: '/home/u/.dsh/settings.yaml.lock', pluginHint: '@deepseek-ai/dsh-settings-file', officialHousekeeping: true })
     sink({ severity: 'yellow', kind: 'fs-probe', message: '探测 session 分片', target: '/home/u/.dsh/sessions/x/s.jsonl.zstd.1', pluginHint: '@deepseek-ai/dsh-session-persistence-jsonl', officialHousekeeping: true })
     const snap = status.snapshot()
-    const infos = snap.alarms.filter(a => a.kind === 'fs-probe')
-    // 两条同 mergeKey → 聚合为一条 info
+    // 0.5.6：这一行有自己的码——它是「官方归因的家务观测」，不是某个插件的侦察探针。
+    // 合并键（literal）与 id 都没变，所以历史「已忽略」与去重桶不受影响。
+    const infos = snap.alarms.filter(a => a.kind === 'official-housekeeping-probe')
+    // 两条同 mergeKey → 聚合为一条 info（snapshot 会 stripMergeKey，所以「一条」本身就是
+    // 合并键相等的观测；这里不直接断言 mergeKey）
     expect(infos.length).toBe(1)
     expect(infos[0].severity).toBe('info')
+    expect(snap.alarms.some(a => a.kind === 'fs-probe')).toBe(false)
     expect(snap.alarmCount).toBe(0)
     expect(snap.level).toBe('green')
   })

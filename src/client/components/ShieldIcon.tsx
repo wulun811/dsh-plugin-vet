@@ -1,5 +1,6 @@
 /**
- * 盾牌图标（三态符号，纯路径绘制不依赖字体）：green → 盾内 √；yellow → 盾内 ?；red → 盾内 !。
+ * 盾牌图标（四态符号，纯路径绘制不依赖字体）：green → 盾内 √；yellow → 盾内 ?；red → 盾内 !；
+ * unknown（0.5.15）→ 盾内 —（数据拿不到，不是「没事」）。
  * 从 Shield.tsx 拆出（P0 目录化），绘制逻辑不变。
  */
 import { useId } from 'react'
@@ -7,7 +8,9 @@ import type { ReactNode } from 'react'
 
 const SHIELD_PATH = 'M8 0.9 L13.1 2.9 V7 C13.1 10.7 11 13.3 8 14.3 C5 13.3 2.9 10.7 2.9 7 V2.9 Z'
 
-export function ShieldIcon({ level, color, size = 20 }: { level: 'green' | 'yellow' | 'red'; color: string; size?: number }): ReactNode {
+export type ShieldLevel = 'green' | 'yellow' | 'red' | 'unknown'
+
+export function ShieldIcon({ level, color, size = 20 }: { level: ShieldLevel; color: string; size?: number }): ReactNode {
   // round-22：mask id 实例唯一（useId）——旧实现按 level 固定命名，同页多处盾牌
   // （主盾 + IntroPanel 等）产生重复 <mask id>，url(#mask) 按文档序绑定第一个，
   // 跨实例耦合（未来某实例改内容会静默串改其它实例的渲染）。
@@ -21,6 +24,9 @@ export function ShieldIcon({ level, color, size = 20 }: { level: 'green' | 'yell
         <line x1={8} y1={4.5} x2={8} y2={9.3} stroke="black" strokeWidth={2} strokeLinecap="round" />
         <circle cx={8} cy={11.4} r={1.15} fill="black" />
       </>
+    ) : level === 'unknown' ? (
+      // 破折号：没有结论——既不画勾（会被读成「没事」），也不画感叹号（会被读成「有事」）
+      <line x1={5.2} y1={8} x2={10.8} y2={8} stroke="black" strokeWidth={2} strokeLinecap="round" />
     ) : (
       <>
         <path d="M6.3 5.5 C6.3 4.4 7 3.8 8 3.8 C9 3.8 9.7 4.4 9.7 5.3 C9.7 6.2 9.1 6.6 8.6 7.1 C8.1 7.6 8 8 8 8.8" stroke="black" strokeWidth={1.7} fill="none" strokeLinecap="round" />
@@ -35,7 +41,15 @@ export function ShieldIcon({ level, color, size = 20 }: { level: 'green' | 'yell
           {maskContent}
         </mask>
       </defs>
-      <path d={SHIELD_PATH} fill={color} stroke={color} strokeWidth={0.6} opacity="0.95" mask={`url(#${maskId})`} />
+      <path
+        d={SHIELD_PATH}
+        fill={level === 'unknown' ? 'none' : color}
+        stroke={color}
+        strokeWidth={level === 'unknown' ? 1.2 : 0.6}
+        strokeDasharray={level === 'unknown' ? '2.4 1.6' : undefined}
+        opacity="0.95"
+        mask={`url(#${maskId})`}
+      />
     </svg>
   )
 }

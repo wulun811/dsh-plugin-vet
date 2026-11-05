@@ -14,6 +14,8 @@
  *     归一后相等但原始串不同 → 仿冒；精确同名（原始串相同）仍不报）；
  *   - 候选必须出现在 package.json 的 name/dependencies/peerDependencies 里
  *     （不是扫描任意源码字面量）；与官方名完全相同 → 不报（P-5 内容基线管同名的篡改）；
+ *   - 官方 scope（@deepseek-ai/）内的候选一律不报（0.5.22）——scope 是发布权限边界，
+ *     攻击者发不进这个 scope；把剥掉 scope 的名字拿去比只是在报"官方又发了个新包"；
  *   - 纯本地、零依赖、零出网；编辑距离用 DP 而非正则（无 ReDoS 面）。
  */
 import type { Finding } from '../protocol.js'
@@ -119,6 +121,12 @@ export function runTyposquat(content: string, file: string): Finding[] {
   const seen = new Set<string>()
   for (const cand of candidateNames(pkg)) {
     if (cand === '') continue
+    // 0.5.22：官方 scope 内的名字不可能是 typosquat——@deepseek-ai/* 只由官方发布，攻击者
+    // 拿不到这个 scope（scope 是 npm 的发布权限边界）。旧实现先剥掉 scope 再比，于是官方
+    // 自己装的 @deepseek-ai/dsh-spill（实测本机有 dsh-spill / dsh-spill-local /
+    // dsh-spill-policy 三个官方包）因为与 dsh-skill 编辑距离 1 被判"疑似仿冒"。
+    // 无 scope 的 dsh-spill、或换了个 scope 的 @deepseek-ai-look/dsh-spill 仍然会被报。
+    if (cand.toLowerCase().startsWith('@deepseek-ai/')) continue
     const base = unscoped(cand)
     for (const official of OFFICIAL_CORE_NAMES) {
       if (!isTyposquatOf(base, official)) continue

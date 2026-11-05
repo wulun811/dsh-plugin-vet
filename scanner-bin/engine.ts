@@ -4,7 +4,7 @@
  * @module dsh-plugin-vet/scanner-engine
  */
 import { readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { createRequire, builtinModules } from 'node:module'
 import { parseSource } from './ast.js'
 import { extractCapabilities, aggregateCapabilities } from './capability.js'
@@ -20,7 +20,7 @@ import { computeScore, computeVerdict } from './score.js'
 import { cacheKey, readCached, writeCached, cacheDirFor } from './cache.js'
 import { ENGINE_VERSION } from './protocol.js'
 import { queryOsv, type OsvVuln } from './osv.js'
-import type { CapabilityManifest, Finding, ScanReport, ScanRequest, ScanResponse } from './protocol.js'
+import type { CapabilityManifest, Finding, OsvOutcome, ScanReport, ScanRequest, ScanResponse } from './protocol.js'
 
 const SCANNABLE_EXT = new Set(['js', 'ts', 'mjs', 'cjs'])
 
@@ -285,10 +285,12 @@ function depsFindings(ghost: string[], zombie: string[]): Finding[] {
  * （appShape，R3 按能力触达面降级）；bin 值对应文件 → CLI 入口（cliFiles，R2/R3/R9 按
  * 通用代码判定）。round-16：scripts 命令里出现的路径 token 也入 cliFiles（postinstall
  * `node scripts/install` 等——无扩展名入口的常见宿主，engine 按 basename 匹配它们）。
- * engine 只见文件 basename，bin/scripts 路径统一归一为 basename 匹配。
+ * engine 只见文件 basename，bin/scripts 路径统一归一为 basename 匹配。0.5.24 起同时解析
+ * main/module/exports/bin 的**绝对路径**（entryFiles）——测试/CI 路径降级要让位给声明。
  */
-function packageShape(content: string): { cliFiles: Set<string>; appShape: boolean } {
+function packageShape(content: string, pkgRoot?: string): { cliFiles: Set<string>; appShape: boolean; entryFiles: Set<string> } {
   const cliFiles = new Set<string>()
+  const entryFiles = new Set<string>()
   let appShape = false
   try {
     const pkg = JSON.parse(content) as Record<string, unknown>
@@ -301,6 +303,28 @@ function packageShape(content: string): { cliFiles: Set<string>; appShape: boole
       }
     }
     appShape = entries.length > 0
+    // 0.5.24：包声明过的入口（main/module/exports/bin）按绝对路径入集合——R3/R13/R20 的
+    // 「测试/CI 文件」路径降级必须让位给声明：入口落在 test/ 里的包，test/ 就是产品代码。
+    if (pkgRoot !== undefined) {
+      const addEntry = (value: unknown): void => {
+        if (typeof value !== 'string') return
+        const raw = value.trim().replace(/^\.\//, '')
+        // 通配符（exports 的 "./x/*"）、绝对路径、带协议的都不是单个文件 → 不入集合
+        if (raw === '' || raw.includes('*') || raw.includes(':') || raw.startsWith('/')) return
+        entryFiles.add(resolve(pkgRoot, raw).replace(/\\/g, '/'))
+      }
+      addEntry(pkg.main)
+      addEntry(pkg.module)
+      for (const e of entries) addEntry(e)
+      const walkExports = (value: unknown): void => {
+        if (typeof value === 'string') { addEntry(value); return }
+        if (Array.isArray(value)) { for (const v of value) walkExports(v); return }
+        if (value !== null && typeof value === 'object') {
+          for (const v of Object.values(value as Record<string, unknown>)) walkExports(v)
+        }
+      }
+      walkExports(pkg.exports)
+    }
     for (const e of entries) {
       const name = basename(e.replace(/^\.\//, ''))
       if (name !== '' && name !== '.') cliFiles.add(name)
@@ -320,7 +344,7 @@ function packageShape(content: string): { cliFiles: Set<string>; appShape: boole
   } catch {
     // 坏 package.json：无形态证据（保守不降级）
   }
-  return { cliFiles, appShape }
+  return { cliFiles, appShape, entryFiles }
 }
 
 /**
@@ -532,7 +556,7 @@ function scanFiles(request: ScanRequest): ScanResponse {
   const runtime = request.runtime ?? 'host'
   // round-7：package.json 内容参与缓存 hash（bin 形态变化 → 缓存自然失效），无需额外 context
   const pkgJson = request.files.find(f => basename(f) === 'package.json')
-  const shape = pkgJson === undefined ? undefined : packageShape(readCapped(pkgJson))
+  const shape = pkgJson === undefined ? undefined : packageShape(readCapped(pkgJson), dirname(pkgJson))
   // P0-2 #9（R16）：依赖健康上下文（幽灵/僵尸对账 + 缓存指纹）
   const depsInfo = buildDepsInfo(request.files)
   // R8-skip 先于缓存散列：超过 PRE_FILE_SIZE_LIMIT 的文件不会进入扫描循环（stat 先行跳过），
@@ -563,6 +587,8 @@ function scanFiles(request: ScanRequest): ScanResponse {
       // 0.3.13：officialFamily 改变 severity（产物降噪）→ 入 key，否则官方扫描的降噪报告
       // 会被同字节的第三方扫描命中（反向亦然）
       officialFamily: request.officialFamily,
+      // 0.5.24：R12 需求闸门按本机 DSH 版本判定 → 入 key（见 cache.ts 注记）
+      dshVersion: request.dshVersion,
     },
   )
   // C3（0.1.16 加固）：目录与 nonce 均来自宿主注入（cacheDirFor 缺省回退 env/tmpdir）
@@ -606,7 +632,7 @@ function scanFiles(request: ScanRequest): ScanResponse {
       }
       // R12: Cordis/DSH bundle 契约（P-2 计划项）——入口/patch 声明等确定性检查
       if (request.rules?.['R12'] !== false) {
-        findings.push(...runContract(json, file, request.targetKind, request.scanBasis))
+        findings.push(...runContract(json, file, request.targetKind, request.scanBasis, request.dshVersion))
       }
       // R19: typosquat 观测（round-13）——包名/依赖 vs 官方核心名编辑距离 ≤1/同形
       if (request.rules?.['R19'] !== false) {
@@ -651,7 +677,7 @@ function scanFiles(request: ScanRequest): ScanResponse {
         } else {
           const configText = readOrDefault(file)
           if (configText !== '') {
-            findings.push(...runConfigScan(configText, basename(file), file, request.targetKind))
+            findings.push(...runConfigScan(configText, basename(file), file, request.targetKind, shape?.entryFiles))
           }
         }
       }
@@ -712,6 +738,7 @@ function scanFiles(request: ScanRequest): ScanResponse {
         runtime,
         cliFiles: shape?.cliFiles,
         appShape: shape?.appShape,
+        entryFiles: shape?.entryFiles,
         filePath: file,
         pkgRoot: pkgJson === undefined ? undefined : dirname(pkgJson),
         decodedLiterals,
@@ -844,8 +871,26 @@ function directDepsOf(pkg: Record<string, unknown>): { name: string; version?: s
  * P3-10：核对面从插件自身扩展到直接依赖（上限 8 个）——插件生态的主要风险在依赖树；
  * 每项独立查询、独立超时，网络失败只跳过该项（静默降级，不影响静态判定）。
  * 间接传递树超出 OSV v1 范围与扫描预算，README 已记录边界。
+ *
+ * 0.5.4：outcome 是**调用方持有**的统计对象（不是返回值）——相位被 withHardTimeout 掐断时
+ * 本函数不再返回，统计只能靠这个对象在断点前已经写进去的事实。因此「正常返回」才把
+ * phase 改成 ran：停在 overran 就说明下面的计数是断点前的。
  */
-async function checkOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promise<Finding[]> {
+async function checkOsv(
+  request: ScanRequest,
+  opts: OsvCheckOptions = {},
+  outcome?: OsvOutcome,
+): Promise<Finding[]> {
+  const findings = await lookForOsvVulns(request, opts, outcome)
+  if (outcome !== undefined) outcome.phase = 'ran'
+  return findings
+}
+
+async function lookForOsvVulns(
+  request: ScanRequest,
+  opts: OsvCheckOptions = {},
+  outcome?: OsvOutcome,
+): Promise<Finding[]> {
   if (request.osv !== true) return []
   const pkgFile = request.files?.find(f => basename(f) === 'package.json')
   if (pkgFile === undefined) return []
@@ -860,6 +905,9 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promi
     { name: pkg.name, version: typeof pkg.version === 'string' ? pkg.version : undefined },
     ...directDepsOf(pkg),
   ].filter(t => isExactVersion(t.version)) // filter: only exact versions take part in OSV checks
+  // 0.5.4：有资格查询的目标数（含被预算掐断时**没查**的那些）——宿主用它区分
+  // 「全问到了」与「只问了一部分」。
+  if (outcome !== undefined) outcome.targets = targets.length
   // 每条命中记住「命中的是包自身还是哪个直接依赖」——0.4.1：告警文案要能说清
   // 「依赖 zod@4.4.3 命中 GHSA-…」，否则用户面对官方包的黄牌无从判断该不该忽略。
   const vulns: { vuln: OsvVuln; dependency: string }[] = []
@@ -880,6 +928,8 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promi
     try {
       // F15：带 version 查询——OSV 服务端按 affected ranges 过滤，已修复版本不再误报
       // 0.3.14：外层竞速硬超时兜底（abort 不生效时也不会挂死，见 withHardTimeout）
+      // 0.5.4：发出即计入 attempted（连不上也算问过）；只把「拿到应答」计入 answered。
+      if (outcome !== undefined) outcome.attempted++
       const raced = await withHardTimeout(queryOsv(target.name, {
         timeoutMs: perQuery,
         fetchImpl: opts.fetchImpl,
@@ -887,6 +937,7 @@ async function checkOsv(request: ScanRequest, opts: OsvCheckOptions = {}): Promi
       }), perQuery + OSV_RACE_SLACK_MS)
       if (raced === null) continue // 硬超时：按网络失败静默降级
       found = raced
+      if (outcome !== undefined) outcome.answered++
     } catch {
       continue // 网络失败/超时：静默降级，不影响静态判定
     }
@@ -923,21 +974,30 @@ export async function scanWithOsv(request: ScanRequest, opts: OsvCheckOptions = 
   const start = Date.now()
   const base = scan(request)
   if (!base.ok || base.report === undefined) return base
+  // 0.5.4：统计对象先建、默认取最坏（overran），只有 checkOsv 正常走完才会被改成 ran。
+  // 这样「相位被掐断」这条路径不必再补写——checkOsv 不再返回，唯一还活着的就是它手里的对象。
+  const outcome: OsvOutcome = { phase: 'overran', targets: 0, attempted: 0, answered: 0 }
+  const withOsv = (report: ScanReport): ScanReport =>
+    request.osv === true ? { ...report, osv: outcome } : report
   // P2-10：从宿主超时推导 OSV 总预算，确保 OSV 网络相位不超出宿主 kill 超时（见 checkOsv）。
   // 预算 = 宿主超时 - 静态扫描耗时 - 引擎余量 - 输出余量；缺省（直调引擎、无 timeoutMs）不改行为。
   // 0.3.14：余量低于 OSV_MIN_BUDGET_MS → 整段跳过（旧行为用地板 1000ms 硬撑，最坏只剩 0.5s 余量）。
   let osvBudgetMs = opts.osvBudgetMs
   if (osvBudgetMs === undefined && typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs)) {
     const remaining = request.timeoutMs - (Date.now() - start) - ENGINE_KILL_MARGIN_MS - 500
-    if (remaining < OSV_MIN_BUDGET_MS) return base
+    if (remaining < OSV_MIN_BUDGET_MS) {
+      // 整段没跑：targets 都没枚举过，三个计数为 0 不代表「没有可查的」——phase 说清了这件事。
+      outcome.phase = 'skipped'
+      return { ok: true, report: withOsv(base.report) }
+    }
     osvBudgetMs = remaining
   }
   // 0.3.14：相位级竞速兜底——逐查询护栏之外再保一层，供应链相位整体（含 upstream-radar 与
   // 多次查询的累计误差）不得越过预算；超时即返回纯静态报告（OSV 是增强项，静默降级）。
   const supplyChainFindings = osvBudgetMs === undefined
-    ? await checkSupplyChain(request, { ...opts, osvBudgetMs })
-    : (await withHardTimeout(checkSupplyChain(request, { ...opts, osvBudgetMs }), osvBudgetMs + OSV_RACE_SLACK_MS)) ?? []
-  if (supplyChainFindings.length === 0) return base
+    ? await checkSupplyChain(request, { ...opts, osvBudgetMs }, outcome)
+    : (await withHardTimeout(checkSupplyChain(request, { ...opts, osvBudgetMs }, outcome), osvBudgetMs + OSV_RACE_SLACK_MS)) ?? []
+  if (supplyChainFindings.length === 0) return { ok: true, report: withOsv(base.report) }
   const findings = [...base.report.findings, ...supplyChainFindings]
   const report: ScanReport = {
     ...base.report,
@@ -945,7 +1005,7 @@ export async function scanWithOsv(request: ScanRequest, opts: OsvCheckOptions = 
     staticScore: computeScore(findings),
     verdict: computeVerdict(findings),
   }
-  return { ok: true, report }
+  return { ok: true, report: withOsv(report) }
 }
 
 // ── 传递依赖扫描（P1 特性）─────────────────────────────────────
@@ -1008,12 +1068,13 @@ export function resetUpstreamRadarWarned(): void {
  */
 async function checkSupplyChain(
   request: ScanRequest,
-  opts: OsvCheckOptions & { transitiveDeps?: boolean }
+  opts: OsvCheckOptions & { transitiveDeps?: boolean },
+  outcome?: OsvOutcome,
 ): Promise<Finding[]> {
   // 1. 现有逻辑：插件自身 + 直接依赖 OSV 查询（osvBudgetMs 随 opts 透传，约束 OSV 总预算）
   //    跨源去重：与 upstream-radar 共享同一 seenVuln，同 id CVE 不重复报告（#8 修复）
   const crossSourceSeen = new Set<string>()
-  const directFindings = await checkOsv(request, { ...opts, seenVuln: crossSourceSeen })
+  const directFindings = await checkOsv(request, { ...opts, seenVuln: crossSourceSeen }, outcome)
 
   // 2. 新增：传递依赖扫描（调用 upstream-radar CLI）
   if (request.transitiveDeps !== true) return directFindings

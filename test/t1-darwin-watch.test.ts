@@ -131,8 +131,11 @@ describe('pidCmdlineIsVetSidecar darwin 分支（真实 ps 路径，Linux procps
 })
 
 describe('sidecarMain darwin 分派（注入 fake run，端到端）', () => {
+  // warmupMs/memSustainMs 置 0（0.5.22）：这些用例验的是 darwin 采样与报警分派，
+  // 不是启动暖机——暖机/持续判定的行为在 test/t1-warmup.test.ts 里单独钉住。
   const cfg = (over: Partial<WatchConfig> = {}): WatchConfig => ({
-    intervalMs: 60_000, memLimitMb: 1000, forkBurstN: 5, fdLimit: 512, growthMb: 256, growthWindowMs: 600_000, ...over,
+    intervalMs: 60_000, memLimitMb: 1000, forkBurstN: 5, fdLimit: 512, growthMb: 256, growthWindowMs: 600_000,
+    warmupMs: 0, memSustainMs: 0, ...over,
   })
   const captureStdout = async (run: CmdRunner, watchCfg: WatchConfig): Promise<string[]> => {
     const lines: string[] = []

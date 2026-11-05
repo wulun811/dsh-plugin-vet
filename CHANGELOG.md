@@ -3,6 +3,1380 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.5.27] - 2026-11-05
+
+Second pressure pass on the requirement gate, this time against DSH's own evaluator. **Engine `static-v31`**
+(judgments change, so cached reports are not comparable).
+
+- **x-ranges and `~>`.** `0.2.x` is the other common way to say "built for the previous release", and it was
+  silently skipped. semver compiles x-ranges to exactly the partial-version bounds (`1.x` ≡ `1`, `1.2.x` ≡
+  `1.2`), so they now reuse that code path; `~>` is accepted by semver as an alias of `~` and is treated the
+  same way. A differential run over 1,745 ranges × 28 versions compared 19,936 evaluated cells against the
+  semver copy DSH bundles, with zero disagreements.
+- **A range is refused as a whole.** semver parses the entire range, so `>=0.2 || workspace:^` is `false`
+  even though the first group matches. The evaluator now returns "unmet" as soon as any OR group is provably
+  invalid, instead of short-circuiting on the first satisfied group. Groups it merely cannot evaluate (hyphen
+  ranges) still produce no finding.
+- **No false alarms.** A port of `dsh-app-boot::unmetRequirements` served as the reference over 4,000 generated
+  manifests. Before this change its 184 disagreements were missed refusals; after it there are 49, all hyphen
+  ranges (documented fail-open), and still zero cases where vet alarmed while DSH accepted.
+
+## [0.5.26] - 2026-11-05
+
+Pre-release self-check of 0.5.23–0.5.25: three defects in the new gate, all found before publishing. **Engine
+`static-v30`** (judgments change, so cached reports are not comparable).
+
+- **A false alarm.** Partial-version caret ranges were expanded with x-range bounds: `^1.2` became
+  `>=1.2.0-0 <1.3.0-0`, although npm's caret locks the major (`<2.0.0-0`). A plugin declaring `^1.2` would have
+  been told "the host will refuse this" on every 1.x host above 1.2. The committed differential table against
+  `semver@7.8.6` — the copy DSH itself bundles — now pins `^1.2`, `^1`, `^0.0` and partial caret with a
+  prerelease; a pre-release probe over the wider corpus compared 6,650 evaluated cells and found no remaining
+  disagreements.
+- **A false alarm with a cause.** When `engines.dsh` is present, `dsh-app-boot` returns before it ever reads
+  `peerDependencies`; a non-string peer is then harmless. vet checked the peer anyway and reported "DSH throws".
+  The peer checks (shape and version) now sit behind the same early return.
+- **Fail-open where it could be exact.** `engines`/`peerDependencies` that are not objects make DSH throw
+  (`objectOf$1`), and an empty range or a plainly invalid one makes `satisfies` return `false`, i.e. unmet:
+  a dist-tag word (`latest`), a comma-separated list, or a `workspace:` peer other than the three exactly
+  substituted forms (`workspace:^`, `workspace:~`, `workspace:*`). All of these were silent; they are now `high`.
+  The check stays conservative on purpose: valid-but-unsupported forms (`1.x`, hyphen ranges) still produce no
+  finding, and empty `||` groups are valid in semver (they mean `*`), so they are not flagged.
+- **A structurally blind check.** The entry-over-test-path rule compares absolute paths; `vet-gate --package ./x`
+  passes a relative root, so the sets never matched and the same bytes got the older, lower severity. The request
+  builder now resolves the root before enumerating, and a regression test scans a relative package path.
+
+## [0.5.25] - 2026-11-05
+
+Follow-up to 0.5.24's requirement gate: **partial version ranges** (`>=0.2`, `<0.3`, `0.3`) are now evaluated
+instead of skipped. **Engine `static-v29`** (the set of packages that can be judged grew, so cached reports are
+not comparable).
+
+The gate shipped able to compare three-part versions only; anything else fell into "cannot judge → no finding".
+That is the right default, but it is the wrong coverage for this form: the only third-party DSH plugin installed
+on the reporting machine declares `>=0.2.0-rc.2 <0.3`. The check meant to catch "built for the previous release"
+was silently silent on the shape actual plugins write.
+
+Partial versions compile the way semver does under `includePrerelease` — both bounds carry `-0` (`>=0.3` is
+`>=0.3.0-0`, so `0.3.0-rc.1` is inside it; `<=0.3` is `<0.4.0-0`; `>0.3` is `>=0.4.0-0`). The differential
+table now covers 75 version × range cells generated from `semver@7`, alongside the existing three-part table.
+Everything this evaluator does not understand (`1.x`, `latest`) still produces no finding.
+
+## [0.5.24] - 2026-11-05
+
+DSH 0.2.2 adaptation, part two: the two checks the upgrade made worth having. **Engine `static-v28`** — R12
+gained a requirement gate, and the "test/CI file" downgrade now yields to declared entry points. Both change
+verdicts for some packages, so caches are invalidated (one full rescan per host upgrade, which is when you want
+one anyway).
+
+### Added — R12 now answers "will DSH even install this?"
+
+`dsh-app-boot` evaluates plugin requirements before install/activation: `engines.dsh` decides alone, otherwise
+every `@deepseek-ai/dsh-*` peer must match, and the comparison is `semver.satisfies(..., { includePrerelease })`.
+That last detail matters. The official release tooling writes peers as **exact versions** — the 330 packages of
+0.2.2-rc.1 declare 821 dsh peers, all `0.2.2-rc.1` — so "built for the previous release" is the most common
+third-party shape, and on a new host those plugins are refused outright. vet used to report them `clean` and wait
+for the crash.
+
+R12 now reports, at `high`:
+
+- `engines.dsh` that is not a string (DSH throws), is empty, or uses `workspace:` (workspace substitution applies
+  to peers only — for `engines.dsh` it is treated as unmet);
+- an `engines.dsh` range, or a dsh peer range, that does not admit the **running** host version.
+
+The host version travels as `request.dshVersion` (detected once per process in `src/scanner/scan-request.ts`), and
+it is part of the scanner cache key — otherwise a rescan after an upgrade would serve the previous host's verdict.
+Range evaluation lives in `scanner-bin/rules/dsh-requirement.ts` with DSH's own `includePrerelease` semantics,
+which is deliberately *not* the same as vet's `dsh-compat.ts`: `0.2.2-rc.1` satisfies `^0.2.1-rc.2` there and not
+here, because one question is "will it load" and the other is "have I verified it". A differential table against
+`semver@7` pins the evaluator, including the `<X.Y.Z-0` upper bound that keeps `0.3.0-rc.1` out of `^0.2.x`.
+Unsupported forms (`1.x`, `latest`, `workspace:^` on a peer) produce **no finding** — "cannot judge" must never
+become "will be refused".
+
+### Changed — a declared entry is product code, even inside `test/`
+
+The "test/CI file" downgrade was a path test (directories `test`/`tests`/`spec`/`specs`/`__tests__`/`.github`,
+plus `*.test.*`/`*.spec.*`/`cov` patterns). A package whose `main` points into `test/` therefore had its real
+entry point graded as test code: `process.exit` + `curl | sh` scored `suspicious` where the same bytes in `lib/`
+score `critical`. Same family as the `scripts/` rule: a directory name is a naming convention, a manifest
+declaration is semantics.
+
+The engine now resolves `main`, `module`, `exports` (recursively, all conditions) and `bin` to absolute paths and
+passes them as `entryFiles`; `isTestOnlyFile()` short-circuits for those files. R3, R13, R17 and R20 share the
+helper, so non-entry test files keep their existing downgrade. (CLI entries still get R3's app-shaped downgrade —
+that one is about process access being the product, not about the directory.)
+
+### Verified
+
+- 115 test files / 1729 passed (both modes); 20 new cases: requirement shapes, host-version match/mismatch,
+  `workspace:` peers, unparsable ranges, the semver differential table, the cache-key regression (same package,
+  same cache dir, two host versions), and entry detection via `main`/`exports`/`bin`.
+- All 330 installed official packages were surveyed before shipping the gate: 0 would be flagged (their peers pin
+  the host exactly), so the check adds no noise to the startup self-scan.
+
+## [0.5.23] - 2026-11-05
+
+DSH 0.2.2-rc.1 adaptation. **No engine change** — rule set and thresholds are untouched (`static-v27`, same as
+0.5.20–0.5.22).
+
+### Fixed — vet reported its own runtime as unknown
+
+The host upgraded to 0.2.2-rc.1; `/vet/status.json` then read
+
+```json
+{"dshVersion": "0.2.2-rc.1", "testedRange": "… || ^0.2.1-rc.2", "compat": "out-of-range"}
+```
+
+and the panel turned that into its yellow 「超出已复验范围」 line. Neither side was wrong: the range is a claim
+about what *this* build was verified against, edited by hand once per release, so the day DSH upgrades is the day
+the claim goes stale. Two statements of the same fact existed, and nothing compared them.
+
+**Re-verified on 0.2.2-rc.1** (devDependencies moved to `0.2.2-rc.1`, cordis `4.1.0`): typecheck (scanner / src /
+client), 114 files / 1709 passed under both modes, and the two contracts vet actually depends on were inspected
+rather than assumed:
+
+- `tools/execute` is still the around-dispatch waterfall (`ToolDispatchExecution`), and the new
+  `dsh-tool-executor-native` / `-ptc` split dispatches *through* `ToolExecutionPipeline` — the T2 hook still sees
+  every call. (`tools/ptc-dispatch-log` was removed; vet never listened to it.)
+- The client slot `conversation.session.header.actions` is still served by `dsh-cordis-client-runner` /
+  `dsh-client-ui-conversation`, so the shield panel keeps mounting.
+
+**Declared**: `dshCompat.tested` and the three dsh peers gained `^0.2.2-rc.1`. Peers needed their own update because
+they answer to a different judge: DSH evaluates plugin requirements with `includePrerelease` (so `^0.2.1-rc.2`
+already admitted 0.2.2-rc.1), while `npm install` judges peers with strict npm semantics, which does **not** admit
+it — the same range string, two answers.
+
+**Official catalog regenerated** — 356 → 381 names (+25, no removals). 0.2.2 split out packages vet had never
+seen (`dsh-tool-executor-native/-ptc`, `dsh-official-bundles`, `dsh-fs-patch`, the forge and liveshare experimental
+families, three recommendations packages, …). Until this regeneration the live panel carried a yellow
+`official-not-in-catalog: @deepseek-ai/dsh-tool-executor-ptc` — an official package accused of impersonating
+itself.
+
+Note: `@deepseek-ai/dsh-invariants` has not shipped since 0.2.0-rc.2. The optional peer stays for older hosts and
+`installInvariant` is already duck-typed, so on 0.2.x there is simply no invariant registry to register with —
+recorded here so the silence is not mistaken for a passing assertion.
+
+### Added — both claims now fail tests instead of waiting to be noticed
+
+`test/dsh-compat-live.test.ts` resolves the DSH that is actually installed (PATH `dsh` → realpath, then global npm
+root, then an explicit `VET_DSH_ROOT` override; skipped when none is found) and asserts:
+
+1. that version is inside `dshCompat.tested`, and the next minor is **not** — the range is an upper bound, not
+   "everything that comes later";
+2. the three dsh peers accept it under strict npm semantics, the mode `npm install` uses;
+3. every `@deepseek-ai/*` package installed in the host family appears in the official catalog seed, with the
+   regeneration command in the failure message.
+
+The value is the timing, not the assertions: they run in `npm test`, so a host upgrade turns the suite red on the
+next run instead of producing a yellow panel line the user has to interpret.
+
+## [0.5.22] - 2026-11-05
+
+### Changed — three alarms that were not reporting a problem
+
+User report, immediately after restarting the host: four red `宿主进程内存超限：4413 MB（阈值 4096 MB）` alarms,
+three `R17 !!js 配置注入观测` warnings (`!!js ×13`), and three `R19 包名仿冒观测` warnings
+(`@deepseek-ai/dsh-spill vs official:dsh-skill`). Sorting them took one line each — none of the three was about
+anything the reader could act on.
+
+**T1 evaluated the memory ceiling during the boot ramp.** A DSH host loads its bundle and builds the client
+bundle in-process at startup, so RSS climbs to a startup-only peak and then falls back: 4413 MB during the ramp,
+~2.1 GB once steady on the reporting machine, with the over-limit stretch lasting four samples (≈8 s). The
+absolute ceiling was applied to the very first sample, so every restart produced a red alarm for the boot
+waveform. Two gates now sit in front of it:
+
+- `runtimeWarmupMs` (default `180000`): no T1 alarm (RSS / child-process / fd) while the sentinel is still inside
+  its warm-up. Sampling and the `prev` sample keep advancing, so judgement resumes on the first tick after the
+  window — a host that is *still* over the ceiling then still reports.
+- `runtimeMemSustainMs` (default `30000`): the memory ceiling now requires a **continuous** breach, not a single
+  sample. The message names the sustain window, so the reading is not mistaken for a momentary spike.
+- Both accept `0` (disable) and are appended to the sidecar argv as slots 7/8 — appended, not inserted, so an
+  already-running sidecar keeps working with its own defaults until the next restart.
+
+**R17 was elevating the presence observation.** Tier elevation (hardened/paranoid) turns R17/R18/R19 info
+observations into yellow alarms. For R17 that included `配置含 !!js 表达式（…）` — the finding that says "this
+config contains `!!js`" and nothing else: no verb, no target, no judgement. The official DSH bundle uses `!!js`
+legitimately (13 occurrences on the reporting machine), so the alarm fired on the host using its own documented
+capability; the only action it suggests is turning that feature off. The presence line is now excluded from
+elevation; verb-bearing observations (`child_process`, `require(危险模块)`, `exec(`, …) still elevate.
+
+**R19 was comparing names an attacker cannot publish.** `runTyposquat` stripped the scope before comparing, so
+`@deepseek-ai/dsh-spill` (a real official package — this machine has `dsh-spill`, `dsh-spill-local` and
+`dsh-spill-policy` installed) matched `dsh-skill` at edit distance 1 and was reported as a suspected typosquat.
+The scope is npm's publication-permission boundary: nothing but the vendor can publish under `@deepseek-ai/`, so
+a candidate in that scope is never a typosquat. Candidates in the official scope are skipped; unscoped
+`dsh-spill` and lookalike scopes (`@deepseek-ai-look/dsh-spill`) still report.
+
+- Tests: `test/t1-warmup.test.ts` — 13 cases. The three default sources must agree (config default, schema
+  default, sidecar fallback); boundaries of `sustainReached`; `skipMem` silences the memory line only, not
+  fork/fd; and four end-to-end cases drive a real `sidecarMain` tick with a fake clock, because "pure functions
+  green, wiring missing from the tick" is exactly the 0.5.20 failure mode. The R17 cases build their input from
+  the real `runConfigScan` instead of hand-written findings; the R19 cases pin the official-scope exemption *and*
+  its blast radius.
+- Docs: config table in both READMEs, `docs/ARCHITECTURE.md` §5.1, and a corrected platform-gate bullet there
+  (the sidecar has supported macOS since round-19; the old text still said Linux-only).
+
+## [0.5.21] - 2026-11-05
+
+### Changed — the memory-growth alarm was reporting normal work
+
+User report: *"memory keeps growing 260 MB (10-minute window) — alarming on this is too annoying; report when it
+exceeds 2 GB in 10 minutes."* That is the whole bug. A DSH host installing plugins and running tasks grows by a few
+hundred MB over ten minutes as a matter of course; at a 256 MB threshold the alarm fires on ordinary operation. An
+alarm that fires on ordinary operation does not get investigated — it teaches the reader to skip that row, and then
+the real leak arrives wearing the same colour as its twenty predecessors.
+
+`runtimeGrowthMb` now defaults to **2048** (2 GB per 10-minute window, unchanged window). Everything else about the
+detection is untouched: net RSS growth across the full window, ≥90% window coverage required, integer multiples
+de-duplicated so one window reports once.
+
+- The absolute ceiling (`runtimeMemLimitMb`, 4096 MB) is unchanged and still catches the slow-and-steady case that
+  never gains 2 GB inside a single window — the two thresholds answer different questions.
+- The alarm message now names its own threshold ("… 阈值 2048 MB …"). Anyone reading "grew X MB" immediately asks
+  "how much counts", and answering that in the source only helps whoever is reading the source.
+- The alarm id carries the threshold (`t1:growth:<n>`), so a dismissal filed under the old 256 MB threshold does not
+  silently suppress the new one. Raising a threshold is a different alarm, not the same alarm with a new number.
+- Six new cases pin the numbers *and* the behaviour: config default, schema default and the sidecar's own fallback
+  must agree; the reported case (260 MB / 10 min) does not fire; 2047 MB does not fire and 2048 does; the message
+  states the threshold; crossing two multiples in one window still reports once.
+
+## [0.5.20] - 2026-11-05
+
+Two gaps that had been sitting in `FAILURES.md` as "known, not fixed" are closed. Both had the same shape: the
+machinery was complete, and nothing fed it — the qualification state machine had a `standard_changed` event with no
+producer, and two finished derivations had no reader.
+
+### Added — audit records can now say which rule set the conclusion came from
+
+`standard_changed` was the one event in the qualification state machine that production could never fire. The table
+was complete (45 cells, an impact parameter, exhaustive tests) and every cell was green, because a table test
+constructs its own events. What was missing was a fact: the record only ever pinned the *bytes* it reviewed, never
+the *engine* that produced the judgement.
+
+A record may now declare, next to `subject_sha256`:
+
+```
+rule_set_version: static-v27
+scan_verdict: clean
+```
+
+Used as a pair. When the recorded engine differs from the engine this build ships, vet asks one question before
+honouring the record: **would the current rule set decide differently for this package?** It answers from the most
+recent scan summary for the same name and version, provided that summary was produced by the current engine — and
+only a *worse* verdict counts as a change of mind. Same, better, or unanswerable (no summary, summary from an older
+engine, version mismatch, no `scan_verdict`) and the record stands, with `standard-irrelevant` /
+`standard-unevaluated` recorded on the qualification state so the answer is auditable rather than silent.
+
+Why the impact function and not "engine changed → everything is stale": the latter is a mass denial on upgrade day,
+and a rule-set change is not evidence about a package. `FAILURES.md` F20.
+
+- `scan_plugin` now returns `static.engine`. Without it the protocol would be asking the agent to invent a version
+  number for that line — the field is the only honest source at audit time.
+- The `recheck_required` message no longer assumes the digest. It had exactly one cause until now (bytes changed), so
+  the hint said "the content digest does not match"; with a second cause that sentence becomes a lie that sends the
+  user to compare digests that are in fact fine. The hint is now chosen by reason.
+- Ten new cases: same engine (no event), worse verdict (recheck), equal and better verdict (no recheck), no summary,
+  summary from an older engine, version mismatch, missing `scan_verdict`, content mismatch (no stacking), plus an
+  end-to-end deny-mode refusal whose message names the rule set. Replacing the impact function with "always escalate"
+  turns six of them red — checked, not assumed.
+- **The one-load window is documented, not glossed.** The gate runs before the scan because blocking must happen
+  before the mount, so the first load after an engine upgrade only has evidence from the previous engine and the
+  record stands. That load is scanned anyway (`autoScan` defaults on) and the fresh verdict lands in the summary, so
+  the *next* load is the one that can require a re-audit. With `autoScan: false` the summary never refreshes and the
+  re-audit never triggers — a knowing trade, and the state still carries `standard-unevaluated`.
+
+### Fixed — two finished derivations had no reader
+
+`effectiveConfig` has been in `/vet/status.json` since 0.5.12: for every key you changed, whether it is actually in
+effect and why not. The client type never had the field, so the panel never drew it. `domainProjectionStats()` has
+been counting projection mismatches since 0.5.18 made all three modes compare — and again only tests read it.
+
+Both now render in the self-check section of the Audit & Honeypot page, alongside coverage and posture, under the
+same rule the section already had: only report what was configured and is not doing anything.
+
+- Config readings are a new group listing `inert` / `partial` keys with their `because` and the backend's plain-word
+  note. They also count toward the section's problem badge — a key you set that does nothing is the same question as
+  a surface that was requested and did not mount. The most common instance is real and worth seeing: the `paranoid`
+  preset lowers `denyOn` to `suspicious` but never turns `mode: deny` on for you, so that key stays inert until you
+  choose to block.
+- Projection divergence renders one line only when the count is non-zero. It counts as *one* problem, not N: it is a
+  single invariant (projection ≡ literal) that a single bug would break in many places at once.
+- The section no longer disappears when coverage and posture are empty but config readings are not.
+- `FAILURES.md` F21. The lesson is narrower than "wire it up": a field in a JSON payload, asserted by tests, with a
+  green panel test on top, produces every signal of being consumed except the one that matters.
+
+### Not in this release
+
+The panel still says nothing about *which* engine a scan came from — `scan-summaries` records it and the plugin
+detail does not show it. That is a display question with no new facts behind it.
+
+## [0.5.19] - 2026-11-05
+
+`autoScan` and `requireAudit` are two keys, two rows in the config table, and two surfaces in the posture panel. In
+the load path they were one switch, and the one on the top was the performance switch (`FAILURES.md` F19).
+
+### Fixed — turning off the scanner also turned off the audit gate
+
+The audit gate's code sat below `if (!config.autoScan) return`. So a deployment that required a human audit record
+for every third-party plugin, and then turned off auto-scan (most likely *because* scanning was slow), silently
+stopped requiring anything at all: un-audited plugins loaded straight through. The panel went on reporting
+`audit_gate` as desired, with no alarm explaining the gap — the exact shape this project calls out as forbidden
+("`desired ≠ effective` must be visible").
+
+The gate is now `auditGate()`, called before the early return. `autoScan` means one thing: *do the load-time tree
+walks* — static scan, official-package content-hash baseline, third-party baseline. The gate walks nothing; it reads
+one archive directory and verifies one digest, so it no longer rides on a performance switch.
+
+- The gate's "is this third-party?" predicate had to change with it. The authoritative form,
+  `classifyOfficial().kind === 'not-official'`, computes the package hash — precisely what `autoScan: false` exists
+  to avoid. It now uses three cheap facts: namespace, allowlist membership, and whether the package root resolves.
+  Both deviations from the full predicate are recorded in the function's doc comment: it now gates official-looking
+  names whose root cannot be resolved (stricter — that is the round-16 SA2-6 impersonation shape), and it no longer
+  gates official packages whose hash came back empty because the tree exceeded the budget (looser — those are
+  governed by the content baseline, not by a human record).
+- Five new cases. Three go red if the gate is moved back below the early return: `report` still alarms, `deny` still
+  refuses to mount, and an official namespace with an unresolvable root is still gated. One case pins the opposite
+  direction — a package that *has* a record still loads, so the fix is not "block everything".
+- One cost, kept rather than optimised away: with `autoScan: false`, a package that has a record declaring
+  `subject_sha256` is still hashed once. Without it the gate degenerates into an existence check, and "record says A,
+  disk says B" — the `content_changed` state — becomes undetectable. Packages without a record are never hashed.
+
+### Changed — what `autoScan: false` means for the remaining checks
+
+Unchanged, and now stated in the config type so it cannot be rediscovered as a surprise: the content-hash baseline
+and the third-party baseline stay coupled to `autoScan`, because both walk the package tree. Users who want the
+baseline but not the scanner do not have that combination today; users who want neither have `autoScan: false`,
+and users who want the gate without the scanner now have it.
+
+That coupling is now derivable instead of latent. `src/config-view.ts` reports `contentBaseline` /
+`thirdPartyBaseline` as **`inert`** with `because: 'autoScan'` in `/vet/status.json`'s `effectiveConfig` when the
+scanner is off — the presets turn
+`thirdPartyBaseline` on for `hardened`/`paranoid`, and a preset-expanded key counts as "changed", so a
+`paranoid` user who disables scanning would otherwise see a baseline reported as in use while it never runs.
+The branch only fires when the key is *on*; a user who turned it off themselves gets no invented explanation.
+Caveat recorded rather than glossed: this block has no panel consumer yet, so "reported" here means the JSON,
+not a row on screen.
+
+### Note
+
+In `deny` mode the block now happens earlier, so a package rejected for lacking an audit record no longer records a
+third-party baseline alarm first. Both outcomes end with the plugin not mounted; the message that survives is the
+actionable one.
+
+## [0.5.18] - 2026-11-05
+
+The projection cutover: `domainProjection` now defaults to `active`, so alarm shape comes from the registry and
+projector rather than the literal each detection site writes. Doing it surfaced a defect that would have made the
+switch silently costly (`FAILURES.md` F18).
+
+### Fixed — the equivalence check only had power in the mode that was about to end
+
+`emitAlarm` returned early on `mode === 'active'`, recording the projection without ever running `diffAlarm`. So
+"is the projection equivalent to the literal?" was only ever asked of `shadow` — the one mode a cutover exists to
+retire. Flipping the default would have left `VET_DOMAIN_SHADOW_STRICT=1` unable to throw, with every test still
+passing because the tests pass `shadow` explicitly. A protection that stops existing without saying so.
+
+The comparison now runs on both branches; only the output differs (`record(mode === 'active' ? projected : legacy)`).
+Cost is nine `!==` on fields already in hand — no allocation, no IO. Suppressing it to save that would have swapped
+a fuse for an indicator light.
+
+- Two new cases pin it: strict mode must throw on the `active` path, and non-strict `active` must count the
+  mismatch while still recording the projection. Both go red against the old implementation.
+- Three more pin the *default* path itself: `VetConfigSchema({})`, `VET_CONFIG_DEFAULTS` and `emitAlarm`'s default
+  parameter must agree. Discovered by experiment — before these existed, changing the default to `active` in both
+  places and running the whole suite produced **zero** failures, because no test exercised the chain "config
+  default → effective mode". Each of the three drifts was then verified to go red.
+
+### Changed — `domainProjection` defaults to `active`
+
+Verified against a packed artifact rather than only in tests: the 0.5.17 tarball installed into a fresh profile,
+booted twice with `domainProjection: shadow` and `domainProjection: active`, and the two `/vet/status.json`
+snapshots compared field by field. The alarm rows were identical.
+
+Because they are identical, `config-view.ts` reports this key as **`partial`**, not `active`. It does take effect —
+but the observable output does not change yet, and calling it "in use" would invite the reader to believe the switch
+did something. The note says so in plain words: the modes diverge only if a projection stops being equivalent,
+which is exactly what the comparison watches for.
+
+This key also had never been in either README's config table. A default change is a behaviour change, so both
+tables now carry it, with the old value named.
+
+### Not in this release (named, not implied)
+
+- `npm publish` has not happened. `latest` on the registry remains 0.4.2.
+- Audit records still carry no `rule_set_version`, so `standard_changed` cannot fire in production.
+- `autoScan: false` still disables the audit gate as a side effect (recorded as an open gap in `FAILURES.md`).
+
+## [0.5.17] - 2026-11-05
+
+The first release that was installed from its own tarball into an empty profile and clicked through before being
+called done. That took ten minutes and found a bug every previous release shipped.
+
+### Fixed — the first click on a fresh install always failed (`FAILURES.md` F17)
+
+On a brand-new profile, pressing "turn on runtime guard" in the panel returned HTTP 500:
+`写入失败：YAMLException: end of the stream or a document separator is expected (5:1)`.
+
+The cause is one string comparison. The writer detects an empty patch document with
+`content.trim() === '[]'`, which only matches a *bare* `[]`. What DSH actually writes into a new profile is three
+lines of explanatory comments followed by `[]` — so the check was permanently false, the writer took its
+"append an entry at the end" branch, and produced `[]` followed by `- id: plugin-vet`. That is two document roots;
+the atomic-write YAML validator rejected it and the route surfaced the rejection as 500.
+
+The trigger is **the first thing every new user does**. An existing profile never reaches that branch, which is
+why it survived 17 releases, two packaging scripts, a `prepublishOnly` gate and 110 test files: every one of them
+started from a bare `[]`, an empty file, or an already-configured entry. The development machine mounts vet through
+a `link:`, so the commit path never once installed the artifact.
+
+- `status-route.ts`: new `isEmptyPatchDocument` (comments and blank lines are free, at most one `[]`, anything else
+  means non-empty) replaces both bare-string checks; `finalizeEmptyDocument` guarantees that emptying the file
+  leaves `[]` behind instead of a comments-only document, which YAML parses as `null` rather than an array. The
+  comment header is preserved — it is DSH's explanation to the user, not ours to delete.
+- `test/runtime-guard.test.ts`: five cases built from the verbatim DSH template bytes, covering first enable, first
+  tier selection, a full on→off→on round trip, comment preservation, and the non-empty case (must append, never
+  overwrite). Reverting the fix turns four of them red.
+- `scripts/check-pack-acceptance.mjs` (new, wired as `check:pack-acceptance` and into `prepublishOnly`): packs,
+  installs into a fresh profile built from the shipped `web` template, boots the host on a loopback port, presses
+  the panel switch over HTTP, restarts, and confirms the guard survived — then turns it off and confirms the file
+  returned to template shape. Reverting the fix reproduces the exact 500 above.
+
+Isolation that the script must keep: `DSH_HOME` for the profile, **and** `DSH_PLUGIN_VET_STORE_DIR` for vet's own
+state. vet resolves its store from `homedir()`, not from `DSH_HOME`; the manual first run of this check wrote
+`baseline.json`, `capabilities.json` and `stats.json` into the real `~/.dsh/vet` before that was noticed.
+
+### Documented — `autoScan: false` also disables the audit gate
+
+`autoScan` and `requireAudit` are separate config keys and separate posture surfaces, but the load path returns
+early on `!config.autoScan` *above* the audit gate — so "I don't want every install statically scanned" is silently
+read as "I don't require human audits". The panel then shows `audit_gate` as desired-but-not-effective with nothing
+explaining the difference.
+
+Not fixed in this release, on purpose: moving that early return also changes `autoScan: false` for the official
+content-hash baseline, first-seen anchoring and a whole row of alarms. That is a scope expansion which needs its
+own design pass and its own acceptance run. Recorded as an open gap in `docs/FAILURES.md`, stated in both READMEs
+next to the key, and pinned by a test that documents today's behaviour — the day someone connects the two, that
+test goes red and points at exactly the right place.
+
+### Not in this release (named, not implied)
+
+- `domainProjection` is still `shadow`. The switch to `active` needs its own end-to-end pass; F16 is a concrete
+  example of drift that shadow mode structurally cannot detect.
+- Audit records still carry no `rule_set_version`, so the `standard_changed` cell of the qualification state
+  machine cannot fire in production.
+- `npm publish` has not happened. `latest` on the registry remains 0.4.2.
+
+## [0.5.16] - 2026-11-05
+
+A second audit pass, this time aimed at the release narrative rather than the code — and it found one more
+place where the code and its own registry disagreed. The release-facing docs are rewritten around what a bad
+plugin does to a person, not around what the architecture is called.
+
+### Fixed — six N3 signature severities were registry fiction (`FAILURES.md` F16)
+
+`n3-mass-delete`, `n3-mass-rename`, `n3-in-place`, `n3-write-amplify`, `n3-high-freq-read` and `n3-exfil` were
+declared `red` in `src/domain/kinds.ts`; the ledger has always emitted them `yellow`, and only the *combination*
+`n3-ransom` is red (where single-signature rows are filtered out, so they can never appear as red at all).
+
+This was not a wording problem. In `active` projection mode the registry's constant wins, so those six classes
+silently turn red on the switch to `active` — and **shadow mode cannot see it**, because constant rows do not
+feed the collection point's severity into the comparison. Verified directly: same input, `legacy`/`shadow` yield
+`yellow`, `active` yields `red`.
+
+The registry was right to be wrong-looking: "single signature → yellow, two or more → red" is the design. Six rows
+were copied from the combination tier when the table was built in 0.5.0.
+
+- `kinds.ts`: six rows corrected to `yellow`.
+- `test/domain-projection.test.ts`: the test that should have caught this skipped every collection point whose
+  fixture entry had a null `source` — 35 of 76, including all 12 N3 sites. It now compares constant rows directly
+  and needs no `source`; a second new assertion fails if any constant row has no collection point that emits it.
+- `test/n3-exfil-ledger.test.ts`: six end-to-end regressions drive each signature through the real ledger and
+  through `projectAlarm`, asserting collection-point severity, registry constant and projected output all agree.
+  Reverting any row to `red` makes them fail (mutation-checked).
+
+### Changed — the release narrative was rewritten around consequences, not architecture
+
+The previous README led with four abstract worries. It was accurate and it did not answer the question a person
+actually has, which is *what happens to me*. It now opens with the three concrete disasters — files encrypted
+and renamed, SSH keys and API credentials lifted and POSTed out, persistence planted so the plugin survives an
+uninstall — then a table saying, disaster by disaster, **which tier actually stops it and which only watches**.
+Two rows in that table are uncomfortable and are stated plainly:
+
+- **Ransomware's first burst can land.** The signature needs a 10-second window and two corroborating classes;
+  files touched before that are gone. What is guaranteed is that the loop dies.
+- **Credential theft is not intercepted at all.** Read-then-send is observation, not destruction.
+
+Also added: an ASCII architecture diagram (scanner subprocess, host-side guards, T1/T2, the five detectors,
+the single interceptor, the status route, the browser shield), and an explicit statement that the scanner is
+*process isolation, not a sandbox*. Restored from the previous narrative: the dsh.so risk badge and the landing
+-page links, which the 0.5.15 rewrite had dropped.
+
+`README.zh.md` was rewritten in parallel and a duplicated tier table was replaced with a cross-reference in both
+languages — the two copies are exactly how these documents drift.
+
+### Not in this release (named, not implied)
+
+- The packed artifact has still never been installed into a clean profile.
+- `domainProjection` is still `shadow`. F16 is a reminder of why that matters: shadow mode does not protect the
+  constant rows, and this class of drift is invisible until the switch flips.
+- Audit records still carry no `rule_set_version`.
+
+## [0.5.15] - 2026-11-05
+
+A pre-release audit of every layer turned up seven places where "looks like it works" and "works" had drifted
+apart. Three of them fell directly on capabilities the project claims out loud. This release closes them, and
+rewrites the release-facing narrative to say only what is true.
+
+### Fixed — `config.rules` was inert (the worst kind of switch)
+
+README promised `rules: {"R17": false}` would disable a rule. The panel marked the key `active`. **Nothing in
+the repository ever read `config.rules`** — `FileScanPolicy` had no `rules` field, and none of the three request
+construction paths (tool / pre-load / tool-execute) wrote it into a `ScanRequest`. Every `false` a user set did
+nothing at all. This is `docs/FAILURES.md` F12 all over again: a switch that is set but does not work is worse
+than no switch, because it buys the user's attention.
+
+Now wired through `buildFileScanRequest` and all three call sites, with `test/rules-config.test.ts` pinning both
+the plumbing and the end-to-end effect (turning R13 off really removes R13 and leaves R2 alone).
+
+### Fixed — `isDeclared` treated "no tokens at all" as "fully declared"
+
+Self-scan annotation splits findings into `declared` (maps onto a declaration) and `retained` (cannot be
+explained). The predicate returned `true` when all five token classes were empty — so a finding that parsed
+**nothing** was counted as fully declared. Two constructor-chain escapes (`agent.constructor("return
+process")()`, `new Function("return process")()`) were therefore judged, `verdict=clean`, on the one link of the
+self-audit chain that most needs to be strict.
+
+Empty tokens now mean "no verifiable capability surface", which is evidence for neither side; the only safe
+default for a release gate is to retain. Measured effect: 288 self-scan findings go from 264 declared to **60**
+declared, with **0 decisive retained** — the gate still passes, and it no longer silently launders findings.
+
+### Fixed — the mutant gate was grading a path no real package can reach
+
+Engine rule dispatch classifies test/CI files **by path segment** (`isTestOrCiFile`), downgrading R3/R13/R20 to
+`info`. Every corpus file lived under `test/fixtures/`, so the gate had been measuring a downgraded path that a
+real malicious package never gets:
+
+```
+test/fixtures/exfil-discord-webhook.fixture.js → R13:info, verdict=clean
+same bytes copied to a neutral path           → R13:high, verdict=suspicious
+```
+
+The corpus is now mirrored to a neutral temp tree before evaluation, and `assertNeutral` fails loudly if any
+test/CI segment survives. M18 (Discord webhook) and M19 (cloud metadata) now escalate correctly.
+
+The remaining 8 of 34 mutants that hit a rule without escalating are **legitimate** (`R5`/`R15`/`R16`/`R17`
+single-verb/`R18`/`R19`/`R9`-ReDoS are observation-only by design). Instead of letting them hide inside a
+"100%" figure, each now declares `expect.advisory` in the manifest, the scorecard prints **decisive 26 /
+advisory 8** as separate numbers, and the gate **fails** on any hit-without-escalation that lacks a declared
+reason.
+
+### Fixed — the shield painted "all clear" when it had no data
+
+`snap?.level ?? 'green'`: if the backend never answered (route not registered, host down, CSP, network), the
+shield showed a green "Guarding" forever, with zero alarms, while the footer's "updated at" was hidden because
+`loadedAt === 0`. For a product whose entire pitch is "I am watching", that is the worst possible silence — it
+renders "I don't know" as "everything is fine".
+
+There is now a fourth state. No snapshot, or a snapshot older than 3 poll cycles, renders a dashed "no data"
+shield, not green. A stale **red** is also dropped to "no data": "it was red fifteen seconds ago" is not "it is
+red now". The decision lives in `src/client/shield-level.ts` as a pure function so it can be asserted
+(`test/shield-level.test.ts`, 7 cases including the "never downgrade live data" direction).
+
+### Fixed — the hook-integrity brand was forgeable
+
+`hookHeartbeat` decided "is this still our wrapper" via a `Symbol()` property on the function, with a comment
+claiming it "cannot be copied or forged". That was wrong: `Symbol()` only keeps a name out of the global
+registry — the symbol property on a function is **enumerable**, so `Object.getOwnPropertySymbols(fn)` copies it
+onto a fake function and `isVetHook(fake)` returns `true`. An attacker could swap the whole wrapper and leave
+the heartbeat reporting all-clear.
+
+Replaced with a `WeakSet` keyed on **function identity**, which has no copyable property surface.
+`test/hook-brand.test.ts` turns the old bypass into a failing assertion.
+
+### Changed — release-facing narrative rewritten
+
+`README.md` / `README.zh.md` were 705/430 lines and ~84 KB, organised as a second copy of the changelog
+(`## 0.1.16 hardening batch (security review)` occupied 36 lines before a reader reached the platform matrix).
+Rewritten around four questions a user actually asks — *will this steal from me / how would I know what it does
+/ how do I tell "nothing found" from "wasn't looking" / do I need the CLI* — with the honesty section moved
+**above** the reference tables instead of 600 lines down. Reference material (config keys, rule table, capability
+boundary, known limitations) is kept and corrected rather than dropped.
+
+Stale figures corrected everywhere: test count `1350`/`1095` → **1636 across 110 files**, assertion census
+`2864` → **4346**, counter-examples `13` → **14**. The landing site's npm badge no longer claims a version that
+is not published (npm `latest` is still 0.4.2).
+
+### Fixed — "physically isolated" survived in two places
+
+0.5.12 corrected this wording in `README`/`SECURITY.md` but missed `docs/ARCHITECTURE.md` §2 and the landing
+site's architecture headline. Both now say process isolation and state what it does not buy — same machine, same
+user, no namespaces.
+
+### Not in this release (named, not implied)
+
+- **`domainProjection` is still `shadow`.** Flipping it to `active` would change one visible behaviour
+  (`baseline-mismatch` for third parties turns from yellow to red) and there is no end-to-end verification for
+  that yet. `domainProjectionStats()` has zero production consumers, so shadow-mode divergence is currently
+  silent — that is the next batch, not a claim in this one.
+- **`validate.ts` has no production write path.** Its five cross-field contracts are re-implemented at runtime in
+  `decision.ts`/`receipt.ts`; two truths with no consistency mechanism. Either wire it or delete the claim.
+- **Audit records still carry no `rule_set_version`**, so "an old conclusion from an old rule set" is
+  indistinguishable from a current one (Known Limitations 19).
+- **`internal-plugin.ts` still returns early on `!config.autoScan`** before `requireAudit` and the baseline
+  checks — the one deny-mode path that switches off entirely with no notice.
+- **Read endpoints remain anonymous** by design (`GET /vet/status.json`, `/vet/plugin`).
+- **No published-artifact install has been verified end to end** (pack → install into a clean profile → panel
+  appears → guard toggles → restart persists). The dev machine uses a symlink, so this path has never run.
+
+## [0.5.14] - 2026-11-05
+
+Three things the first real user hit within an hour of 0.5.13. Same lesson in three costumes: a default that
+is defensible on paper can still be wrong for the person using it.
+
+### Fixed — the memory alarm was flagging ordinary operation
+
+`runtimeMemLimitMb` defaulted to 2048 MB and the T1 sentinel turns the shield red above it. A DSH host with
+plugins loaded sits above 2 GB as a matter of course — the V8 heap alone climbs to roughly 3.4 GB while
+plugins load on the machine this was written on. So switching on the middle tier (which wakes the sentinel)
+produced an immediate red that described nothing wrong. The default is now 4096.
+
+Detection is unchanged: still one RSS sample against one threshold, still alarm-only, still dismissable.
+What changed is the number we are willing to call abnormal.
+
+### Changed — `controlLocalOnly` is off by default
+
+0.5.13 shipped the peer gate **on**: writes required a loopback/host-interface peer. The reviewer asked for
+it and the reasoning holds — `Origin`/`Host` are request headers any client can type. What the reasoning did
+not weigh is that opening the panel from another machine is how this thing is actually used: the first user
+opened it from `192.168.3.8`, pressed a button, and got a 403 against their own machine.
+
+The gate is not gone, it is now `controlLocalOnly: true` — opt-in, and the default is the 0.5.12 behaviour
+(same-origin only). `SECURITY.md` keeps both halves honest: same-origin stops a cross-site page and says
+nothing about who is calling; the peer check is the only half that cannot be forged, and it costs you remote
+operation. That is a trade the deployer makes, not one we make for them.
+
+### Changed — the audit page has sections now
+
+After the self-check block moved in (0.5.13), the page was three headings in the same small grey type, 8px
+apart — a wall of cards with no visible ownership. Each section now has its own divider, a 3px accent bar in
+the heading, and one status phrase on the right (待审 3 / 已布防 / 1 项异常). No nested cards: the list rows
+are already cards and wrapping them again would only make the page heavier.
+
+The section's "N 项异常" and the main panel's 🔍 icon read the same `selfCheckProblemCount`, so the two cannot
+disagree — which is the failure mode the last two releases were about.
+
+## [0.5.13] - 2026-11-05
+
+The reviewer's closing-batch list (his R0), plus one panel change the user asked for directly. R0 has five
+items; three of them are here, and the two that are not are named at the bottom rather than implied.
+
+### Changed — the self-check block moved off the main panel, into the audit centre
+
+0.5.9 folded coverage and posture into one collapsed "self-check" row on the main panel. It was the right
+call at the time (two capsule walls reading as "you only have a third of the protection you think") but the
+row was in a prime slot and, on a quiet machine, it said the same four characters every day. Requested
+directly by the user: the detail block moves into the **Audit & Honeypot** page, and the audit bar
+(`🍯 | ⏳ | 🆕`) — which was already the entrance to that page — gains a small 🔍 icon, carrying a count
+only when something is actually wrong.
+
+The accounting did not change: `selfCheckProblemCount` counts `failed` coverage plus `desired ≠ effective`
+posture, and both the icon colour and the section header read that same function. `off` remains "you turned
+it off", not "we broke it" — that was the 0.5.9 ruling and it survives the move. The section renders
+nothing at all when a backend sends neither field, so an old status.json still degrades to silence.
+
+Test: `test/selfcheck-section.test.ts` (first client-side test in the repo — `react-dom/server`, no DOM;
+`vitest.config.ts` needed `esbuild: { jsx: 'automatic' }` because the components are written for
+`react-jsx` and never `import React`).
+
+### Security — the control plane now refuses non-local writers
+
+`POST /vet/profile`, `/vet/runtime-guard`, `/vet/dismiss` and `/vet/restore` were protected by a same-origin
+check: `Origin` present and matching `Host`. Both are request headers. A browser sets them for you; any
+other client types them itself. So the check proved "this is not a cross-site form post" and nothing about
+who was calling — with `dsh web` on a LAN address, any machine on that LAN could flip the tier or the guard
+by sending two headers.
+
+There is no stable upstream seam for a plugin-registered route to ask "did the host authenticate this?", and
+building a second account system is out of scope for vet. So the gate uses the one thing the caller cannot
+type: the TCP peer. Writes are accepted only from loopback (`127.0.0.0/8`, `::1`) or one of this host's own
+interface addresses — the second half is what keeps `http://192.168.x.x:3456` working from this machine.
+Unknown peer → refused.
+
+`allowRemoteControl: true` removes the refusal and adds **no** authentication; it exists for the
+reverse-proxy/container case, where every peer looks local anyway. `X-Forwarded-For` is deliberately not
+read — that is a request header, the exact thing this is trying to stop trusting. Reads (`status.json`,
+`plugin`) are unchanged: the shield polls them without a credential, so they stay anonymous, and LAN clients
+can still read scan conclusions. That is written down in `SECURITY.md` instead of being left implied.
+
+### Changed — the release gate runs the tests now
+
+`prepublishOnly` used to be: build → pack integrity → self contract → mutant gate. The full suite was not in
+that chain; neither was `typecheck`. A developer could run everything locally and still publish from a state
+where the tests were red — the gate was checking the artifact, not the claims about it.
+
+- `npm run verify` = `typecheck` + `build` + the full suite in `VET_DOMAIN_SHADOW_STRICT=1`, and that is now
+  the first thing `prepublishOnly` runs.
+- `scripts/check-pack-smoke.mjs` packs the real tarball, unpacks it, and `import`s the entry from inside the
+  package: asserts `apply`/`name`/`Config` have the right shape, that the browser half is the module-loader
+  wrapper and not source, that the version matches the workspace, and that no install-time hook slipped into
+  the published `package.json`. Nothing is signed or installed into a profile; this is the shortest chain
+  that can still fail.
+
+### Fixed — two ledgers that described the plan instead of the code
+
+- `docs/CASES.md` opened with "`0.4.3` does C01/C02/C11/C32". 0.4.3 never shipped as its own version — that
+  content was folded into 0.5.0/0.5.1 — so the line was a schedule masquerading as a record. It now says so.
+- The same file ended with "semantics first, counterexamples later", which the reviewer correctly called
+  circular: design an interface, then only use samples that interface can express to prove it is good. The
+  order is now: write C25–C31 as seven falsifiable behavioural contracts marked `NOT_IMPLEMENTED /
+  NOT_TESTED` first, then build `SurfaceEnumerator` / `Observer`, then flip each one to "blocked by this
+  test". A contract with no implementation is not evidence — it is a failure condition that exists before
+  the test does.
+
+### Not in this release (named, not implied)
+
+The reviewer's R0 had five items. Done: control-plane defaults, release-gate integration, ledger corrections
+(+ the panel move). **Not** done: the end-to-end verification that would justify flipping `domainProjection`
+to `active`, and the property test that unknown coverage must not downgrade a confirmed deny. Both are the
+next batch; 0.5.13 does not claim them.
+
+## [0.5.12] - 2026-11-05
+
+Closing the 0.5.x line: the remaining items were all about the same question — **does what we say match what we
+do?** Three of them turned out not to.
+
+### Added — `effectiveConfig`: which of your switches are actually in effect
+
+Several config keys only mean something when another key is on, and nothing derived that. `honeypot.enabled: true`
+with `runtimeGuard: off`, `denyOn: suspicious` with `mode: report`, a `honeypot.dir` with the honeypot off — all
+set, all inert, none visible. `src/config-view.ts` now flattens the effective (tier-expanded) config, keeps the
+changed keys, and gives each one `active` / `inert` / `partial` plus the dominating key and one sentence;
+`/vet/status.json` carries it as `effectiveConfig`. It is deliberately not a score: no "config health 78%".
+
+The first thing it caught was our own preset: `paranoid` lowers `denyOn` to `suspicious`, but the tier never turns
+`mode: deny` on (by design — deny is a deployer decision), so half of that tier sits inert until the deployer
+flips the switch. That is now written down where it belongs (the README's four-posture table) instead of being an
+expectation nobody could check.
+
+### Added — a rule set is part of a verdict's identity
+
+Scan summaries stored the verdict, the time and the rule codes — but not the **engine** that produced them, so a
+conclusion from `static-v26` kept sitting under "recent scans" as if the current rules had said it, across
+restarts. `ScanSummary.engine` is now recorded (and a change of engine triggers the rewrite). Records written
+before 0.5.12 have no engine and are left empty: backfilling "the current version" would make an unknowable old
+judgement look fresh.
+
+### Added — invariant 4 has a test (`test/assessment-freshness.test.ts`)
+
+Each case pins a field, not an idea: `at` is the decision time and not an mtime; `decidedAt`/`scannedAt`/
+`evaluatedAt` are three expressions of one instant; the assessment's `ruleSetVersion` is the scanner's own engine
+id and not vet's version; content digest mismatch is what "expired" means in this system, and the passage of time
+is not; and the **known gap** is pinned the same way — audit records carry no rule-set version, so the
+qualification state machine's `standard_changed` cell still has no producer in production. Wiring it needs the
+impact function done properly (archive records + current verdict + only recheck when the new rules would reach a
+different conclusion), otherwise it is a mass-refusal generator; the test will go red on the day that lands.
+
+### Docs — the overclaim is gone
+
+- **"Physically isolated" → process isolation.** The scanner is a separate child process that never `eval`s or
+  `require`s the audited code; it is not a sandbox — same machine, same user, no namespaces. Both READMEs now say
+  what it buys (a pathological input cannot take down the host) and what it does not (it can still peg or OOM the
+  scanner; big inputs still time out, recorded as `scan-fail`, never as clean).
+- **`/vet` authentication is stated where it actually lives.** `SECURITY.md` now spells out: authentication is
+  the gateway's; `GET status.json`/`plugin` are anonymous by design (a non-loopback bind exposes them to the LAN);
+  `POST` has same-origin validation only (a POST without `Origin` is rejected 403, which stops a cross-site page
+  but not a same-origin script or a local process sending its own `Origin`); same-origin is not authorization.
+- **Install-time execution**: vet ships no `preinstall`/`install`/`postinstall`/`prepare` hooks, so installing it
+  runs none of its code. (Vet *reports* those hooks in other packages — that is the check.)
+- **Four deployment postures** table (scan-only / standard / hardened / strict), each with what it keeps and
+  **what it does not promise**, so "protected" has to land on a row before it can be said.
+- **Four explanation dimensions** for a finding (`codeAssessment`, `dependencyAdvisory`, `coverage`, `freshness`)
+  and the rule that none may be promoted into another.
+- **`docs/FAILURES.md`**: fifteen real failures with phenomenon → root cause → what catches it now → lesson, plus
+  the two open gaps (audit records carry no rule-set version; no pre-0.5.0 performance baseline, so no claim of
+  improvement is made).
+- **`docs/GOVERNANCE.md`**: the four-step admission process for a new capability, the six stop rules (each mapped
+  to where it would show up in this repo), the seven-row authority matrix keyed by `TrustOrigin`, and the three
+  failure axes with the two explicit "never do this" rules.
+- **`docs/CASES.md`**: the 0.5.x counter-example ledger (C03, C12–C24) — each row points at the test that would
+  actually fail, and the three rows that only cover half of their case are marked `部分` with what is missing;
+  the missing pieces are listed separately instead of being silently ticked.
+
+### Verified
+
+- `test/config-view.test.ts` (new, 18 cases): domination rules, leaf-level flattening, `partial` for the explicit
+  family override, counts consistency, purity — including the `paranoid` `denyOn` discovery.
+- `test/assessment-freshness.test.ts` (new, 9 cases) as described above.
+- Full suite under `VET_DOMAIN_SHADOW_STRICT=1`: 105 files / 1597 passed / 1 skipped (was 103 / 1570).
+
+## [0.5.11] - 2026-11-04
+
+The `Decision` object existed as a shape and a validator and had no producer. This release gives it one, and the
+first thing a producer forces is the question the shape was built for: **what did we not know when we decided?**
+
+`vet-gate` used to answer with one boolean. `blocked: false` meant "we looked and found nothing", "we looked at
+part of it" and "we never looked at the part that matters" — three situations an installer cannot tell apart, all
+rendered as the same word.
+
+### Added — the policy evaluator (`src/domain/decision.ts`)
+
+`buildDecision` takes a policy snapshot (`scope`, `denyFrom`, `failClosedOn`), the assessments and the coverage
+rows, and returns a `Decision` whose `unknownInputs` lists every input it did not have. Three contracts, the first
+two enforced by `validateDecision` as well:
+
+- **you cannot say `allow` while not knowing something** — `allow` requires every in-scope surface to be
+  `covered` and `unknownInputs` to be empty;
+- **`action: 'unknown'` must say what it does not know** (an empty list would make it indistinguishable from
+  "did not bother");
+- **the field and the reasons never disagree** — a non-empty `unknownInputs` always carries
+  `unknown-inputs-present` in `reasonCodes`.
+
+`excluded`/`unsupported` are *declared blind spots*, not unknowns: a surface the deployer turned off is
+something we know we did not look at, so it blocks `allow` (`scope-not-fully-covered`) without pretending to be a
+knowledge gap. `denyFrom` absent means the boundary has **no** denial authority — a finding can only be
+`report`ed there, which is invariant I07 made executable rather than left to reviewers.
+
+### Added — the gate as the first producer (`src/gate-decision.ts`)
+
+`GateResult` now carries `decision` next to `blocked`. The gate's policy is written down instead of implied:
+five static surfaces in scope (runtime surfaces are not "unknown" at install time — nothing is watching them),
+`denyFrom` only in `--mode deny`, and `failClosedOn: ['verdict:unrecognized']` for protocol drift. `coverageForScan`
+gained a `gate` scope where `deps_transitive` and `intel_registry` are `unsupported` (no such capability at this
+boundary) rather than `excluded` (which would point at a configuration knob that does not exist).
+
+A gate decision is always `report`, never `allow` — no install-time scan covers the two faces above, and that is
+the honest answer, not a gap.
+
+### Changed — `blocked` still comes from the legacy function (S2-03)
+
+This is the shadow step: `blocked` is still `decideDenyBlock(...)`, the decision rides alongside, and
+`test/gate-decision.test.ts` pins `blocked === (decision.action === 'deny')` over the legacy function's entire
+input domain (mode × denyOn × verdict, including illegal `denyOn` and unknown verdicts). 0.6 flips the execution
+to the decision; the equivalence proof exists before the flip, not after it.
+
+### Fixed — `in` walks the prototype chain
+
+`verdict in RANK` treated `'constructor'` as a known verdict (`RANK['constructor']` is a function), so a drifted
+protocol value was simultaneously "known" and non-blocking. `isKnownVerdict` uses `Object.hasOwn`; a verdict named
+after any `Object.prototype` member now fails closed in deny mode like any other unknown verdict.
+
+### Verified
+
+- `test/decision.test.ts` (new, 20 cases): every route to `allow` being closed, the action ladder, `fail-closed`
+  matching exact codes only, determinism, worst-of-duplicate surfaces, and every produced action validating.
+- `test/gate-decision.test.ts` (new, 16 cases): the 40-cell equivalence matrix (with an assertion that both
+  answers actually occur, so it cannot pass by being all-false), unknown-input reporting per OSV phase, R8 skip
+  handling, subject/policy-id shape, and two end-to-end `runGate` cases.
+- Full suite under `VET_DOMAIN_SHADOW_STRICT=1`: 103 files / 1570 passed / 1 skipped (was 101 / 1531).
+
+## [0.5.10] - 2026-11-04
+
+Invariant 9 ("the three entries give equivalent findings on frozen input") had no test at all — the plan
+said so in as many words. Writing it turned up a real divergence, and closing that divergence turned into a
+structural change: the scan request now has exactly one construction point.
+
+### Fixed — the tool face ignored the deployer's scan surface
+
+`scanSurface.instructionFiles: false` reached the pre-load scan but not `scan_plugin`: the loader stopped
+reading `AGENTS.md`, the tool kept reading it and kept running R18 against it. Same bytes, one surface on in
+one entry and off in the other. `scanSurface` is now plumbed into `createScanPluginTool` and reaches the
+request builder, so turning a surface off turns it off everywhere (enumeration *and* engine rules — the
+previous shape could also list files for a surface the engine had been told to skip).
+
+### Changed — one builder for every file scan
+
+`src/scanner/scan-request.ts` now owns the request shape: file enumeration, surface flags, `osv`,
+`transitiveDeps`, `targetKind`, `officialFamily`, `scanBasis`. `buildRequest` (which serves both `scan_plugin`
+and `vet-gate`) and the pre-load scan in `guards/internal-plugin.ts` both call it and can only supply policy,
+never fields. The load path also states `targetKind: 'plugin'` explicitly instead of relying on the protocol
+default — "happens to be equal" is not a contract.
+
+`scanner-bin/cache.ts` folds `targetKind: 'plugin'` into the same key slot as an absent kind (`'generic'` is
+the only value that changes a verdict). That keeps the explicitization from invalidating stored caches: the
+pre-load scan of a few hundred official packages does not rescan after this upgrade, and the tool face now
+shares those cache entries instead of keeping a parallel set.
+
+### Kept — one declared, explainable entry difference
+
+A package with no plugin markers (`@deepseek-ai/*` dependency or `dsh`/`cordis` declaration) is `generic` to
+the tool and `plugin` to the loader. That is not drift: the tool sees a directory, the loader knows it is
+loading that package, and the stricter side is the one that actually gates execution. `test/entry-parity.test.ts`
+pins the difference to exactly that one field and says why; if it is ever removed, the fix belongs in
+`classifyTarget`, not in making the load path trust directory shape.
+
+### Verified
+
+- `test/entry-parity.test.ts` (new, 5 cases): tool vs load-path requests are field-for-field equal for a plugin
+  package (all surfaces on, one surface off, config surface off); the `generic`/`plugin` difference is pinned to
+  a single field; and both requests are actually scanned against a fixture, with identical findings, verdict and
+  staticScore — plus a fixture sanity check so "both empty" cannot pass.
+- Full suite under `VET_DOMAIN_SHADOW_STRICT=1`: 101 files / 1531 passed / 1 skipped (was 100 / 1526).
+
+## [0.5.9] - 2026-11-01
+
+The panel stops reporting vet's own bookkeeping as if it were news about the machine. Two blocks that were
+flattened into the main panel during 0.5.0/0.5.2 move behind one collapsed "self-check" fold. The RAM badge on
+the collapsed shield stays exactly where it was.
+
+### Kept — the cross-process RAM badge, with its scope stated where it is read
+
+The shield button keeps `RAM 1.7 GB`, computed as *host RSS + MCP children + vet children*. It was briefly pulled
+in a draft of this release and put back: the number is measured, wanted, and the only thing wrong with it was that
+the caveat lived in a tooltip. That caveat is now the whole point of the tooltip: the sum is the process tree, not
+the plugin, and it reads high for the first minute or two because the host's V8 heap climbs to roughly 3.4 GB while
+loading plugins and indexes — on the machine where this was written, a major GC at T+2:00 took the total from
+3.88 GB to 1.91 GB (cpu 66.7% in that very sample). A number that moves by 2× at startup needs that sentence next
+to it, not a deletion.
+
+### Changed — coverage and posture are one collapsed self-check
+
+`覆盖面 · 已覆盖 3/9` and `生效姿态 · 生效 2/6` were among the panel's loudest lines and its least actionable.
+Six of the nine uncovered surfaces were uncovered because the user had not turned the runtime guard on, and `off`
+posture entries were already excluded from the gap list, so `2/6` never explained where the other four went.
+They are now a single `自检详情` fold carrying the same data:
+
+- counts in words (`3 个面在看 · 6 个面没在看`, `2 个执行面生效 · 4 个按配置关闭`) instead of ratios;
+- the same per-surface chips with the same reason tooltips, one click deeper;
+- the fold opens by itself when `selfProblems > 0`, where a problem is exactly one of two things — a coverage row
+  with `result === 'failed'` (we looked and it broke) or a posture row with `desired ≠ effective` (configured but
+  not mounted). `off` / `excluded` / `unsupported` / `unknown` say vet is not looking; that is a fact about the
+  product, not news about the machine, and it belongs in the fold rather than on the panel.
+
+### Deliberately not deleted
+
+Hiding it entirely would restore the false confidence this whole line of work exists to remove — a green shield
+that never says what it cannot see. The defect was the information hierarchy, not the facts.
+
+### Verified
+
+- `tsc -p tsconfig.client.json` clean; full suite `VET_DOMAIN_SHADOW_STRICT=1`: 100 files / 1526 passed / 1 skipped.
+- Client bundle rebuilt; the repo has no DOM render tests, so the panel change is covered by typecheck + bundle
+  build only — stated plainly rather than implied by a green suite.
+
+## [0.5.8] - 2026-10-31
+
+The funnel closes for real: **the last alarm path that still built its own nine fields now goes through the
+registry and projector**. No new detection, no new knob, no behaviour change.
+
+### Changed — `VetStatus.noteScan` projects its verdict
+
+`noteScan` (scan verdict → dismissible alarm) now calls `emitAlarm` with `npmSubject(echo.pluginName)` as the
+subject and `local_scan` as the origin; the callers pass `config.domainProjection` like every other site, and the
+parameter defaults to `shadow` so a caller that forgets is caught by CI rather than silently skipping the
+comparison. There is now exactly one caller of `status.record` in `src` — the funnel itself — and the test that
+scans `src` for bypasses no longer carries an allowance for the derived path.
+
+### Deliberately not changed
+
+An *aggregate* `scan-verdict` row (many official packages sharing one advisory) keeps being attributed to the
+package that most recently refreshed it. That is what `pluginHint` already said and the shield groups by it;
+changing it would need a "scope" subject kind, which is a contract change, not a projection detail.
+
+### Verified
+
+- Full suite under `VET_DOMAIN_SHADOW_STRICT=1`: 100 files / 1526 passed / 1 skipped. Roughly forty `noteScan`
+  cases (aggregate rows, tool subjects, official packages, dismissals, evidence-fingerprint rollover) now run the
+  strict comparison for free — that is the equivalence proof for this path.
+- `test/domain-record-sites.test.ts`: `legacy`/`shadow`/`active` produce identical alarms for a scan verdict, and
+  the aggregate row still resolves its id to the advisory set (not to a package).
+
+## [0.5.7] - 2026-10-31
+
+Receipts become readable: **the block that 0.5.2/0.5.5 made falsifiable can now be checked after the fact**.
+No new detection, no new blocking, no new writable state.
+
+### Changed — the last receipt per boundary is in `status.json` and on the shield
+
+`/vet/status.json` carries `receipts`: one row per boundary that can block (`fs_write`, `tool_call`) with
+`result`, `operationId`, `attemptedAt`, and `claimsBlocked` computed server-side from `supportsBlockedClaim`, so
+the panel never re-derives "may I say blocked". The shield renders it as a compact section (applied in green,
+`failed` in the alarm colour) with a relative timestamp.
+
+### Deliberately
+
+- **Empty means "no interception decision", not "nothing happened".** The section does not render at all rather
+  than showing a green "nothing blocked" line — that would be the same self-report problem one level up.
+- **24 h TTL.** A week-old `applied` is still a true statement, but presenting it as the current state would
+  claim the guard just blocked something. Stale rows are dropped, not relabelled.
+- **No attempts table.** `noteAttempt` also counts calls that were allowed; a table of those would read like a
+  log of interventions and imply more than the oracle can back.
+
+### Verified
+
+- New `test/receipt-view.test.ts`: `claimsBlocked` only from `applied`, `failed`/`not_covered` refused, missing
+  `operationId` stays absent (result `unknown`, never an invented id), TTL boundary, stable order, one row per
+  boundary.
+- `test/runtime-guard.test.ts`: `GET /vet/status.json` returns `receipts: []` before any decision and the real
+  row afterwards.
+- Full suite under `VET_DOMAIN_SHADOW_STRICT=1`: 100 files / 1524 passed / 1 skipped.
+
+## [0.5.6] - 2026-10-31
+
+The funnel closes: **every alarm site now reports through the registry and projector**. No new detection, no new
+knob — the remaining 15 sites that still assembled nine fields by hand (`runtime-sink` 8, `runtime-guard` 6,
+`config-diff` 1) now answer only "which code, which subject, what happened"; severity, channel, merge key and
+`pluginHint` are derived.
+
+### Changed — the last 15 sites go through `emitAlarm`
+
+`createT2Sink` takes the projection mode (default `shadow`, same as the config default), and the T2 modules pass
+`source: 'runtime_hook'` / `'sentinel'` / `'local_scan'` explicitly. Subjects are now a decision, not an
+afterthought: a plugin that was attributed to is the subject; T2 observations with no attribution are the host
+(`kind: 'other'`, and so they produce no `pluginHint` — misattribution is worse than none); vet's own machinery
+(sidecar, sentinel lifecycle, stripped hooks) is `SELF_SUBJECT`; T1 resource readings (`mem`/`fork`/`fd`/
+`growth`) are the host process.
+
+### Changed — the official housekeeping row has its own code
+
+It used to borrow `fs-probe` while carrying a literal merge key that only this row may use. It now reports
+`official-housekeeping-probe` (the registry row that was waiting for it). The alarm `id` and `mergeKey` are
+unchanged, so dedupe buckets and persisted "dismissed" keys survive.
+
+### Fixed — a strict-mode mismatch could be swallowed
+
+`sink`'s top-level catch exists so observation can never become a DoS surface on the plugin. It also swallowed
+the strict-mode projection error, which would have made CI green while equivalence was already broken. The
+mismatch is now a distinct error class and that catch re-throws it.
+
+### Verified
+
+- Full suite under `VET_DOMAIN_SHADOW_STRICT=1`: 99 files / 1515 passed / 1 skipped. Zero projection mismatches
+  on any path the suite exercises — that, not the new test, is the equivalence proof.
+- New `test/domain-record-sites.test.ts`: scans `src` for `status.record` bypasses (so the 38th raw site fails
+  CI), pins the eight uncovered shapes (T1/sentinel/heartbeat/config diff) against their literals, and drives the
+  T2 pipeline in all three modes asserting `legacy`/`shadow`/`active` produce identical alarms.
+
+### Behaviour note
+
+One user-visible change: the aggregated official housekeeping row displays `official-housekeeping-probe` instead
+of `fs-probe`. Nothing else changes; the row was already `info` and already folded into one line.
+
+## [0.5.5] - 2026-10-31
+
+Receipts, part 2: **the second boundary that blocks now says so with evidence**. No new detection and no new
+blocking — the `VET BLOCKED` claim at `tools/execute` gets the same falsifiable backing the N7 path got in 0.5.2.
+
+### Changed — `tools/execute` interception writes a receipt
+
+`tool_call` was already a `Boundary` in the type union and had no receipt: "VET BLOCKED" was a sentence vet
+wrote about itself. The guard now records an attempt at the decision point and a forward mark on the line right
+before `next()`, builds a `Receipt` (`applied` only when deny + interception before the tool body + this
+attempt's original call did not enter), remembers it, and derives the claim from it: if the receipt is ever not
+`applied`, the text becomes `VET 拦截判定未生效（回执：…）` instead of claiming a block.
+
+### Fixed — the oracle is per attempt, not global
+
+The old oracle was two process-wide integers. That is fine for the synchronous fs path, and wrong for the tool
+path: its decision window contains an `await` (the payload goes through the scanner), so two concurrent tool
+calls interleave. With global counters, call A's pass-through lands inside call B's decision window and B's
+receipt reads `failed` — a real block reported as a failed one. An honest error in the wrong direction is still
+an error. `noteAttempt(boundary)` now returns an attempt token; `noteForwarded(token)` marks that token only;
+`operationId` is numbered per boundary (`tool_call#1`, `fs_write#2`) instead of off a global sequence.
+
+### Fixed — tool-call blocks were missing from `stats.blockedCount`
+
+Same class of omission as round-15 for N7: the panel's "blocks" counter did not see `tools/execute` interception
+at all. It does now.
+
+### Not covered, and why
+
+- `pre_load` (static deny) gets no receipt: from inside the `internal/plugin` listener nothing can observe "the
+  plugin was mounted", so the third guard ("the original call did not enter") would be a tautology. A receipt
+  that can only ever say `applied` is the self-report 0.5.2 set out to remove.
+- net/spawn have no interception at all — they are observation-only hooks. There is no intervention to receipt;
+  the honest statement about them is a coverage row (`0.5.3`/`0.5.4`), not a receipt.
+
+## [0.5.4] - 2026-10-31
+
+Coverage, part 5: **the OSV row answers its own question**. No new detection — the scanner stopped hiding how
+much of the OSV phase actually happened, so `intel_osv` is no longer a permanent `partial`.
+
+### Changed — `intel_osv` is computed from counts, not from the request
+
+`scanWithOsv` now attaches `report.osv = { phase, targets, attempted, answered }`. "The request carried
+`osv: true`" says we *asked*; only the counts can say we were *answered*.
+
+- `covered` only when every eligible target was queried **and** every query got an answer — a "zero
+  vulnerabilities" answer is an answer;
+- `partial` with `osv-unanswered:<failed>/<attempted>` when a lookup went out and nothing came back, and with
+  `osv-unqueried:<n>` when the budget or the finding cap stopped the loop early. The two are different facts and
+  get different reasons: "we asked and got silence" is not "we never asked";
+- `unknown` with `osv-budget-exhausted` when nothing went out at all — no evidence, not "partial evidence";
+- `excluded` with `osv-no-target` when there was nothing queryable (no package.json, no exact version): the
+  surface was not in play, which is not the same as covered;
+- `partial` with `osv-phase-overran` plus the counts at the cut when the phase-level hard timeout stopped it.
+
+Failed lookups are **derived** (`attempted − answered`), never stored: two numbers that can disagree will
+disagree one day, and then nobody knows which one is true. For the same reason `phase` is created as `overran`
+and only a normal return from `checkOsv` flips it to `ran` — when `withHardTimeout` cuts the phase the function
+never returns, and the counters already inside the object are all that is left (facts up to the cut).
+
+### Changed — deny mode's OSV is `excluded`, not "asked and unanswered"
+
+The deny path runs synchronously and deliberately makes no network calls (P2-7). It used to report
+`intel_osv: partial (osv-outcome-not-reported)`, which claimed we asked. Both OSV rows now report `excluded`
+with `osv-not-run-sync`: a known "we did not ask" and an unknown "we asked and heard nothing" are different
+facts, and the panel said the wrong one.
+
+### Added — validation at the consumer, not trust in the writer
+
+The counts cross a process boundary, so `guard/coverage.ts` treats them as untrusted input: non-finite counts
+fall back to "not reported", `attempted` is clamped to `targets` and `answered` to `attempted`, and an
+unrecognised `phase` is read as `overran` — never as "finished". New reason keys are translated in both
+languages (`osv-not-run-sync`, `osv-budget-exhausted`, `osv-phase-overran`, `osv-unanswered`, `osv-unqueried`,
+`osv-no-target`); the detail (`2/5`, `3`) stays attached after the translation.
+
+### Notes
+
+- **No engine-version bump.** The field is attached by the async `scanWithOsv` path only and never enters the
+  report cache (`scan()` caches the static report), so old cache entries stay valid and nothing needs rescanning.
+- Still open: the 8-dependency cap and range-pinned versions are documented boundaries of `deps_direct`, not
+  statistics — that row does not reflect them yet; net/spawn interception still has no receipt oracle.
+
+## [0.5.3] - 2026-10-31
+
+Coverage, part 4: **an alarm becomes a row**. User-visible change — `esm-guard-coverage` no longer appears as a
+yellow card. Nothing was dropped; the same fact is now stated where it can be stated precisely.
+
+### Changed — C2 (ESM named-import blind spot) is a coverage row, not an alarm
+
+The blind spot was never a "risk finding"; it is a statement about how much of one subject's runtime surface we
+can see. Alarms are events, so it needed a persisted per-plugin dedupe store (`known-boundaries.json`), a session
+fallback map, an official/third-party severity split and a debounced boot summary — all of it machinery whose
+only job was to stop the same sentence from repeating. Coverage rows are state, so none of that is needed.
+
+- `runtime_fs` / `runtime_net` / `runtime_spawn` for that subject become `partial` with reason
+  `esm-named-import:<modules>`, and the row is tagged `acknowledged: true` only for official content anchors —
+  the official/third-party distinction survives as a field instead of a severity.
+- The scanner now reports **which** builtins were imported (`capabilities.esmNamedBuiltinModules`, engine
+  `static-v27`), so only the affected surfaces are marked: a plugin importing `child_process` by name no longer
+  implies the fs and net surfaces are partial. Without module names (old cache/old scanner) all three are
+  marked — with missing data, say the worse thing, not the nicer one.
+- Modules in the scanner's ESM-blind set that **no** runtime surface covers (`vm`, `worker_threads`) are
+  deliberately not counted against fs/net/spawn. That blind spot is not caused by ESM, and blaming an unrelated
+  surface would be a different lie; it stays visible in the N1 manifest. The nine surfaces have no "dynamic code
+  evaluation" row — a real gap, now written down instead of being papered over by a coarse alarm.
+- If the hook for a surface is merely missing (not stripped), no `partial` row is attached: "we never looked"
+  (`unknown`) must not be talked over by "we looked partially".
+- Deleted: `guard/known-boundaries.ts`, `hashCapabilities`, the session dedupe map, the boot boundary summary
+  timer. The two registry rows stay on purpose — the registry is also the record of what a code meant, and the
+  0.4.2 equivalence fixture still has to be expressible.
+
+### Added — per-subject coverage (this is what made the convergence possible)
+
+`VetStatus` used to hold **one** nine-row set for "the most recent scan"; scanning fifty packages meant the table
+described the last one. It now keeps one set per subject (LRU, 64 subjects, 24 h shelf life) and `status.json`
+carries the **worst row per surface across subjects**, tagged with the subject it came from:
+
+- no majority vote, no averaging — one package with an unread file tree means `file_tree` is not `covered` for
+  the installation;
+- `coverageSubject` (a name) is only emitted for a single subject; for several, `coverageSubjects` (a count) is
+  emitted instead. Labelling a fifty-package table with one package's name is the ambiguity 0.5.0 set out to fix;
+- rows now carry `subject`, and when two rows tie on severity the **unacknowledged** one wins — an accepted
+  boundary must not hide an unaccepted gap;
+- capped `reasons` from multiple collectors on the same surface are unioned, not replaced: if the hook was
+  stripped *and* the package bypasses it, both facts are true and dropping one of them would be a lie of
+  omission.
+
+### Fixed — three over/under-claims found while wiring it
+
+- `runtime_net` ignored `http2` and `tls` hook targets: stripping either left the surface `covered` and only
+  collapsed the global `runtime_hook_health`. Both are now in the net surface.
+- `networkEgress: false` produced `runtime_net: unknown` — it is a deliberate choice, so it is now
+  `unsupported` (`network-egress-off`). "We don't look" and "we were told not to" are different answers.
+- The panel printed raw reason keys (`scan-skipped:3`). Reasons are now translated with the detail appended, and
+  the tooltip says which package a gap came from and whether it is an accepted boundary.
+
+### Known gaps (unchanged, both still open)
+
+- `intel_osv` stays `partial`: the scanner does not report how many OSV lookups succeeded or failed, so "we
+  asked" cannot be upgraded to "we got an answer". Needs a scanner-protocol statistic.
+- Receipts still exist only for the N7 fs path; net/spawn interception has no receipt oracle yet.
+
+## [0.5.2] - 2026-10-30
+
+Posture and receipts, part 3 of 3 of the 0.5.x contraction. **No new detection** — the difference is what vet is
+willing to claim.
+
+### Added — effective posture (`status.json.effectivePosture`, panel)
+
+Configuration saying "guard on" is not the same as the guard being on. Six enforcement surfaces (pre-load scan,
+audit gate, runtime fs/net/spawn, N7 confirm block) are now each computed from four independent inputs:
+
+```
+desired   ← config        installed ← actually attached
+supported ← this build    healthy   ← integrity heartbeat
+effective = worst(desired ∧ supported, installed, healthy)
+```
+
+A lattice, not a state machine: nothing persists and nothing evolves. Six surfaces × sixteen input combinations
+are enumerated in tests (96 cells). `desired ≠ effective` is shown on the panel and never silently rounded up to
+"looks fine"; `off` (the user turned it off) is deliberately **not** reported as a gap, while `unsupported`
+(this build cannot) and `degraded` (configured but not in effect) are kept distinct. When an input cannot be
+observed the result is `unknown` rather than `false` — "we don't know" must not be rendered as "broken", and
+certainly not as "enforced".
+
+### Added — receipts that can be falsified
+
+0.4.x had one way to say "blocked": the message vet wrote itself. Nothing could contradict it. N7 interception
+now produces a receipt whose `applied` requires **all three**: the decision is `deny`, the interception point is
+before the real boundary, and the original-call counter did not move. Anything else is `failed`, `not_requested`,
+`not_covered` or `unknown`, and the alarm wording follows the receipt — "blocked" is only claimed when it holds.
+
+The counter is a genuine oracle rather than a tautology: `noteAttempt()` fires where a block could be decided,
+`noteForwarded()` fires immediately before the real function is called. Move the alarm after the original call
+(the 0.3.9 bug class) and `applied` collapses to `failed` on its own.
+
+### Fixed — review pass on the 0.5.x work itself
+
+- **`file_tree` was claiming coverage while files were skipped.** The scanner emits `R8` meta-findings when a file
+  is over budget, too large, or fails per-file processing; `sourceCount` stays positive in all those cases, so the
+  surface read `covered`. It is now `partial` with the skipped count — the files most worth skipping are the ones
+  an attacker would want us to skip.
+- **`intel_osv` was claiming coverage it cannot observe.** The engine degrades silently on network failure, and
+  the report carries no per-query outcome, so the host has no way to know whether advisory data arrived. The
+  surface is now `partial` with reason `osv-outcome-not-reported` ("we asked" is not "we got an answer");
+  `deps_direct` stays `covered` because handing the dependencies to OSV did happen. Tightening this needs the
+  scanner protocol to report OSV statistics — recorded, not done.
+- **Receipts were fabricating a `decisionId`** equal to their own id, implying a decision object that does not
+  exist. 0.5.2 has no decision store, so the field is now omitted rather than invented.
+- **`audit_gate` reported a gap on every fresh install**: a missing archive directory was treated as unreadable.
+  A missing directory means the gate works (it will block, which is the point); only a real read error is a gap.
+- **`postureOf` reported `unknown` for surfaces the user had turned off**; `desired: false` now short-circuits
+  to `off` before observability is consulted.
+- `probeQualification` read whole archive files to look at their first 16 KB; it now reads the head only.
+- `requireAudit` asked two different questions (`hasAuditRecord` in one branch, the qualification state in
+  another); both now go through the qualification state.
+
+### Added — coverage in the `scan_plugin` report
+
+The tool now returns the same nine rows. Its scope is the static surfaces only: runtime surfaces and the
+transitive-dependency radar are left `unknown` (this is a one-shot scan, it says nothing about the runtime
+defences). Agents auditing a package finally see what the verdict was built on — including skipped files and
+unconfirmed advisory lookups.
+
+### Notes
+
+- Receipts cover the N7 fs path only, as planned; net/spawn interception still reports without a receipt.
+- `operationId` is a monotonic counter per boundary, not a proof of anything by itself — it exists so a receipt
+  can be matched to the call it describes.
+- The panel additions are still verified by `typecheck:client` and the bundle build; this repo has no DOM render
+  tests.
+- 0.5.x is complete with this release: seven objects, one registry, one projector (0.5.0), qualification (0.5.1),
+  posture and receipts (0.5.2).
+
+## [0.5.1] - 2026-10-30
+
+Qualification state machine, part 2 of 3 of the 0.5.x contraction. **No new detection** — the audit gate asks a
+different question, and for every archive that existed before this release the answer is unchanged.
+
+### Added — the one real state machine in 0.5.x
+
+Qualification has persistent state, several writers (a reviewer, a content change, a revocation) and it changes
+what is allowed. That is the test for "is this a state machine": intervention is a single guarded step, posture is
+a lattice join. Only this one earned a transition table.
+
+- `src/domain/qualify.ts`: 5 states × 9 events = **45 cells**, total function, no thrown branches — an undefined
+  transition on the load path would fail a plugin load, which is worse than any wrong verdict.
+- Two reductions against the review draft, both already decided in the design: `LEGACY_RECORD_ONLY` is not a state
+  but `qualified.basis`, and `REVOKED` is not a state but an event landing in `unassessed` (state answers "what is
+  allowed now", not "what happened before").
+- **Dominating invariant, structurally enforced**: only `audit_passed` and `legacy_record_found` can reach
+  `qualified`. Time, restarts, cache clears and config changes cannot raise it.
+- Three failure axes stay independent: content change → `recheck_required`; audit-standard change → decided by the
+  impact function (`impacts: false` keeps the qualification); runtime profile/guard change → **unchanged**. The
+  last one is the mass-denial bug this design exists to prevent.
+
+### Changed — the audit gate asks "may this load"
+
+`requireAudit` used to check whether a file exists. It now reads a qualification state through
+`probeQualification()` and admits on `canLoad()`. To keep today's behaviour identical, archives that predate the
+new convention land in `qualified(basis=legacy)`; nothing is retroactively invalidated.
+
+### Added — archive records may bind the bytes they reviewed
+
+`AUDIT_PROTOCOL.md` now documents an optional `subject_sha256: <hex>` line in the archive body:
+
+- present and matching → `qualified(basis=digest)`;
+- present and **not** matching → `recheck_required`, and the alarm says the record exists but was written about
+  different bytes (previously a file on disk cleared anything);
+- absent → `legacy`, deliberately, so an upgrade never denies already-audited plugins.
+
+This is a statement of what was reviewed, not a signature: whoever can write the archive can write a digest. Its
+job is to stop a stale review from clearing new bytes.
+
+### Notes
+
+- The digest is only computed when the archive actually declares one — a plugin whose record predates this
+  convention does not pay for a hash it will not use.
+- If an archive declares a digest but the current one cannot be computed (root unresolvable, budget exceeded),
+  the record qualifies as `legacy` with reason `digest-unverifiable` rather than being denied: an IO failure is
+  not evidence of tampering.
+- "Exception expiry" has no separate lifecycle in 0.4.x; it maps onto the revocation event (→ `unassessed`), and
+  the 45-cell table covers it.
+- `hasAuditRecord` keeps its historical meaning (used by upgrade-diff suppression and the audit centre); the new
+  function answers the different question "is this record applicable to what is installed now".
+
+## [0.5.0] - 2026-10-30
+
+Semantic contraction, part 1 of 3: seven objects, one registry, one projector. **No detection change** — the
+static rule set, the thresholds and the `verdict` computation are untouched, and the new projector is required to
+reproduce the old alarm literals field-by-field on every path the test suite exercises (enforced in CI).
+
+### Why this version exists
+
+The plugin had grown to 15,670 lines across 75 files, and 63% of it sat in `src/guard`. The bloat was not the
+number of detectors: it was that **every detector re-invented its own alarm projection at the detection site** —
+37 sites each writing `{id, severity, source, kind, message, target, pluginHint, mergeKey, at}` and keeping eight
+fields consistent by hand. Adding one detector meant editing three to five of them.
+
+0.5.x replaces that with a small number of semantics that every detector must map onto. This release is the
+plumbing half; 0.5.1 adds qualification, 0.5.2 adds posture and receipts.
+
+### Added
+
+- **Seven semantic objects** (`src/domain/types.ts`): subject, scoped snapshot, coverage, evidence, assessment,
+  decision, receipt, qualification. Pure data — no IO, no clock, no imports from the rest of `src/`.
+- **Runtime validation** (`src/domain/validate.ts`): length/array caps, enum checks, `NaN` timestamps rejected.
+  The validators report, they never repair — silently filling a default turns "the data is broken" into "the
+  data looks fine".
+- **Alarm code registry** (`src/domain/kinds.ts`, 61 codes / 64 rows). The key is `(code, subject dimension)`, not
+  `code`: `esm-guard-coverage`, `scan-fail` and `baseline-mismatch` all have a different severity for official vs
+  third-party subjects. This is now expressed as rows instead of inline ternaries.
+- **Projector** (`src/domain/project.ts`): derives `severity`, `source`, `mergeKey`, `pluginHint` from the
+  registry so a detection site only supplies the facts. Merge-key shapes are enumerated (`none`, `code`,
+  `code:subject`, `code:subject:extra`, `id`, `literal:`) after verifying that all four existing spellings are
+  expressible — changing the format would silently invalidate every user's persisted "dismissed" entries.
+- **`config.domainProjection`**: `shadow` (default) records the old literal and compares the projection against
+  it field by field; `active` records the projection; `legacy` skips projection entirely.
+- **TOCTOU re-check**: for non-official packages the guard captures a scoped snapshot (sorted path/size/content
+  digest with per-file exclusion reasons) before scanning and recomputes it before allowing the load. A mismatch
+  raises `snapshot-drift` (red, naming the changed files) and, in `deny` mode, refuses the load. Previously
+  nothing tied "the bytes we scanned" to "the bytes being loaded": replace the content in between and the old
+  report would clear the new code.
+- **Coverage surface** (`coverage` in `/vet/status.json`): always nine rows. A surface nobody reported on is
+  `unknown`, never `covered`; a disabled capability is `excluded`/`unsupported`, never `covered`. Runtime
+  surfaces are derived from actual hook registration plus the integrity heartbeat, not from configuration.
+- **Panel block** showing how many of the nine surfaces are covered, with the gaps spelled out. Unknown is
+  deliberately not styled as "fine".
+
+### Changed
+
+- `AlarmSeverity` / `AlarmSource` / `VetAlarm` moved into `src/domain/types.ts`; `guard/status.ts` re-exports
+  them. Field shapes are unchanged — they are part of the published contract.
+- Third-party plugins now pay one extra full read of their own files per load (snapshot capture plus the drift
+  re-check). Official packages are exempt: there are several hundred of them at boot, and they already have a
+  content-trust anchor.
+
+### Known gaps (deliberate, not forgotten)
+
+- Scan-report-side `coverage` (the scanner wire protocol) is not part of this release; only `status.json` carries
+  it. The guard-side model is in place.
+- `esm-guard-coverage` still surfaces as an alarm. Converging it into a coverage row is a later step; until then
+  the registry classifies it as coverage metadata only.
+- Coverage is a single "last scan" view, not per-subject.
+- The panel addition is verified by `typecheck:client` and the bundle build; this repo has no DOM render tests, so
+  the layout itself is checked by eye.
+- 0.5.1 / 0.5.2 are not implemented yet.
+
 ## [0.4.2] - 2026-10-30
 
 DSH 0.2.1-rc.5 re-verification, plus a user-reported macOS false-positive fix. **No engine change** — rule set

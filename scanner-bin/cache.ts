@@ -37,6 +37,10 @@ function validCapabilities(c: unknown): boolean {
   }
   // C2（0.1.16）：esmNamedBuiltins 可选布尔（旧条目无此字段也合法；形状校验不拒绝未知键）
   if (m.esmNamedBuiltins !== undefined && typeof m.esmNamedBuiltins !== 'boolean') return false
+  // 0.5.3：esmNamedBuiltinModules 可选字符串数组（v27 前的缓存没有此字段，消费方按「不知哪几个面」降级）
+  if (m.esmNamedBuiltinModules !== undefined) {
+    if (!Array.isArray(m.esmNamedBuiltinModules) || !(m.esmNamedBuiltinModules as unknown[]).every(v => typeof v === 'string')) return false
+  }
   // P0-2 #9（round-11，0.1.21）：ghostDeps/zombieDeps 可选字符串数组（旧条目无此字段也合法）
   for (const key of ['ghostDeps', 'zombieDeps'] as const) {
     if (m[key] !== undefined) {
@@ -82,7 +86,7 @@ function validReport(report: unknown): report is ScanReport {
 export function cacheKey(
   files: CachedFile[],
   rules: Record<string, boolean> | undefined,
-  context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm'; deps?: string; surface?: { configFiles?: boolean; instructionFiles?: boolean }; officialFamily?: boolean } = {},
+  context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm'; deps?: string; surface?: { configFiles?: boolean; instructionFiles?: boolean }; officialFamily?: boolean; dshVersion?: string } = {},
 ): string {
   // round-15 review：哈希改为增量 update + 每段长度前缀——
   // 1) 旧实现先 map+join 出整条 body（全量文件内容的第二份拷贝）再整体 update，
@@ -103,7 +107,14 @@ export function cacheKey(
   // surface 改变输出形状（R17/R18 是否参与）→ 必须入 key，否则开关切换会命中旧形状缓存
   const sf = context.surface
   const surface = sf !== undefined ? `cf:${sf.configFiles !== false ? 1 : 0}|if:${sf.instructionFiles !== false ? 1 : 0}` : 'cf:1|if:1'
-  const ctx = `tk:${context.targetKind ?? ''}|rt:${context.runtime ?? ''}|sb:${context.scanBasis ?? ''}|deps:${context.deps ?? ''}|of:${context.officialFamily === true ? 1 : 0}|${surface}`
+  // 0.5.10（不变式 9）：`targetKind` 的协议默认值就是 'plugin'，规则侧一律判 `=== 'generic'`，
+  // 所以「省略」与「显式 plugin」是同一个语义。键里按语义归槽，而不是按调用方的书写形式——
+  // 否则同一份字节、同一个判定会分裂成两条缓存（工具面一条、加载前扫描一条），而且一旦有人
+  // 把默认值写显，存量缓存会整体失效、几百个包在下次启动重扫一遍。
+  const targetKind = context.targetKind === 'generic' ? 'generic' : ''
+  // 0.5.24：`dshVersion` 改变 R12 需求闸门的判定（同一个包在不同 DSH 上结论不同）→ 必须入 key，
+  // 否则升级后仍会命中旧版本的结论。代价是每次 DSH 升级全量重扫一次——那正是应该重扫的时刻。
+  const ctx = `tk:${targetKind}|rt:${context.runtime ?? ''}|sb:${context.scanBasis ?? ''}|deps:${context.deps ?? ''}|of:${context.officialFamily === true ? 1 : 0}|dv:${context.dshVersion ?? ''}|${surface}`
   h.update(`${ENGINE_VERSION}|${ctx}|${JSON.stringify(rules ?? {})}|`)
   return 'sha256:' + h.digest('hex')
 }

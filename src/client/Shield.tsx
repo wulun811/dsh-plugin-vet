@@ -18,16 +18,19 @@ import { zh } from './i18n.ts'
 import { cardBg, cardInset, getTheme, injectScrollbarStyle, isDark, panelStyle } from './theme.ts'
 import type { T, ThemeTokens } from './theme.ts'
 import { ShieldIcon } from './components/ShieldIcon.tsx'
+import type { ShieldLevel } from './components/ShieldIcon.tsx'
+import { shieldLevel, STALE_MS } from './shield-level.ts'
 import { GlassLayers, StatusBand } from './components/Glass.tsx'
-import { SectionLabel, GroupLabel, Metric } from './components/primitives.tsx'
+import { SectionLabel, GroupLabel, Metric, subCardStyle } from './components/primitives.tsx'
 import { FoldSection } from './components/FoldSection.tsx'
 import { RingSparkCard, trendOf } from './components/RingSparkCard.tsx'
 import type { TrendKind } from './components/RingSparkCard.tsx'
-import { fmtTime, fmtRam } from './utils/format.ts'
+import { fmtTime, fmtRam, fmtRel } from './utils/format.ts'
 import { IntroPanel } from './panels/IntroPanel.tsx'
 import { AlarmTimelinePanel } from './panels/AlarmTimelinePanel.tsx'
 import { PluginsListPanel } from './panels/PluginsListPanel.tsx'
 import { AuditCenterPanel } from './panels/AuditCenterPanel.tsx'
+import { selfCheckProblemCount } from './panels/SelfCheckSection.tsx'
 import { PluginDetailPanel } from './panels/PluginDetailPanel.tsx'
 import { isShieldSnapshotShape } from '../guard/shield-shape.ts'
 import {
@@ -94,11 +97,12 @@ const POLL_MS = 5000
 /** t 缺失时的回退：zh 词典直查。 */
 const zhT: T = key => (zh as Record<string, string>)[key] ?? key
 
-/** 盾牌等级 → 令牌状态色字段。 */
-const COLOR: Record<'green' | 'yellow' | 'red', keyof ThemeTokens> = {
+/** 盾牌等级 → 令牌状态色字段。unknown = 没有结论（数据没到手），用中性灰而非绿。 */
+const COLOR: Record<'green' | 'yellow' | 'red' | 'unknown', keyof ThemeTokens> = {
   green: 'sage',
   yellow: 'ochre',
   red: 'rose',
+  unknown: 'muted',
 }
 
 /**
@@ -326,12 +330,37 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
 
   // moss 主题令牌（深/浅双板自包含，不再需要浅色二次修正）
   const tok = getTheme(dark)
-  const level = snap?.level ?? 'green'
+  /**
+   * 0.5.15：**没有快照 ≠ 一切正常**。
+   *
+   * 旧实现是 `snap?.level ?? 'green'`——后端没应答时（路由未注册 / 宿主没起来 / CSP 挡了 /
+   * 网络断了），盾牌永远显示绿色「守护中」、0 报警，页脚的"更新于"又因 loadedAt===0 被隐藏，
+   * 于是**一个字都不说**。对一个卖"我帮你盯着"的产品，这是最坏的静默：把"我不知道"画成了
+   * "一切正常"。判定本身在 `shield-level.ts`（纯函数、有自己的测试），这里只取结果。
+   */
+  const neverLoaded = snap === null
+  const stale = !neverLoaded && loadedAt > 0 && Date.now() - loadedAt > STALE_MS
+  const level: ShieldLevel = shieldLevel({ hasSnapshot: snap !== null, level: snap?.level, loadedAt, now: Date.now() })
   const color = tok[COLOR[level]]
   const statusLabel = t('status.' + level)
   const count = snap?.alarmCount ?? 0
   const alarms = snap?.alarms ?? []
   const lastScan = snap?.lastScan
+  // 0.5.0：九面覆盖面。旧后端没有这个字段 → 空数组 → 整块不渲染（降级不报错）。
+  const coverage = snap?.coverage ?? []
+  // 0.5.2：六面生效姿态。同样缺席即不渲染。
+  const posture = snap?.effectivePosture ?? []
+  // 0.5.12（用户 2026-11-05）：自检详情整块搬进「审计 & 蜜罐」页，主面板只在审计横条上留一个
+  // 小图标。这里只留异常计数（决定图标颜色与数字）；异常口径与详情渲染共用同一个函数，
+  // 两边各算一遍迟早会漂——0.5.9 那次「6 个面没在看」的误读就是这么来的。
+  const selfProblems = selfCheckProblemCount(coverage, posture, snap?.effectiveConfig, snap?.domainProjection)
+  /** 横条上那个小图标的悬停说明（不占版面，但把「点进去看什么」说清楚）。 */
+  const selfHint = t('selfcheck.title') + ' · ' + (selfProblems > 0 ? selfProblems + ' ' + t('selfcheck.problems') : t('selfcheck.ok'))
+  // 0.5.7：拦截回执。没有回执 = 「本次没有拦截判定」，不是「一切正常」——所以空数组时整块不渲染，
+  // 绝不放一条绿色的「未拦截任何操作」。
+  const receipts = snap?.receipts ?? []
+  const receiptsNow = Date.now()
+  const relUnits = { now: t('rel.now'), min: t('rel.min'), hour: t('rel.hour') }
   const metrics = snap?.metrics
   const guard = snap?.runtimeGuard ?? 'off'
   const profile = tierOverride ?? snap?.profile ?? 'standard'
@@ -512,7 +541,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
             </button>
           </div>
           <div style={{ color: tok.muted, marginTop: 5 }}>
-            {level === 'yellow' ? t('level.yellowAlarm') : t('level.' + level)}
+            {level === 'yellow' ? t('level.yellowAlarm') : stale ? t('level.stale') : t('level.' + level)}
           </div>
 
           {/* 实时指标（P1）：三张环趋势复合卡（当前值+方向一卡读全）+ 两个折叠区收纳细节。
@@ -609,11 +638,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
           <div style={{
             display: 'flex',
             alignItems: 'center',
-            background: cardBg(dark),
-            border: '1px solid ' + tok.borderSoft,
-            borderRadius: 8,
-            boxShadow: cardInset(dark),
-            padding: '8px 10px',
+            ...subCardStyle(dark, tok, '8px 10px'),
           }}>
             <span style={{ width: 8, height: 8, borderRadius: 4, background: guard === 'watch' ? tok.sage : tok.faint, boxShadow: guard === 'watch' ? `0 0 8px ${tok.glow}` : undefined, display: 'inline-block' }} />
             <span style={{ fontWeight: 700, marginLeft: 8, color: tok.ink }}>{guard === 'watch' ? t('guard.on') : t('guard.off')}</span>
@@ -715,11 +740,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
           {tierOpen && (
             <div style={{
               marginTop: 6,
-              background: cardBg(dark),
-              border: '1px solid ' + tok.borderSoft,
-              borderRadius: 8,
-              boxShadow: cardInset(dark),
-              padding: '8px 10px',
+              ...subCardStyle(dark, tok, '8px 10px'),
             }}>
               <div style={{ display: 'flex', gap: 6 }}>
                 {(['standard', 'hardened', 'paranoid'] as const).map(tier => (
@@ -781,6 +802,40 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 </span>
                 <span style={{ fontSize: 11, color: tok.faint }}>{lastScan.staticScore} {t('points')}</span>
                 <span aria-hidden="true" style={{ fontSize: 10, color: tok.faint }}>→</span>
+              </div>
+            </>
+          )}
+
+          {/* 0.5.7：拦截回执。这一栏回答的是「它到底拦住过没有」——0.4.x 的答案只有我们自己
+              写的日志。只有 applied 才画成「已拦下」；failed（判定要拦、原调用却进来了）用
+              最醒目的颜色，那是最该被看见的一种故障。超过 TTL 的回执后端已滤掉，这里不补历史。 */}
+          {receipts.length > 0 && (
+            <>
+              <SectionLabel pal={tok}>{t('receipt.title')}</SectionLabel>
+              <div
+                style={{
+                  background: cardBg(dark),
+                  border: `1px solid ${tok.borderSoft}`,
+                  borderRadius: 8,
+                  boxShadow: cardInset(dark),
+                  padding: '7px 10px',
+                  fontSize: 11,
+                }}
+              >
+                {receipts.map((r) => (
+                  <div key={r.boundary} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                    <span style={{ color: tok.muted }}>{t('receipt.boundary.' + r.boundary)}</span>
+                    <span
+                      style={{
+                        fontWeight: 600,
+                        color: r.claimsBlocked ? tok.sage : r.result === 'failed' ? tok.rose : tok.faint,
+                      }}
+                    >
+                      {t('receipt.result.' + r.result)}
+                    </span>
+                    <span style={{ marginLeft: 'auto', color: tok.faint }}>{fmtRel(r.attemptedAt, receiptsNow, relUnits)}</span>
+                  </div>
+                ))}
               </div>
             </>
           )}
@@ -874,8 +929,10 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
             </>
           )}
 
-          {/* 审计栏（P3，row13）：🍯蜜罐状态｜⏳待审｜🆕新装 → 整行打开审计&蜜罐中心。
-              旧后端无 audit 字段时整行隐藏（向后兼容）。 */}
+          {/* 审计栏（P3，row13）：🍯蜜罐状态｜⏳待审｜🆕新装｜🔍 → 整行打开审计&蜜罐中心。
+              旧后端无 audit 字段时整行隐藏（向后兼容）。覆盖面/生效姿态与 audit 同为 status.json
+              字段、且 audit 出现得更早（P2 就有），所以跟着这一行走——不会出现「有自检数据、
+              却没有入口」的悬空态。 */}
           {snap?.audit !== undefined && (() => {
             const a = snap.audit
             const pendingN = a.pendingAudits.length
@@ -907,16 +964,30 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 <span>⏳ {t('audit.pendingShort')} <b style={{ color: pendingN > 0 ? tok.ochre : tok.muted }}>{pendingN}</b></span>
                 <span aria-hidden="true" style={{ color: tok.borderSoft }}>|</span>
                 <span>🆕 {t('audit.newShort')} <b style={{ color: freshN > 0 ? tok.ochre : tok.muted }}>{freshN}</b></span>
-                <span aria-hidden="true" style={{ marginLeft: 'auto', color: tok.faint }}>→</span>
+                {/* 0.5.12：自检详情整块搬进审计页，这里只留一个小图标（出问题时带数字）。
+                    它和其余三段共用这一行——主面板因此少掉一整行「自检详情 · 未见异常」。 */}
+                <span
+                  title={selfHint}
+                  style={{ marginLeft: 'auto', color: selfProblems > 0 ? tok.ochre : tok.faint, fontWeight: selfProblems > 0 ? 700 : 400 }}
+                >
+                  <span aria-hidden="true">🔍</span>{selfProblems > 0 ? ` ${selfProblems}` : ''}
+                </span>
+                <span aria-hidden="true" style={{ color: tok.faint }}>→</span>
               </button>
             )
           })()}
 
           {/* 底部（关于入口 = 守卫行的 ? 问号，footer 不再重复） */}
           <div style={{ display: 'flex', alignItems: 'center', marginTop: 12, paddingTop: 8, borderTop: '1px solid ' + tok.borderSoft }}>
-            {loadedAt > 0 && (
-              <span style={{ fontSize: 10.5, color: tok.faint }}>{t('footer.updated')}{fmtTime(loadedAt)}</span>
-            )}
+            {/* 0.5.15：从未拿到快照时也要说话——旧实现在这里什么都不显示，配合默认绿
+                就是「静默地宣称一切正常」。现在显式写「未连接」。 */}
+            {neverLoaded ? (
+              <span style={{ fontSize: 10.5, color: tok.muted }}>⏳ {t('status.unknown')}</span>
+            ) : loadedAt > 0 ? (
+              <span style={{ fontSize: 10.5, color: stale ? tok.ochre : tok.faint, fontWeight: stale ? 700 : 400 }}>
+                {t('footer.updated')}{fmtTime(loadedAt)}{stale ? ' · ' + t('status.unknown') : ''}
+              </span>
+            ) : null}
             <button
               type="button"
               onClick={() => { loadRef.current() }}
@@ -1039,6 +1110,9 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
                 <div style={{ position: 'absolute', top: 0, bottom: 0, left: '100%', width: SUB_W, zIndex: 20 }}>
                   <AuditCenterPanel pal={tok} dark={dark} t={t}
                     audit={snap?.audit}
+                    coverage={coverage} posture={posture}
+                    config={snap?.effectiveConfig} projection={snap?.domainProjection}
+                    coverageSubject={snap?.coverageSubject} coverageSubjects={snap?.coverageSubjects}
                     onBack={() => setL2(null)} onOpenPlugin={name => setDetail({ name })} />
                 </div>
               )}

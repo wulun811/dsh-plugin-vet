@@ -74,6 +74,10 @@ Depending on the plugin's exposed capabilities, verify with `read`/`grep`/`web_s
 - Entry & declarations: exports/main points to something real and exports the standard plugin shape
   (name / Config / apply(context, config)); the services declared in `inject` are actually injected and used
   consistently
+- DSH version requirements: `engines.dsh` / `@deepseek-ai/dsh-*` peers name a range that admits the **running**
+  host (R12 checks the shapes and compares the range; note that DSH pins exact versions in official artifacts,
+  so a plugin published against the previous release is refused at install — confirm the plugin is meant for
+  this DSH before recommending it)
 - Config correctness: the Config schema matches the keys the code actually reads one-for-one (reading keys that
   don't exist, type mismatches, unguarded null/empty)
 - Lifecycle hygiene: event listeners/timers/subprocesses have dispose paths; hot reload (re-apply) is
@@ -170,6 +174,62 @@ vet provides two enforcement layers (after enabling `requireAudit: true` in conf
 > the agent reviewed the plugin per this protocol.
 > Even if the agent skips the protocol, an unaudited plugin cannot load (in deny) — that is where "enforced"
 > lands: not controlling the agent's thinking, but making "unaudited" become "unusable".
+
+### Record format (0.5.1+)
+
+The file name remains the whole contract for *existence*: `<plugin>-<version>-<yyyyMMdd-HHmmss>.md` under
+`~/.dsh/vet/audits/`. A record without a version segment is only matched loosely, and a record for another
+version does not qualify the installed one.
+
+The archive body **may** declare the bytes it was written against, as one line near the top:
+
+```
+subject_sha256: <64 hex characters>
+```
+
+- **present and matching** → the record qualifies as `basis=digest`;
+- **present and not matching** → the plugin is `recheck_required`: the record exists but it was written about
+  different bytes, so it is not a statement about what is installed now, and `vet-audit-protocol` must be run
+  again;
+- **absent** → the record qualifies as `basis=legacy`. This is deliberate: 0.4.x never asked for this line, and
+  retroactively invalidating every existing record would deny every already-audited plugin on upgrade day.
+
+The digest is `sha256` over the same file set vet hashes for content baselines (hidden files, `node_modules`,
+symlinks and documentation excluded; 1000 files / 50 MB / 10 s budget). It is a **statement of what was
+reviewed**, not a signature: anyone who can write the archive can write a digest. Its job is to stop a stale
+review from clearing new bytes, which is exactly the case that used to slip through.
+
+### The rule set the conclusion was reached under (0.5.20)
+
+A record **may** also declare which static engine produced the scan evidence it rests on, and what that scan
+said:
+
+```
+rule_set_version: static-v27
+scan_verdict: clean
+```
+
+Both lines are optional, and they are used as a pair. When the engine in the record differs from the engine this
+build ships, vet asks one question before honouring the record: **would the current rule set decide differently
+for this package?** It answers with the most recent scan summary for the same name and version, provided that
+summary was produced by the current engine and its verdict is worse than the one recorded:
+
+- **worse** (`clean` → `suspicious`/`critical`) → `recheck_required`, with a message naming the rule set rather
+  than the digest. Run `vet-audit-protocol` again against the installed bytes.
+- **same, better, or unanswerable** (no summary, summary from an older engine, version mismatch, `scan_verdict`
+  absent) → the record stands. Reasons are recorded on the qualification state (`standard-irrelevant` /
+  `standard-unevaluated`) so the answer is auditable instead of silent.
+
+Why the impact function and not "engine changed → everything is stale": the latter is a mass denial on upgrade
+day, and a rule-set change is not evidence that a package changed. Only a different conclusion about *this*
+package is.
+
+**The one-load window is real and stated here rather than glossed over.** The gate runs before the scan — it has
+to, because blocking must happen before the mount — so on the first load after an engine upgrade it only has
+evidence written by the previous engine, which is unanswerable, and the record stands. That load is itself
+scanned (when `autoScan` is on, which is the default) and the fresh verdict lands in the scan summary, so the
+*next* load is the one that can require a re-audit. With `autoScan: false` nothing ever refreshes that summary,
+so the re-audit never triggers — a knowing trade, not a silent one: the state still carries `standard-unevaluated`.
 
 ## Boundary (vet's responsibility)
 

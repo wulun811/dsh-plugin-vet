@@ -39,9 +39,13 @@ jobs:
         run: npx vitest run --coverage
         if: matrix.os == 'ubuntu-latest'
 
-      - name: Tests (darwin real ps/lsof integration, no coverage)
+      # 0.5.0 步骤 3：影子期等价门禁。严格模式下投影与旧字面量任何字段不等价都会抛错，
+      # 所以这一遍跑的是「真实调用路径上的投影等价性」，不是又跑一遍同样的测试。
+      - name: Tests (darwin real ps/lsof integration, no coverage; shadow strict)
         run: npx vitest run
         if: matrix.os == 'macos-latest'
+        env:
+          VET_DOMAIN_SHADOW_STRICT: '1'
 
       # round-16（QA-3/CI 补漏）：变异击杀门禁与打包完整性每次提交都跑（双 OS）。
       - name: Mutant gate
@@ -49,6 +53,10 @@ jobs:
 
       - name: Pack integrity
         run: node scripts/check-pack-integrity.mjs
+
+      # 0.5.13：真的打包 → 解包 → import 宿主入口（工作区源码树检查不到的路径/入口问题）。
+      - name: Pack smoke (npm pack → unpack → import)
+        run: npm run check:pack-smoke
 
       # 发布自扫门禁（钉扎一致性 + decisive 声明完整）：要求当前版本已钉扎且字节匹配——
       # 只在 tag（发布候选）上强制；main 分支开发态（未重钉的 dev-tree）不挡日常提交。

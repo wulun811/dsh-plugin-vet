@@ -30,7 +30,7 @@ describe('R19 typosquat 观测（P4/G-9，round-13）', () => {
   })
 
   it('依赖含仿冒名 → R19 info，verdict clean（永不进 verdict）', () => {
-    const dir = writePkg('legit-plugin', { '@deepseek-ai/dshh': '^1.0.0' })
+    const dir = writePkg('legit-plugin', { dshh: '^1.0.0' })
     dirs.push(dir)
     const pkg = join(dir, 'package.json')
     const res = scan({ kind: 'files', files: [pkg] })
@@ -57,7 +57,7 @@ describe('R19 typosquat 观测（P4/G-9，round-13）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vet-r19b-'))
     dirs.push(dir)
     const pkg = join(dir, 'package.json')
-    writeFileSync(pkg, JSON.stringify({ name: 'x', dependencies: { '@deepseek-ai/dshh': '1' } }))
+    writeFileSync(pkg, JSON.stringify({ name: 'x', dependencies: { dshh: '1' } }))
     const off = scan({ kind: 'files', files: [pkg], rules: { R19: false } })
     expect(r19sOf(off.report!).length).toBe(0)
     writeFileSync(pkg, '{ bad json')
@@ -69,7 +69,7 @@ describe('R19 typosquat 观测（P4/G-9，round-13）', () => {
   it('round-15：npm-public 新官方名在名单中；精确名不报、仿冒名报', () => {
     expect(isTyposquatOf('dsh-agant', 'dsh-agent')).toBe(true)
     expect(isTyposquatOf('dsh-subagant', 'dsh-subagent')).toBe(true)
-    const pkg = JSON.stringify({ name: 'p', dependencies: { '@deepseek-ai/dsh-agent': '1', '@deepseek-ai/dsh-agentx': '1' } })
+    const pkg = JSON.stringify({ name: 'p', dependencies: { '@deepseek-ai/dsh-agent': '1', 'dsh-agentx': '1' } })
     const rs = runTyposquat(pkg, 'package.json')
     expect(rs.length).toBe(1)
     expect(rs[0].message).toContain('dsh-agentx')
@@ -87,7 +87,7 @@ describe('R19 typosquat 观测（P4/G-9，round-13）', () => {
       name: 'p',
       dependencies: {
         '@deepseek-ai/dsh-session-telemetry-otel': '1', // 精确官方名 → 不报
-        '@deepseek-ai/dsh-session-telemetry-0tel': '1', // 0≈o 同形 → 报
+        'dsh-session-telemetry-0tel': '1', // 0≈o 同形 → 报
       },
     })
     const rs = runTyposquat(pkg, 'package.json')
@@ -96,10 +96,26 @@ describe('R19 typosquat 观测（P4/G-9，round-13）', () => {
   })
 
   it('runTyposquat 单元：精确官方名不报，仿冒名报一条', () => {
-    const pkg = JSON.stringify({ name: 'p', dependencies: { '@deepseek-ai/dsh': '1', '@deepseek-ai/dshh': '1' } })
+    const pkg = JSON.stringify({ name: 'p', dependencies: { '@deepseek-ai/dsh': '1', dshh: '1' } })
     const rs = runTyposquat(pkg, 'package.json')
     expect(rs.length).toBe(1)
     expect(rs[0].message).toContain('dshh')
     expect(rs[0].message).not.toContain('@deepseek-ai/dsh"') // 精确名自身不出现为候选
+  })
+
+  it('0.5.22：官方 scope 内的名字不报（实测 @deepseek-ai/dsh-spill 被 dsh-skill 误报）', () => {
+    // 官方装机物里确实有 dsh-spill / dsh-spill-local / dsh-spill-policy——剥掉 scope 后
+    // 与 dsh-skill 编辑距离 1。但 scope 是 npm 的发布权限边界，攻击者发不进 @deepseek-ai：
+    // 这个信号只在"官方又要发新包了"时响，正是用户说的"不重要"。
+    const official = JSON.stringify({
+      name: '@deepseek-ai/dsh-spill',
+      dependencies: { '@deepseek-ai/dsh-spill-policy': '1' },
+    })
+    expect(runTyposquat(official, 'package.json')).toEqual([])
+    // 换了个 scope 的仿冒仍然报：那个 scope 攻击者能发布
+    const mimic = JSON.stringify({ name: 'p', dependencies: { '@deepseek-ai-look/dsh-spill': '1' } })
+    const rs = runTyposquat(mimic, 'package.json')
+    expect(rs.length).toBe(1)
+    expect(rs[0].evidence).toContain('@deepseek-ai-look/dsh-spill')
   })
 })

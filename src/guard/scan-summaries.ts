@@ -32,6 +32,11 @@ export interface ScanSummary {
   sourceCount?: number
   /** 去重后的命中规则码（含 'OSV' 表示有漏洞库命中；空数组 = 零命中）。 */
   ruleCodes: string[]
+  /**
+   * 产出这条结论的扫描引擎（0.5.12，不变式 4）。缺席 = **0.5.12 之前的记录**，当时没有记，
+   * 不要回填一个"当前版本"——那会让一条不可能知道的旧结论看着像今天刚判的。
+   */
+  engine?: string
   /** OSV 命中摘要句（首条）；无命中/未启用时缺省。 */
   osv?: string
 }
@@ -146,6 +151,9 @@ export function recordScanSummary(summary: ScanSummary): void {
         prev === undefined ||
         prev.verdict !== summary.verdict ||
         prev.version !== summary.version ||
+        // 0.5.12：引擎变了就该重写——否则一条旧规则集产出的结论会一直挂在"最近扫描"上，
+        // 而读者以为它是当前规则给的。
+        prev.engine !== summary.engine ||
         !sameRuleCodes(prev.ruleCodes, summary.ruleCodes)
       if (!changed) return
       store.records[key] = summary

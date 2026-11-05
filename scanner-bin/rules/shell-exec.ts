@@ -3,7 +3,7 @@ import type { Finding, RuleContext, Severity } from '../protocol.js'
 import { walk, stringyValue, lineOf } from '../ast.js'
 import { tryDecodeLiteral } from '../decode.js'
 import { moduleBindings } from '../capability.js'
-import { isTestOrCiFile } from './process-direct.js'
+import { isTestOnlyFile } from './process-direct.js'
 
 type DecodeMethod = 'base64' | 'hex' | 'charCode' | 'concat' | 'template'
 
@@ -155,7 +155,7 @@ function isExecCall(n: ts.CallExpression, cpRefs: Set<string>, execAliasRefs: Se
 export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   const { cpRefs, execAliasRefs } = moduleBindings(sf)
   const generic = ctx.request.targetKind === 'generic'
-  const testOrCi = isTestOrCiFile(ctx.filePath ?? sf.fileName)
+  const testOrCi = isTestOnlyFile(ctx.filePath ?? sf.fileName, ctx.entryFiles)
   const found: Finding[] = []
   // require('child_process').exec(...) 直调形态无解构绑定（cpRefs 为空）——walk 中识别为
   // 「文件确实引用 child_process」，供 isExecCall 的 require-base 分支与文件级语料闸门使用。

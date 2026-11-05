@@ -7,7 +7,7 @@ import { patchModule, DEFAULT_HOOK_CONFIG, isSensitivePath } from '../lib/guard/
 import { isSensitiveFsPath, saveCapabilities, loadCapabilities, consumeCapabilitiesTamper, setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
 import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
 import { saveBaseline, loadBaseline, consumeBaselineTamper, setBaselineDirForTest } from '../lib/guards/content-baseline.js'
-import { setKnownBoundariesDirForTest } from '../lib/guard/known-boundaries.js'
+import { brandVetHook, registerHookTarget, resetHookRegistry } from '../lib/guard/runtime-heartbeat.js'
 import { setOfficialCatalogDirForTest, setCatalogAutoRefresh, refreshOfficialCatalogFromRegistry } from '../lib/guards/official-catalog.js'
 import { pidCmdlineIsVetSidecar, safeKillSidecar } from '../lib/guard/runtime-guard.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
@@ -153,7 +153,7 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
     })
   })
 
-  describe('C2 ESM 具名导入盲区标记 + 接线', () => {
+  describe('C2 ESM 具名导入盲区：从黄牌改成覆盖面行（0.5.3）', () => {
     // round-20 review（测试写穿真实环境）：internal/plugin 接线用例会触发
     // recordScanSummary/recordVersionScan 写盘——不隔离 caps/summaries 就会把
     // @esm-test/pkg 写进真实 ~/.dsh/vet/（用户环境残留之一）。与 plugin.test.ts 同纪律。
@@ -162,28 +162,34 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
       sandbox = mkdtempSync(join(tmpdir(), 'vet-esm-iso-'))
       setCapabilitiesDirForTest(join(sandbox, 'caps'))
       setSummariesDirForTest(join(sandbox, 'summaries'))
-      // 0.3.3（P3）：known-boundaries 同样落 ~/.dsh/vet/——不隔离则 @esm-test/pkg
-      // 记录跨进程残留（二次运行 isKnownBoundary=true → 不报警 → 接线断言失败）
-      setKnownBoundariesDirForTest(join(sandbox, 'known'))
+      // 覆盖面里只把 partial 挂到**钩子真的在看**的面；测试进程没有装配运行时守卫，
+      // 就手工登记一个完整的 child_process 钩子，模拟「运行时守卫在 watch」的真实状态。
+      const execSync = (): void => {}
+      brandVetHook(execSync)
+      registerHookTarget('child_process', { execSync }, ['execSync'])
     })
     afterEach(() => {
       setCapabilitiesDirForTest(undefined)
       setSummariesDirForTest(undefined)
-      setKnownBoundariesDirForTest(undefined)
+      resetHookRegistry()
       rmSync(sandbox, { recursive: true, force: true })
     })
-    it('具名/命名空间导入内建危险模块 → capabilities.esmNamedBuiltins = true', async () => {
+    it('具名/命名空间导入内建危险模块 → capabilities.esmNamedBuiltins + 具体模块', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'vet-esm-'))
       try {
         writeFileSync(join(dir, 'a.js'), "import { readFileSync } from 'node:fs'; import * as http from 'node:http'; readFileSync('/x')")
         const res = scan({ kind: 'files', files: [join(dir, 'a.js')] } as ScanRequest)
         expect(res.report!.capabilities?.esmNamedBuiltins).toBe(true)
+        // 0.5.3：布尔之外还要给出命中的模块——覆盖面靠它决定哪个执行面 partial
+        expect(res.report!.capabilities?.esmNamedBuiltinModules).toEqual(['fs', 'http'])
         writeFileSync(join(dir, 'b.js'), "import fs from 'fs'; fs.readFileSync('/x')")
         const res2 = scan({ kind: 'files', files: [join(dir, 'b.js')] } as ScanRequest)
         expect(res2.report!.capabilities?.esmNamedBuiltins).toBe(false)
+        // 默认导入不算盲区：它引用的是可被钩子 patch 的对象本身，模块清单也不该有它
+        expect(res2.report!.capabilities?.esmNamedBuiltinModules ?? []).toEqual([])
       } finally { rmSync(dir, { recursive: true, force: true }) }
     })
-    it('internal/plugin 接线：runtimeGuard watch + esmNamedBuiltins → yellow esm-guard-coverage', async () => {
+    it('internal/plugin 接线：runtimeGuard watch + ESM 具名导入 → runtime_spawn partial，不再是黄牌', async () => {
       const profile = mkdtempSync(join(tmpdir(), 'vet-esm-profile-'))
       const pkg = join(profile, 'node_modules', '@esm-test', 'pkg')
       mkdirSync(pkg, { recursive: true })
@@ -203,21 +209,80 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
         } as never, status)
         const h = ctx.handlers.get('internal/plugin')![0]
         await h({ uid: 1, state: 0, dispose: vi.fn(async () => {}), entry: { options: { name: '@esm-test/pkg' } } })
-        const alarms = status.snapshot().alarms
-        expect(alarms.some(a => a.kind === 'esm-guard-coverage')).toBe(true)
+        const snap = status.snapshot()
+        // 黄牌退场：这条事实现在是这个主体运行时面上的 partial
+        expect(snap.alarms.some(a => a.kind === 'esm-guard-coverage')).toBe(false)
+        const spawn = snap.coverage.find(c => c.surface === 'runtime_spawn')!
+        expect(spawn.result).toBe('partial')
+        expect(spawn.reasons.join(',')).toContain('esm-named-import:child_process')
+        // 只有真的被具名导入的那个面被标；fs 那一面没有钩子注册 → unknown，不许顺手标 partial
+        expect(snap.coverage.find(c => c.surface === 'runtime_fs')!.result).toBe('unknown')
+        // networkEgress:false → 明确不看，不是「没看过」
+        expect(snap.coverage.find(c => c.surface === 'runtime_net')!.result).toBe('unsupported')
+        expect(snap.coverage.find(c => c.surface === 'runtime_net')!.reasons).toContain('network-egress-off')
       } finally { rmSync(profile, { recursive: true, force: true }) }
     })
   })
 
-  describe('0.3.3 官方信任锚级联 + 三方持久化去重（P1/P2/P3，警报疲劳反馈）', () => {
-    // 官方包 first-seen 判定需写基线 → 隔离 baseline 与 known-boundaries 目录
+  describe('0.5.4：deny 同步路径的 OSV 是「明确没问」，不是「问了没答」', () => {
+    let sandbox: string
+    beforeEach(() => {
+      sandbox = mkdtempSync(join(tmpdir(), 'vet-osv-deny-iso-'))
+      setCapabilitiesDirForTest(join(sandbox, 'caps'))
+      setSummariesDirForTest(join(sandbox, 'summaries'))
+    })
+    afterEach(() => {
+      setCapabilitiesDirForTest(undefined)
+      setSummariesDirForTest(undefined)
+      rmSync(sandbox, { recursive: true, force: true })
+    })
+    it('mode=deny 不发网络请求 → intel_osv/deps_direct 都是 excluded osv-not-run-sync', async () => {
+      const profile = mkdtempSync(join(tmpdir(), 'vet-osv-deny-profile-'))
+      const pkg = join(profile, 'node_modules', '@osv-test', 'pkg')
+      mkdirSync(pkg, { recursive: true })
+      writeFileSync(join(pkg, 'package.json'), JSON.stringify({
+        name: '@osv-test/pkg', version: '1.0.0', main: 'index.js', dependencies: { zod: '4.4.3' },
+      }))
+      writeFileSync(join(pkg, 'index.js'), 'module.exports = 1\n')
+      try {
+        const ctx = new FakeCtx()
+        ctx.baseUrl = profile
+        const status = new VetStatus()
+        installInternalPluginGuard(ctx as never, {
+          mode: 'deny', autoScan: true, scannerTimeoutMs: 15_000, rules: {}, denyOn: 'critical',
+          allowlist: [], requireAudit: false, runtimeGuard: 'off', runtimeIntervalMs: 2000,
+          runtimeMemLimitMb: 2048, runtimeForkBurstN: 5, runtimeFdLimit: 512, runtimeGrowthMb: 256,
+          runtimeGrowthWindowMs: 600_000, osvCheck: true, honeypot: { enabled: false, dir: '' },
+          contentBaseline: true, networkEgress: true, transitiveDeps: false, confirmBlock: 'block',
+          confirmBlockFamily3: 'alarm', confirmBlockFamily4: 'alarm',
+        } as never, status)
+        const h = ctx.handlers.get('internal/plugin')![0]
+        await h({ uid: 1, state: 0, dispose: vi.fn(async () => {}), entry: { options: { name: '@osv-test/pkg' } } })
+        const snap = status.snapshot()
+        // P2-7：deny 的同步路径刻意不做网络查询——那是「明确没问」，与「问了没回报」不是一个事实。
+        // 旧实现把两者混成同一格 partial + osv-outcome-not-reported，等于说错了原因。
+        for (const surface of ['intel_osv', 'deps_direct'] as const) {
+          const row = snap.coverage.find((c) => c.surface === surface)!
+          expect(row.result, surface).toBe('excluded')
+          expect(row.reasons, surface).toContain('osv-not-run-sync')
+          expect(row.reasons, surface).not.toContain('osv-outcome-not-reported')
+        }
+      } finally { rmSync(profile, { recursive: true, force: true }) }
+    })
+  })
+
+  describe('C2 边界的呈现分级：官方内容锚 acknowledged、未验证与三方未承认（0.5.3）', () => {
+    // 官方包 first-seen 判定需写基线 → 隔离 baseline 目录
     let sandbox: string
     beforeEach(async () => {
       sandbox = mkdtempSync(join(tmpdir(), 'vet-c2-iso-'))
       setCapabilitiesDirForTest(join(sandbox, 'caps'))
       setSummariesDirForTest(join(sandbox, 'summaries'))
       setBaselineDirForTest(join(sandbox, 'baseline'))
-      setKnownBoundariesDirForTest(join(sandbox, 'known'))
+      // 覆盖面只把 partial 挂到钩子真的在看的面上——模拟运行时守卫已装配（见上组用例说明）
+      const execSync = (): void => {}
+      brandVetHook(execSync)
+      registerHookTarget('child_process', { execSync }, ['execSync'])
       // 0.3.5（M2）：夹具官方名（official-esm-a/b）不在种子目录 → 先以注入 fetch 并入覆盖层
       // 视为目录内官方；随后关闭自动核对并 stub 全局出网（首见验证走 verifyAgainstRegistry，
       // 测试环境禁止真实 fetch）。
@@ -233,7 +298,7 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
       setCapabilitiesDirForTest(undefined)
       setSummariesDirForTest(undefined)
       setBaselineDirForTest(undefined)
-      setKnownBoundariesDirForTest(undefined)
+      resetHookRegistry()
       setOfficialCatalogDirForTest(undefined)
       setCatalogAutoRefresh(true)
       vi.unstubAllGlobals()
@@ -264,56 +329,60 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
       return status
     }
 
-    it('官方包（first-seen）C2 边界 → info 观察而非黄色：跨包折叠一条、count 累计、不计入 alarmCount', async () => {
+    it('官方包（first-seen）C2 边界 → 覆盖面 partial + acknowledged，不出警报、不抬盾牌', async () => {
       const profile = mkdtempSync(join(tmpdir(), 'vet-c2-official-'))
       try {
         mkOfficial(profile, '@deepseek-ai/official-esm-a')
         mkOfficial(profile, '@deepseek-ai/official-esm-b')
-        // 同一 guard 实例连续扫描两个官方包 → 同 mergeKey 折叠为一条并累计 count
         const status = new VetStatus()
         await fire(profile, '@deepseek-ai/official-esm-a', status)
         await fire(profile, '@deepseek-ai/official-esm-b', status)
         const snap = status.snapshot()
-        const c2 = snap.alarms.filter(a => a.kind === 'esm-guard-coverage')
-        expect(c2.length).toBe(1)
-        expect(c2[0].severity).toBe('info')
-        expect(c2[0].count).toBe(2) // 折叠计数：2 个官方包同一边界
-        expect(c2[0].target).toBe('@deepseek-ai/official-esm-b') // 保留最近一个 target
-        expect(snap.alarmCount).toBe(0) // info 不进警报计价
-        expect(snap.level).toBe('green') // 不抬盾牌（无行为警报）
+        // 0.5.3：不再有 esm-guard-coverage 行——它现在就是覆盖面里的一行 runtime_spawn
+        expect(snap.alarms.filter(a => a.kind === 'esm-guard-coverage').length).toBe(0)
+        expect(snap.alarmCount).toBe(0)
+        expect(snap.level).toBe('green')
+        const spawn = snap.coverage.find(c => c.surface === 'runtime_spawn')!
+        expect(spawn.result).toBe('partial')
+        expect(spawn.reasons.join(',')).toContain('esm-named-import:child_process')
+        expect(spawn.acknowledged).toBe(true) // 官方内容锚 = 已知架构边界，不是新风险
+        expect(spawn.subject).toBeDefined() // 多主体聚合必须写清这行出自谁
+        expect(snap.coverageSubjects).toBe(2)
+        expect(snap.coverageSubject).toBeUndefined() // 多主体时不许拿一个包的名字冒充全体
       } finally { rmSync(profile, { recursive: true, force: true }) }
     })
 
-    it('三方包 C2 边界 → 维持 yellow；同版本同能力重扫不重报（P3），能力差分变化重新报警', async () => {
+    it('三方包 C2 边界 → 未承认的 partial；重扫照旧（状态不是事件，不需要去重机制）', async () => {
       const profile = mkdtempSync(join(tmpdir(), 'vet-c2-p3-'))
       const pkg = join(profile, 'node_modules', '@vet-p3', 'pkg')
       mkdirSync(pkg, { recursive: true })
       writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@vet-p3/pkg', version: '1.0.0', main: 'index.js' }))
       writeFileSync(join(pkg, 'index.js'), "import { execSync } from 'node:child_process'; export default 1")
       try {
-        // 第一次扫描 → yellow（新边界）
         const s1 = await fire(profile, '@vet-p3/pkg')
         const snap1 = s1.snapshot()
-        const c2a = snap1.alarms.filter(a => a.kind === 'esm-guard-coverage')
-        expect(c2a.length).toBe(1)
-        expect(c2a[0].severity).toBe('yellow')
-        expect(snap1.alarmCount).toBe(1)
-        // 第二次扫描（同版本同能力，模拟重启复扫）→ 状态化去重：不重报
+        const row1 = snap1.coverage.find(c => c.surface === 'runtime_spawn')!
+        expect(row1.result).toBe('partial')
+        expect(row1.acknowledged).toBeUndefined() // 三方未审计 = 没被承认为架构边界
+        expect(row1.subject).toBe('@vet-p3/pkg')
+        expect(snap1.coverageSubject).toBe('@vet-p3/pkg') // 单主体：写明是谁的九行
+        expect(snap1.coverageSubjects).toBeUndefined()
+        expect(snap1.alarms.filter(a => a.kind === 'esm-guard-coverage').length).toBe(0)
+        // 同版本同能力重扫 → 结论照旧。旧实现靠 known-boundaries 落盘做「不重报」，
+        // 现在没有可重报的东西：一行状态每次都在，本来就不打扰人。
         const s2 = await fire(profile, '@vet-p3/pkg')
-        const snap2 = s2.snapshot()
-        expect(snap2.alarms.filter(a => a.kind === 'esm-guard-coverage').length).toBe(0)
-        expect(snap2.alarmCount).toBe(0)
-        // 能力差分变化（新增非内建具名导入 → capabilitiesHash 变；builtin 的 esmNamedBuiltins
-        // 形态不变）→ 重新报警——「唯一有信息量的场景」照常新警
+        const row2 = s2.snapshot().coverage.find(c => c.surface === 'runtime_spawn')!
+        expect(row2.result).toBe('partial')
+        expect(row2.acknowledged).toBeUndefined()
+        // 能力变化（多一个第三方具名导入）→ 仍不是警报；唯一的变化源是覆盖面本身
         writeFileSync(join(pkg, 'index.js'), "import { execSync } from 'node:child_process'; import { helper } from 'some-dep'; export default 1")
         const s3 = await fire(profile, '@vet-p3/pkg')
-        const c2c = s3.snapshot().alarms.filter(a => a.kind === 'esm-guard-coverage')
-        expect(c2c.length).toBe(1)
-        expect(c2c[0].severity).toBe('yellow')
+        expect(s3.snapshot().alarms.filter(a => a.kind === 'esm-guard-coverage').length).toBe(0)
+        expect(s3.snapshot().coverage.find(c => c.surface === 'runtime_spawn')!.result).toBe('partial')
       } finally { rmSync(profile, { recursive: true, force: true }) }
     })
 
-    it('官方名但内容未验证（mismatch 未确认）→ 不享信任呈现：C2 仍按 yellow（检测层未关闭）', async () => {
+    it('官方名但内容未验证（mismatch 未确认）→ 不享信任呈现：partial 但未承认', async () => {
       const profile = mkdtempSync(join(tmpdir(), 'vet-c2-mismatch-'))
       try {
         mkOfficial(profile, '@deepseek-ai/mismatch-esm')
@@ -324,10 +393,10 @@ describe('0.1.16 加固——T2 操作面 / store 自检 / 段级匹配 / 侧车
         writeFileSync(join(pkg, 'index.js'), "import { execSync, readFileSync } from 'node:child_process'; export default 1")
         const second = await fire(profile, '@deepseek-ai/mismatch-esm')
         void first
-        const snap = second.snapshot()
-        // mismatch 未确认 → 不走 info 聚合；esmNamedBuiltins 命中仍按 yellow 报警（保守呈现）
-        const c2 = snap.alarms.filter(a => a.kind === 'esm-guard-coverage')
-        expect(c2.some(a => a.severity === 'yellow')).toBe(true)
+        const spawn = second.snapshot().coverage.find(c => c.surface === 'runtime_spawn')!
+        expect(spawn.result).toBe('partial')
+        // 身份未核实就享「已知边界」待遇，等于用名字换信任——这一档必须保持未承认
+        expect(spawn.acknowledged).toBeUndefined()
       } finally { rmSync(profile, { recursive: true, force: true }) }
     })
   })

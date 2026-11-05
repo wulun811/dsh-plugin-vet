@@ -1,7 +1,10 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readdirSync, readSync } from 'node:fs'
 import { join } from 'node:path'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
 import { vetStoreRoot } from '../guard/store-root.js'
+import { getScanSummary, type ScanSummary } from '../guard/scan-summaries.js'
+import { CURRENT_ENGINE } from '../scanner/protocol.js'
+import { INITIAL_QUALIFICATION, transition, type QualificationState } from '../domain/qualify.js'
 
 /**
  * 审计档案检查（D30 强制层）：agent 按 AUDIT_PROTOCOL 审查后落盘健康档案到
@@ -134,8 +137,184 @@ export function hasAuditRecordBatch(entries: AuditRecordProbe[]): Record<string,
   })
 }
 
-/** 提示消息（拦截/报警共用）：引用协议 skill，说明如何完成审查。 */
-export function auditRequiredMessage(pluginName: string): string {
-  return 'vet: 插件 ' + pluginName + ' 尚未完成审计（无健康档案）。' +
-    '请让 agent 执行 vet-audit-protocol skill 完成审查并落盘档案到 ' + archiveDir() + '。'
+/**
+ * 档案里声明的被审内容摘要（0.5.1 起的新约定）。档案正文里一行
+ * `subject_sha256: <64 位十六进制>` 即声明「这条结论是对着这份字节得出的」。
+ *
+ * 没有这一行的老档案一律按 `legacy` 处理——**不是**判它无效。0.4.x 从来没有要求过这一行，
+ * 拿一条今天才立的规矩去追溯昨天的档案，结果就是升级当天全体拒载。
+ */
+const SUBJECT_DIGEST_RE = /^subject_sha256:\s*([0-9a-f]{64})\s*$/im
+
+/**
+ * 规则集版本（0.5.20）：档案里一行 `rule_set_version: static-v27`，说明这份判读是哪套规则
+ * 产出的。缺这一行的档案（0.5.20 之前写的全部档案）按「标准未知」处理——不是判它无效，
+ * 和 `subject_sha256` 一样：拿今天才立的规矩追溯昨天的档案，结果是升级当天全体拒载。
+ */
+const RULE_SET_RE = /^rule_set_version:\s*([A-Za-z0-9._-]{1,64})\s*$/im
+
+/**
+ * 审计当时那条扫描结论（0.5.20）：`scan_verdict: clean|suspicious|critical`。
+ * 与 `rule_set_version` 成对使用——只有知道「旧规则集当时怎么说」，下一句
+ * 「新规则集会不会改判」才有得比。
+ */
+const SCAN_VERDICT_RE = /^scan_verdict:\s*(clean|suspicious|critical)\s*$/im
+
+/** 结论强度序（只用于比较，不参与判定本身）。表外的值一律视为不可比。 */
+const VERDICT_RANK: Readonly<Record<string, number>> = { clean: 0, suspicious: 1, critical: 2 }
+
+/** 只读档案头部：摘要行按协议就写在开头，读全文既慢又把无关内容带进内存。 */
+const ARCHIVE_HEAD_BYTES = 16 * 1024
+
+/** 只读文件头 N 字节。整份 readFileSync 再 slice 会把一个几十 MB 的档案先读进内存。 */
+function readHead(path: string, bytes: number): string {
+  const fd = openSync(path, 'r')
+  try {
+    const buf = Buffer.alloc(bytes)
+    const read = readSync(fd, buf, 0, bytes, 0)
+    return buf.subarray(0, read).toString('utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
+export interface QualificationProbe {
+  readonly name: string
+  readonly version?: string
+  /**
+   * 惰性内容摘要。**只有档案里真的写了 subject_sha256 才会被调用**——
+   * 否则给每个 requireAudit 的包都多算一次全量哈希，为一条还没人用的约定付钱。
+   */
+  readonly contentDigest?: () => string | undefined
+}
+
+export interface QualificationProbeResult {
+  readonly state: QualificationState
+  /** 命中的档案绝对路径（迁移/排障时要说清「凭哪份档案放行」）。 */
+  readonly recordPath?: string
+}
+
+/** 档案名里的时间戳 → 可排序键（兼容 18/19 两种历史格式）。 */
+function timestampKey(fileName: string): string {
+  const m = /-(\d{8})-?(\d{6})[.]md$/.exec(fileName)
+  return m === null ? '' : m[1] + m[2]
+}
+
+/**
+ * 计算某插件当前的资格状态（施工图步骤 6）。
+ *
+ * 与 `hasAuditRecord` 的分工：
+ * - `hasAuditRecord` 回答「历史上有没有审过」——升级差分抑制、审计中心列表都用它，语义不变；
+ * - `probeQualification` 回答「现在能不能加载」——requireAudit 只认它。
+ *
+ * 两者在今天的结果几乎一样（有档案 = 合格），差别在档案带摘要时：摘要对不上就落
+ * RECHECK_REQUIRED，而不再是「有文件就放行」。
+ */
+export function probeQualification(probe: QualificationProbe): QualificationProbeResult {
+  const esc = escapeName(probe.name)
+  return withVetSelfIo((): QualificationProbeResult => {
+    const dir = archiveDir()
+    if (!existsSync(dir)) return { state: INITIAL_QUALIFICATION }
+    let files: string[]
+    try {
+      files = readdirSync(dir)
+    } catch {
+      // 目录不可读：按未评估处理（与 hasAuditRecord 的 fail-closed 一致——deny 会拦）
+      warnUnreadable(dir)
+      return { state: INITIAL_QUALIFICATION }
+    }
+    const matched = files.filter(f => matchesArchiveFile(f, esc, probe.version))
+    if (matched.length === 0) return { state: INITIAL_QUALIFICATION }
+    const newest = matched.slice().sort((a, b) => (timestampKey(a) < timestampKey(b) ? 1 : timestampKey(a) > timestampKey(b) ? -1 : 0))[0]
+    const recordPath = join(dir, newest)
+
+    let head = ''
+    try {
+      head = readHead(recordPath, ARCHIVE_HEAD_BYTES)
+    } catch {
+      // 档案存在但读不出：按无摘要的老档案处理（fail-open 到 0.4.x 行为，不因权限问题拒载）
+      return { state: transition(INITIAL_QUALIFICATION, { type: 'legacy_record_found' }), recordPath }
+    }
+
+    const declared = SUBJECT_DIGEST_RE.exec(head)?.[1].toLowerCase()
+    const legacyState = (): QualificationState => transition(INITIAL_QUALIFICATION, { type: 'legacy_record_found' })
+    if (declared === undefined) {
+      return { state: withStandardChange(legacyState(), head, probe), recordPath }
+    }
+    const actual = probe.contentDigest?.()
+    if (actual === undefined) {
+      // 档案声明了摘要，但我们算不出来（目录解析失败/超预算）：这是「验证不了」，
+      // 不是「对不上」。按老档案放行并留理由，避免把一次 IO 失败变成拒载。
+      const legacy = legacyState()
+      const state: QualificationState = { ...legacy, reasons: [...legacy.reasons, 'digest-unverifiable'] }
+      return { state: withStandardChange(state, head, probe), recordPath }
+    }
+    const verified: QualificationState = { status: 'qualified', basis: 'digest', reasons: ['audit-passed'] }
+    if (actual.toLowerCase() !== declared) {
+      // 摘要对不上 = 内容变了 → 走状态机的 content_changed，而不是在这里特判一个状态
+      return { state: transition(verified, { type: 'content_changed' }), recordPath }
+    }
+    return { state: withStandardChange(verified, head, probe), recordPath }
+  })
+}
+
+/**
+ * 影响函数（0.5.20）：档案写下的规则集版本与当前构建不同时，**只在「新规则集确实会改判」
+ * 的前提下**把状态推成 `recheck_required`。
+ *
+ * 为什么必须带影响函数：不带它的版本是「规则集一变，全体重审」——那是一次大规模拒载，
+ * 而不是严谨。判据只能是这个主体上的具体结论：旧规则集当时说 `scan_verdict`，当前规则集
+ * 对这个包最近一次说的是什么（`scan-summaries` 里那条同版本、当前引擎的记录）。新的更差
+ * 才算改判；相同或更松都不值得让用户重审一遍。
+ *
+ * **一次加载的窗口，写在明处**：门槛跑在扫描之前（拦截必须在挂载之前发生），所以它能用的
+ * 只有**已经记下来**的结论。升级引擎后的第一次加载，摘要还是旧引擎写的 → 判不了 → 放行；
+ * 那次加载的扫描会把摘要刷成新引擎的结论，第二次加载才据此要求重审。这个窗口不是漏洞：
+ * 第一次加载本来就会被静态扫描（`autoScan` 默认开）覆盖，新规则集若真看到什么，
+ * 走的是既有的 `scan-verdict` 告警，不依赖审计门槛。`autoScan: false` 的用户没有这条兜底，
+ * 也就永远等不到重审——这是知情选择，不是静默：这里给出的 reason 会说明「未评估」。
+ *
+ * 三处「说不出话」都落成 `standard-unevaluated`，绝不升级成重审：档案没写判读、摘要不是
+ * 当前引擎产的、版本对不上。判不了就说判不了。
+ */
+function withStandardChange(state: QualificationState, head: string, probe: QualificationProbe): QualificationState {
+  if (state.status !== 'qualified') return state
+  const recordEngine = RULE_SET_RE.exec(head)?.[1]
+  // 档案没写规则集版本 = 0.5.20 之前的档案：不知道，就不判。与引擎相同则是明摆着的「没变」。
+  if (recordEngine === undefined || recordEngine === CURRENT_ENGINE) return state
+
+  const recordVerdict = SCAN_VERDICT_RE.exec(head)?.[1]?.toLowerCase()
+  const recordRank = recordVerdict === undefined ? undefined : VERDICT_RANK[recordVerdict]
+  const summary = recordRank === undefined ? undefined : usableSummary(probe)
+  const nowRank = summary === undefined ? undefined : VERDICT_RANK[summary.verdict]
+
+  // 判不了就**不进状态机**：`standard_changed{impacts:false}` 会留下 `standard-irrelevant`
+  // （「这次标准变化与本包无关」），而我们此刻并没有资格这么断言。只加一条「未评估」。
+  if (recordRank === undefined || nowRank === undefined) {
+    const reason = 'standard-unevaluated'
+    return state.reasons.includes(reason) ? state : { ...state, reasons: [...state.reasons, reason] }
+  }
+  return transition(state, { type: 'standard_changed', impacts: nowRank > recordRank })
+}
+
+/** 只有「同一版本、由当前引擎产出」的摘要才配当对照物；其余不可比，宁可不说。 */
+function usableSummary(probe: QualificationProbe): ScanSummary | undefined {
+  const summary = getScanSummary(probe.name)
+  if (summary === undefined) return undefined
+  if (summary.engine !== CURRENT_ENGINE) return undefined
+  if (probe.version !== undefined && summary.version !== probe.version) return undefined
+  return summary
+}
+
+/**
+ * 提示消息（拦截/报警共用）：引用协议 skill，说明如何完成审查。
+ *
+ * `hint` 只在「有档案但不能用」时出现——那正是一条只写「尚未完成审计」的消息最容易骗人的地方：
+ * 用户明明审过，面板却说他没审。
+ */
+export function auditRequiredMessage(pluginName: string, hint?: string): string {
+  const head = hint === undefined
+    ? 'vet: 插件 ' + pluginName + ' 尚未完成审计（无健康档案）。'
+    : 'vet: 插件 ' + pluginName + ' 的审计档案不能作为当前放行依据——' + hint + '。'
+  return head + '请让 agent 执行 vet-audit-protocol skill 完成审查并落盘档案到 ' + archiveDir() + '。'
 }

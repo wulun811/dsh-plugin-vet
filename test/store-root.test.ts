@@ -9,7 +9,6 @@ import { capabilitiesPath } from '../lib/guard/version-diff.js'
 import { baselinePath } from '../lib/guards/content-baseline.js'
 import { summariesPath } from '../lib/guard/scan-summaries.js'
 import { statsPath } from '../lib/guard/stats.js'
-import { knownBoundariesPath } from '../lib/guard/known-boundaries.js'
 import { officialCatalogPath } from '../lib/guards/official-catalog.js'
 import { forensicsRoot } from '../lib/guard/forensics.js'
 import { contractsRoot } from '../lib/guard/contract.js'
@@ -69,7 +68,6 @@ describe('store-root（0.3.15）：统一解析 + 测试运行时 fail-closed', 
       ['baseline', baselinePath()],
       ['scan-summaries', summariesPath()],
       ['stats', statsPath()],
-      ['known-boundaries', knownBoundariesPath()],
       ['official-catalog', officialCatalogPath()],
       ['forensics', forensicsRoot()],
       ['contracts', contractsRoot()],

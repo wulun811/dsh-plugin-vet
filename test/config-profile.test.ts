@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { VetConfigSchema, applyProfile } from '../lib/config.js'
 import type { VetConfig } from '../lib/config.js'
 import { observationAlarmsFor } from '../lib/guards/internal-plugin.js'
+import { runConfigScan, CONFIG_PRESENCE_MESSAGE } from '../lib/scanner-bin/rules/config-scan.js'
 
 /** 用 schema 解析出带默认值的配置（模拟 cordis 装配后的 resolved config；schemastery schema 可调用）。 */
 const parse = (raw: Record<string, unknown>): VetConfig =>
@@ -123,5 +124,29 @@ describe('observationAlarmsFor（档位观察抬升，verdict 不变）', () => 
       { rule: 'R19', severity: 'info', message: 'c' },
     ])
     expect(out.map(a => a.kind).sort()).toEqual(['r17-observation', 'r18-observation', 'r19-observation'])
+  })
+
+  // 0.5.22：用户实测的一条噪音——「R17 !!js 配置注入观测 1 条（例：!!js ×13）」。
+  // 夹具用**真实** runConfigScan 产物而不是手写对象：这正是 0.5.20 那个「测试自造事件、
+  // 生产永不触发」的教训——文案对不上时下面两条会红，而不是悄悄放行。
+  describe('0.5.22：R17 存在性观测不再抬升（真实产物）', () => {
+    it('只有「配置含 !!js」→ 不产生任何报警', () => {
+      const findings = runConfigScan('a:\n  home: !!js process.env.HOME\n', 'cordis.yml', '/x/cordis.yml')
+      // 这条断言把 scanner-bin 的文案常量与 internal-plugin 的前缀判定接起来：
+      // 任何一侧改文案而另一侧没跟上，这里就红（两个编译单元不能互相 import）。
+      expect(findings.some(f => f.message === CONFIG_PRESENCE_MESSAGE)).toBe(true)
+      expect(observationAlarmsFor(findings)).toEqual([])
+    })
+
+    it('带危险动词的 !!js 仍然抬升（过滤存在性观测 ≠ 关掉整条规则）', () => {
+      const findings = runConfigScan('a: !!js require("child_process").exec("id")\n', 'cordis.yml', '/x/cordis.yml')
+      const out = observationAlarmsFor(findings)
+      const r17 = out.find(a => a.kind === 'r17-observation')
+      expect(r17).toBeDefined()
+      // 3 条 = child_process + require(危险模块) + 子进程调用（存在性的 !!js ×1 已被排除）
+      expect(r17!.message).toContain('3 条')
+      expect(r17!.message).toContain('child_process')
+      expect(r17!.message).not.toContain('!!js ×')
+    })
   })
 })

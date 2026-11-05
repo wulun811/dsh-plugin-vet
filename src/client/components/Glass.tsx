@@ -67,14 +67,15 @@ export function GlassLayers({ tok, hovered }: { tok: ThemeTokens; hovered: boole
   )
 }
 
-export type ShieldLevel = 'green' | 'yellow' | 'red'
+/** 盾牌等级（0.5.15 增加第四态 unknown：数据没到手/已陈旧，既不是「没事」也不是「有事」）。 */
+export type ShieldLevel = 'green' | 'yellow' | 'red' | 'unknown'
 
 /**
  * 面板顶缘状态色带：4px 渐变 + 底部 8px 光晕渐隐（mock .status-band）。
  * 负外边距使其贴住面板圆角顶端（面板 padding 14px）。
  */
 export function StatusBand({ tok, level }: { tok: ThemeTokens; level: ShieldLevel }): ReactNode {
-  const color = level === 'green' ? tok.sage : level === 'yellow' ? tok.ochre : tok.rose
+  const color = level === 'green' ? tok.sage : level === 'yellow' ? tok.ochre : level === 'red' ? tok.rose : tok.muted
   return (
     <div
       aria-hidden="true"

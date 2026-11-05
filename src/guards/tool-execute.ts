@@ -4,6 +4,47 @@ import type { VetConfig } from '../config.js'
 import { scan } from '../scanner/client.js'
 import type { ScanRequest, Verdict } from '../scanner/protocol.js'
 import type { VetStatus } from '../guard/status.js'
+import { buildReceipt, describeReceiptResult, supportsBlockedClaim } from '../domain/receipt.js'
+import { nextOperationId, noteAttempt, noteForwarded, rememberReceipt, type AttemptToken } from '../guard/receipt-oracle.js'
+import { incrementBlocked } from '../guard/stats.js'
+
+/**
+ * 拦截结果（0.5.5）：先写回执，再由回执决定话术。
+ *
+ * 抽成一个函数不是为了短，是为了让「拦住了」这句话只有一个出口——此前它散在返回字面量里，
+ * 谁都可能顺手改一个字而没人发现这句话不再有证据支撑。
+ */
+function blockedResult(
+  exec: ToolExecution,
+  attempt: AttemptToken,
+  notes: readonly string[],
+  reason: string,
+): ToolExecutionResult {
+  const receipt = buildReceipt({
+    id: `tool-block:${exec.name}:${attempt.id}`,
+    boundary: 'tool_call',
+    attemptedAt: Date.now(),
+    action: 'deny',
+    // 拦截点确实在工具本体之前：下面的返回里 next() 被跳过。
+    beforeBoundary: true,
+    forwardedBefore: 0,
+    forwardedAfter: attempt.forwarded ? 1 : 0,
+    operationId: nextOperationId(attempt),
+  })
+  rememberReceipt(receipt)
+  // 0.5.5 补漏：tools/execute 的拦截此前不计入 stats.blockedCount，面板「拦截次数」
+  // 对工具面长期显示 0（与 round-15 修 N7 时同一类漏记）。
+  incrementBlocked()
+  const applied = supportsBlockedClaim(receipt)
+  const why = describeReceiptResult(receipt.result)
+  const claim = applied ? 'VET BLOCKED' : `VET 拦截判定未生效（回执：${why}）`
+  return {
+    content: [{ type: 'text', text: `${claim}: ${notes.join('; ')}` }],
+    isError: true,
+    // 回执没写成 applied 时，错误信息也不能说「被拦截」——话术与证据必须同一来源。
+    error: { message: applied ? `vet: ${exec.name} 被拦截（${reason}）` : `vet: ${exec.name} 拦截判定未生效（${why}）` },
+  } as ToolExecutionResult
+}
 
 /** 拦截目标：三大模型代码执行入口 + workflow。 */
 const TARGET_TOOLS = new Set(['cordis_define', 'cordis_run', 'run_code', 'workflow'])
@@ -66,13 +107,29 @@ export function installToolExecuteGuard(ctx: Context, config: VetConfig, status?
   prevExecuteListenerOff = ctx.on('tools/execute', async (exec: ToolExecution, next) => {
     if (!TARGET_TOOLS.has(exec.name)) return next()
     const payloads = codePayloads(exec)
-    if (payloads.length === 0) return next()
+    // 0.5.5：走到判定点先记一次 attempt。noteForwarded 只在**真正调 next() 之前**调用，
+    // 两者分开才是 oracle——将来若有人把 next() 挪到判定之前，回执会自己塌成 failed，
+    // 而不是继续替我们宣称「已拦截」（见 guard/receipt-oracle.ts）。
+    const attempt = noteAttempt('tool_call')
+    if (payloads.length === 0) {
+      // 没有可扫的载荷：不构成拦截判定，但原调用确实要进来了。
+      noteForwarded(attempt)
+      return next()
+    }
 
     const notes: string[] = []
     let worst: Verdict = 'clean'
     let scanFailed = false
     for (const p of payloads) {
-      const request: ScanRequest = { kind: 'code', language: 'js', runtime: p.runtime, code: p.code }
+      // 0.5.15：`config.rules` 同样要到达 code 通道——否则「关掉 R2」在工具执行面上无效，
+      // 而这是 R5 唯一真正生效的面（ctx-verbs 只在 kind==='code' 或显式 rules.R5 时运行）。
+      const request: ScanRequest = {
+        kind: 'code',
+        language: 'js',
+        runtime: p.runtime,
+        code: p.code,
+        ...(config.rules !== undefined ? { rules: config.rules } : {}),
+      }
       const res = await scan(request, { timeoutMs: config.scannerTimeoutMs })
       if (res.ok && res.report !== undefined) {
         // 0.4.1：工具执行的代码同样落成可忽略告警（subject='tool' 让文案说清是「工具代码」，
@@ -84,7 +141,7 @@ export function installToolExecuteGuard(ctx: Context, config: VetConfig, status?
           at: Date.now(),
           subject: 'tool',
           rules: [...new Set((res.report.findings ?? []).map(f => f.rule))],
-        })
+        }, config.domainProjection)
         // round-5 review（A#15）：扫描器协议漂移出现未知 verdict 时 RANK 查表为
         // undefined——`undefined > RANK[worst]` 恒 false，deny 判定静默失效（fail-open）
         // 且无任何日志。未知 verdict 视为扫描结果不可信，走与 scanFailed 相同的
@@ -109,13 +166,14 @@ export function installToolExecuteGuard(ctx: Context, config: VetConfig, status?
 
     // deny：verdict 达阈值，或扫描失败（fail-closed，M9 对齐）→ 拦截
     if (config.mode === 'deny' && (scanFailed || RANK[worst] >= DENY_RANK[config.denyOn])) {
-      return {
-        content: [{ type: 'text', text: `VET BLOCKED: ${notes.join('; ')}` }],
-        isError: true,
-        error: { message: `vet: ${exec.name} 被拦截（${scanFailed ? '扫描失败' : worst}）` },
-      } as ToolExecutionResult
+      // 0.5.5：这是第二个真的有拦截的边界（第一个是 N7 的 fs_write）。此前「VET BLOCKED」
+      // 只是我们自己写的一句话：next() 到底有没有被调用，没有任何东西能拆穿。回执把
+      // applied 绑在同三条守卫上（deny / 边界之前 / 这次判定的原调用计数未增）。
+      return blockedResult(exec, attempt, notes, scanFailed ? '扫描失败' : worst)
     }
 
+    // 0.5.5：放行路径——原调用真的要进来了，就在 next() 前一行置位。
+    noteForwarded(attempt)
     const result = await next()
     // round-22：宿主契约漂移防护——next() 返回非 ToolExecutionResult 形态（content
     // 缺失/非数组/空）时按原样透传，不在此处二次抛错（下游 handler 的真实异常仍按

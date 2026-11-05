@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve, relative } from 'node:path'
 import type { Finding } from '../protocol.js'
+import { requirementFindings } from './dsh-requirement.js'
 
 /**
  * round-15 review（R12 越界探测）：manifest 里的路径（dsh.bundle.patch / main）可能被
@@ -30,9 +31,13 @@ function existsWithinPkgRoot(pkgRoot: string, p: string): boolean {
  * - 声明的入口文件缺失 → high（加载抛 ERR_MODULE_NOT_FOUND）
  * - 插件意图包缺 name → medium（审计门槛/OSV 按名归档失效）
  * - engines.node 明确低于 DSH 要求（major < 22）→ info
+ * - DSH 需求闸门（0.5.24）→ high：`engines.dsh` / dsh peer 的形态非法（DSH 直接 throw 或判为
+ *   不满足），或声明的范围不接纳**本机正在跑的 DSH**（DSH 会拒绝安装/激活）。版本对照只在
+ *   宿主传入 `dshVersion` 时进行，语义见 `dsh-requirement.ts`（includePrerelease，与 vet 自己的
+ *   已复验范围判定刻意不同）。
  * 非插件意图包不判（避免误伤通用 npm 工具包）。generic 官方包同样适用本规则。
  */
-export function runContract(content: string, file: string, targetKind?: 'plugin' | 'generic', scanBasis?: 'git' | 'npm'): Finding[] {
+export function runContract(content: string, file: string, targetKind?: 'plugin' | 'generic', scanBasis?: 'git' | 'npm', dshVersion?: string): Finding[] {
   const found: Finding[] = []
   void targetKind
   // scanBasis==='git'：仅源码仓（通常不提交 lib/ 等构建产物），入口声明对照发布物无效 → 缺失降 info 不误报
@@ -50,7 +55,12 @@ export function runContract(content: string, file: string, targetKind?: 'plugin'
   const hasDshDep = Object.keys(deps).some(k => k.startsWith('@deepseek-ai/'))
   const dshField = pkg.dsh
   const hasBundleDecl = dshField !== undefined || pkg.cordis !== undefined
-  if (!hasDshDep && !hasBundleDecl) return found // 非插件意图：不做契约判定
+  // 0.5.24：`engines.dsh` 本身就是「我要跑在 DSH 上」的声明，只写它、不写 dsh 依赖的包
+  // 同样要过需求闸门（否则最该被检查的那个形态恰好被 early-return 放过）。
+  const enginesField = pkg.engines
+  const hasDshRequirement = typeof enginesField === 'object' && enginesField !== null
+    && Object.hasOwn(enginesField as Record<string, unknown>, 'dsh')
+  if (!hasDshDep && !hasBundleDecl && !hasDshRequirement) return found // 非插件意图：不做契约判定
 
   const pkgRoot = dirname(file)
 
@@ -129,6 +139,9 @@ export function runContract(content: string, file: string, targetKind?: 'plugin'
       file,
     })
   }
+  // 5) DSH 需求闸门（0.5.24，DSH 0.2.2 起真实生效）：engines.dsh / dsh peer 的形态与
+  // 「会不会被本机 DSH 拒绝」。形态检查不需要版本号；版本对照需要宿主传入 dshVersion。
+  found.push(...requirementFindings(pkg, file, dshVersion))
   return found
 }
 

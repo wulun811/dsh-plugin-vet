@@ -245,6 +245,8 @@ describe('OSV', () => {
       expect(f!.message).not.toContain('（依赖')
       expect(f!.evidence).toBe('id=GHSA-1;alias=CVE-2024-1234')
       expect(res.report!.verdict).toBe('suspicious')
+      // 0.5.4：相位自述统计——问了一条、答了一条，宿主据此才敢把 intel_osv 写成 covered
+      expect(res.report!.osv).toEqual({ phase: 'ran', targets: 1, attempted: 1, answered: 1 })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -286,6 +288,8 @@ describe('OSV', () => {
       expect(res.ok).toBe(true)
       expect(res.report!.findings.some(x => x.rule === 'OSV')).toBe(false)
       expect(res.report!.verdict).toBe('clean')
+      // 没要 OSV 就没有统计：宿主不能把「没问」读成「问了没答」
+      expect(res.report!.osv).toBeUndefined()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -299,6 +303,8 @@ describe('OSV', () => {
       const res = await scanWithOsv({ kind: 'files', files: [join(dir, 'package.json')], osv: true }, { fetchImpl: fail })
       expect(res.ok).toBe(true)
       expect(res.report!.findings.some(x => x.rule === 'OSV')).toBe(false)
+      // 0.5.4：问了、没答上——attempted 与 answered 分开，宿主才能说「问了不等于问到了」
+      expect(res.report!.osv).toEqual({ phase: 'ran', targets: 1, attempted: 1, answered: 0 })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

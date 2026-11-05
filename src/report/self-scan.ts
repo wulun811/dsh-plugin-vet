@@ -195,13 +195,30 @@ export function parseTokens(finding: Finding): ParsedTokens {
   return out
 }
 
-/** 一条 finding 是否全部危险 token 都在声明内（→ 可降级）。任一个不在 → false（保留）。 */
+/**
+ * 一条 finding 是否全部危险 token 都在声明内（→ 可降级）。任一个不在 → false（保留）。
+ *
+ * 0.5.15：**空 token 不再算「已声明」**。
+ *
+ * 旧实现逐条检查「某个 token 类别非空就保留」，五类全空时直接 `return true`——于是
+ * 「一个能说清自己碰到什么能力的 token 都没有」被判成「声明完整、可以降级」。实测两条
+ * 构造器链逃逸（`agent.constructor("return process")()`、`new Function(...)()`）因此被判
+ * declared、`verdict=clean`：**自审信任链上最脆弱的那一格恰好是最该严的那一格**。
+ *
+ * 空 token 的真实含义是「这个 finding 没解析出可核对的能力面」——那既不能证明它安全，
+ * 也不能证明它危险。对**发布门禁**来说，唯一安全的默认是保留（不计入 declared）。
+ * 代价是自扫报告里 info 级条目会更多地留在 retained 里；门禁只拦 critical/high
+ * （`check-self-contract.mjs`），所以红/黄不变，变的是「不再有东西被静默地算成已声明」。
+ */
 export function isDeclared(finding: Finding, tokens: ParsedTokens = parseTokens(finding)): boolean {
   if (tokens.modules.some(m => (UNDECLARED_TRIGGER_MODULES as readonly string[]).includes(m as never))) return false
   if (tokens.env.length > 0) return false
   if (tokens.hosts.length > 0) return false
   if (tokens.fs.length > 0) return false
   if (tokens.spawn.length > 0) return false
+  // 五类全空 = 没解析出可核对的能力面。不构成「已声明」的证据——保留（见上方注释）。
+  // （上面的禁区检查已排除了「modules 里只有禁区项」的情形，这里剩下的 modules 必然是声明集。）
+  if (tokens.modules.length === 0) return false
   return true
 }
 

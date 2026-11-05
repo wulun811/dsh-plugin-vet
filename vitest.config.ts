@@ -1,6 +1,10 @@
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  // 客户端组件（src/client/**）唯一能进 Node 的路径是 react-dom/server 静态渲染；
+  // esbuild 默认 classic JSX 运行时，而组件按 tsconfig.client.json 的 `jsx: react-jsx`
+  // 写（不 import React）——不显式指定 automatic 会 ReferenceError。
+  esbuild: { jsx: 'automatic' },
   test: {
     include: ['test/**/*.test.ts'],
     exclude: ['node_modules/**', 'dsh-src/**', 'lib/**'],

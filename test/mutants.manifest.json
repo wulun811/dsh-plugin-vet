@@ -95,7 +95,8 @@
       "expect": {
         "rules": [
           "R2"
-        ]
+        ],
+        "advisory": "R2 间接 require 形态按 medium 记录（同 R2 在 files 面的一般形态）"
       },
       "origin": "round-5 对抗面：变量间接装载危险模块"
     },
@@ -128,7 +129,8 @@
       "expect": {
         "rules": [
           "R19"
-        ]
+        ],
+        "advisory": "R19 typosquat 恒 info"
       },
       "origin": "R19 对抗面：NFKC 全角化 @deepseek-ai/dshh（编辑距离 1）"
     },
@@ -237,7 +239,8 @@
       "expect": {
         "rules": [
           "R9"
-        ]
+        ],
+        "advisory": "R9 ReDoS medium 不进 verdict"
       },
       "origin": "R9-2 观测档：verdict clean 但 R9 命中（判据=规则的活样本）"
     },
@@ -291,7 +294,8 @@
       "expect": {
         "rules": [
           "R5"
-        ]
+        ],
+        "advisory": "R5 medium 不进 verdict（ctx 逃逸是意图信号）"
       },
       "origin": "ctx 服务面：withheld 观测，verdict 不升级"
     },
@@ -339,7 +343,8 @@
       "expect": {
         "rules": [
           "R18"
-        ]
+        ],
+        "advisory": "R18 指令注入首版全 info 观测"
       },
       "origin": "指令改写 + 外联组合；本语料曾在代理会话中被实时加载触发注入尝试（已加显式语料标注，不影响命中）"
     },
@@ -355,7 +360,8 @@
       "expect": {
         "rules": [
           "R17"
-        ]
+        ],
+        "advisory": "R17 单动词 !!js 观测，双组合才 high"
       },
       "origin": "配置面：yaml !!js/function 标签 = patch 装载期代码执行"
     },
@@ -551,7 +557,8 @@
       "expect": {
         "rules": [
           "R16"
-        ]
+        ],
+        "advisory": "R16 依赖对账恒 info"
       },
       "origin": "自审 round-17 实证：R16 改子路径前缀解析后，父包整体未声明的子路径导入（ghost-pkg/sub）必须仍判幽灵——防前缀解析把未声明子路径一并洗白"
     },
@@ -586,7 +593,8 @@
       "expect": {
         "rules": [
           "R15"
-        ]
+        ],
+        "advisory": "R15 动态目标 info 观测"
       },
       "origin": "自审 round-17 实证：R15（动态网络目标，N5 信息级观测）此前无变异面——sink 动态目标识别回归即漏报"
     }

@@ -8,37 +8,26 @@
  */
 import { isPersistentlyDismissed, persistentlyDismiss, restorePersistentDismissal } from './dismissed-alerts.js'
 import { scanVerdictAlarm, scanVerdictSubjectTag, type ScanVerdictEcho } from './scan-verdict.js'
+import { emitAlarm, type DomainProjectionMode } from './alarm-emit.js'
+import { npmSubject } from '../domain/project.js'
+import type { AlarmSeverity, AlarmSource, CoverageEntry, CoverageRow, VetAlarm } from '../domain/types.js'
+import { aggregateCoverage, emptyCoverage, withUnknownDefaults } from '../domain/coverage.js'
+
+/** 每主体覆盖面最多留几份（LRU 淘汰）：状态面板是「当前」视图，不是历史账本。 */
+const MAX_COVERAGE_SUBJECTS = 64
+
+/**
+ * 0.5.0：`AlarmSeverity` / `AlarmSource` / `VetAlarm` 的定义已移进 `domain/types.ts`。
+ * 这里是**再导出**，不是定义——保留旧导入路径（`guard/status.js`）是因为运行时侧与面板
+ * 的十几个调用点都以它为入口，而它们的形状没有任何变化。域不 import 消费者，方向只此一条。
+ */
+export type { AlarmSeverity, AlarmSource, VetAlarm }
 
 /** 按公告聚合的结论告警 id 前缀（`scan-verdict:agg:osv:<公告>:<依赖>:<结论>`）。
  * 与对象行（`scan-verdict:plugin:<name>:…` / `scan-verdict:tool:<name>:…`）结构不相交，
  * 「是不是聚合行」由前缀判断而非猜名字——否则一个叫 `osv` 的包就与聚合行撞命名空间。 */
 const AGGREGATE_PREFIX = 'scan-verdict:agg:'
 export type ShieldLevel = 'green' | 'yellow' | 'red'
-export type AlarmSeverity = 'yellow' | 'red' | 'info'
-export type AlarmSource = 't1' | 't2' | 'scan'
-
-export interface VetAlarm {
-  /** 去重键（source+kind+target）；VetStatus 在 dedupeWindowMs 内按 id 去重。 */
-  id: string
-  severity: AlarmSeverity
-  source: AlarmSource
-  kind: string
-  message: string
-  target?: string
-  /** T2 栈归因 best-effort：插件包名（@scope/name 或 name）。 */
-  pluginHint?: string
-  /** 目标是否为会话日志文件（用于归因分层文案：无归因 + 会话日志 → 轮换提示）。 */
-  sessionLog?: boolean
-  /** 同类报警累计次数（合并去重后展示用；同一 (source,kind,plugin) 跨 target 折叠为一条）。 */
-  count?: number
-  /**
-   * 合并键：显式设置时，VetStatus.record 按 (source,kind,plugin) 聚合该报警，忽略 target。
-   * 用于关联签名类（n3-/canary-leak）——跨主机/跨密钥的同类报警折叠为一条并累计 count，
-   * 防止单个插件刷满 20 槽缓冲（事件风暴降噪）。未设置则退化为精确 id 去重。
-   */
-  mergeKey?: string
-  at: number
-}
 
 /** 扫描回显：结论 + 证据（规则码 / OSV 坐标），告警文案与指纹都由 `scan-verdict.ts` 生成。 */
 export interface ScanEcho extends ScanVerdictEcho {}
@@ -50,6 +39,22 @@ export interface VetStatusSnapshot {
   /** 用户已忽略的报警（id → 记录，供面板「已忽略」分区展示/恢复）。 */
   dismissed: VetAlarm[]
   lastScan?: ScanEcho
+  /**
+   * 九个观测面的当前结论。**永远九行**：没表过态的落 `unknown`，不是 `covered`
+   * （不变式 2 的可执行形式）。
+   *
+   * 0.5.3 起不再是「最近一次扫描」的口径：状态里按主体各存一份，这里给的是**跨主体取最差**
+   * 的聚合（有一个包的文件树没看完，`file_tree` 对整个装机就不是 covered）。每一行带
+   * `subject`，说明这个最差结论来自谁。
+   */
+  coverage: CoverageRow[]
+  /**
+   * 聚合里的**唯一**主体：只有扫过一个包时才有值（此时九行就是那个包的）。
+   * 多主体时不给出——用一个包的名字去标注一张跨五十个包的表，正是 0.5.0 修的歧义。
+   */
+  coverageSubject?: string
+  /** 聚合覆盖了几个主体（≥2 时给出，面板据此写「N 个包」而不是冒充某一个）。 */
+  coverageSubjects?: number
 }
 
 export interface VetStatusOptions {  /** 报警环形缓冲上限（默认 20）。 */
@@ -78,6 +83,8 @@ export class VetStatus {
   /** 聚合行 id → 仍支撑它的包名集合（全部转 clean 时整行撤销，不必等 TTL）。 */
   private readonly groupMembers = new Map<string, Set<string>>()
   private lastScanValue: ScanEcho | undefined
+  /** 主体名 → 该主体最近一次扫描的九行（已补齐）。Map 的插入序即 LRU 序（写入即重插）。 */
+  private readonly coverageBySubject = new Map<string, { entries: CoverageEntry[]; at: number }>()
 
   constructor(options: VetStatusOptions = {}) {
     // round-5 review（B-A8）：构造参数 clamp——内部/测试脏输入（alarmMax<0 会使
@@ -229,8 +236,18 @@ export class VetStatus {
    * 没有一条可点「忽略」的告警——面对「官方包命中上游依赖 CVE」这类无法靠用户行动
    * 消解的情况，用户只能在永久黄和改代码之间选。现在结论本身就是告警，走既有折叠/
    * 持久化语义：忽略后不参与 level，且跨重启有效。
+   *
+   * 0.5.8：这条派生告警也走投影漏斗。它是全仓最后一处直接 `record` 的报警路径——
+   * 「形状只定义一次」这句话要么是真的，要么不是。主体就是被扫的这个对象：插件包是 npm
+   * 主体，工具用它的工具名（`SubjectKind` 里没有 tool，这里不发明一种；名字与 pluginHint
+   * 都和改动前逐字相同）。聚合行（多个官方包共用一条公告）的主体仍是**最近一次把它刷新
+   * 上来的那个包**——这是既有语义（`pluginHint` 本来就取它），这轮不动：改了会让面板归属漂移，
+   * 而那不是这一轮要解决的问题。
+   *
+   * @param mode 投影模式。缺省 `shadow`（与 `emitAlarm` 一致）：调用方漏传时仍然比对，
+   *             漏传应当表现为 CI 里红，而不是等价性静默失效。
    */
-  noteScan(echo: ScanEcho): void {
+  noteScan(echo: ScanEcho, mode: DomainProjectionMode = 'shadow'): void {
     this.lastScanValue = echo
     const alarm = scanVerdictAlarm(echo)
     const tag = scanVerdictSubjectTag(echo)
@@ -238,7 +255,7 @@ export class VetStatus {
       this.clearScanVerdict(echo.pluginName, tag)
       return
     }
-    this.record({
+    emitAlarm(this, {
       id: alarm.id,
       severity: alarm.severity,
       source: 'scan',
@@ -249,7 +266,7 @@ export class VetStatus {
       // 证据即身份：同一组证据折叠为一行（含 count 累计）；证据变化 → 新 id → 重新提醒。
       mergeKey: alarm.id,
       at: echo.at,
-    })
+    }, { subject: npmSubject(echo.pluginName), source: 'local_scan' }, mode)
     // 成员登记必须在 record **之后**：record 开头就 expire()，而 expire() 会丢掉「没有对应
     // 告警行」的成员集合——先登记再 record，首条聚合行刚建好就被清空（实测后果：单成员转
     // clean 撤不掉行，多成员乱序 clean 会提前撤行 → 仍受影响的包漏报）。
@@ -321,6 +338,27 @@ export class VetStatus {
     }
   }
 
+  /**
+   * 记录一次覆盖面结论。补齐九行由 domain 完成——调用方只报它**真的**知道的那几个面，
+   * 剩下的落 unknown。反过来（调用方要凑齐九行）必然会有人补 covered。
+   *
+   * 0.5.3 起按主体各存一份：`subject` 相同的两次扫描覆盖前一次，不同主体各自保留。
+   * 这不是「历史」，是「每个包现在的样子」——扫描五十个包之后，面板必须还能回答
+   * 「哪个包的文件树没看完」，而不是只剩最后一个包。
+   */
+  setCoverage(entries: readonly CoverageEntry[], subject?: string): void {
+    const at = Date.now()
+    const key = subject ?? ''
+    // 重插以维持 LRU 序（Map 的插入序 = 淘汰顺序）
+    this.coverageBySubject.delete(key)
+    this.coverageBySubject.set(key, { entries: withUnknownDefaults(entries, at), at })
+    while (this.coverageBySubject.size > MAX_COVERAGE_SUBJECTS) {
+      const oldest = this.coverageBySubject.keys().next().value
+      if (oldest === undefined) break
+      this.coverageBySubject.delete(oldest)
+    }
+  }
+
   snapshot(): VetStatusSnapshot {
     const now = Date.now()
     this.expire(now)
@@ -351,6 +389,26 @@ export class VetStatus {
     // alarms 列表（面板 logged 区可见、可 dismiss、可恢复），避免「警报数」被无法消解的
     // 架构事实污染（15 条黄 = 同一 C2 边界 × 14 官方包，而非 15 处风险）。
     const actionable = active.filter(a => a.severity !== 'info')
-    return { level, alarmCount: actionable.length, alarms: active.map(stripMergeKey), dismissed: dismissed.map(stripMergeKey), lastScan }
+    // 0.5.3：每主体一份 → 聚合。存活口径与 lastScan 同一把尺（alarmTtlMs）：一行「覆盖了
+    // 什么」如果建立在一周前的扫描上，它说的就不是现在的事，不如让它退回 unknown。
+    const live = [...this.coverageBySubject]
+      .filter(([, v]) => now - v.at < this.alarmTtlMs)
+      .map(([subject, v]) => ({ subject, entries: v.entries }))
+    const coverage = live.length === 0
+      ? emptyCoverage(now)
+      : aggregateCoverage(live, now)
+    const named = live.map(s => s.subject).filter(s => s !== '')
+    const coverageSubject = live.length === 1 && named.length === 1 ? named[0] : undefined
+    const coverageSubjects = live.length > 1 ? live.length : undefined
+    return {
+      level,
+      alarmCount: actionable.length,
+      alarms: active.map(stripMergeKey),
+      dismissed: dismissed.map(stripMergeKey),
+      lastScan,
+      coverage,
+      ...(coverageSubject !== undefined ? { coverageSubject } : {}),
+      ...(coverageSubjects !== undefined ? { coverageSubjects } : {}),
+    }
   }
 }

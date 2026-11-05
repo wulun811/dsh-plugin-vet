@@ -39,7 +39,9 @@ describe('parseTokens', () => {
   it('回环 IP 不产生 host token', () => {
     const t = parseTokens(F({ rule: 'R15', severity: 'info', message: '网络目标', evidence: 'http://127.0.0.1:8787/x', file: 'a.ts' }))
     expect(t.hosts).toHaveLength(0)
-    expect(isDeclared(t as never)).toBe(true)
+    // 0.5.15：这里只断言 token 解析（回环不算外联目标）。**不**再顺带断言 isDeclared——
+    // 该条 finding 五类 token 全空，新版一律保留（空 token 不构成"已声明"的证据），
+    // 把两件事混在一条断言里会让人以为「无 token ⇒ 已声明」是契约的一部分。
   })
   it('osv.dev 为声明目标', () => {
     const t = parseTokens(F({ rule: 'OSV', severity: 'high', message: '查询', evidence: 'https://osv.dev/v1/query', file: 'package.json' }))
@@ -50,7 +52,8 @@ describe('parseTokens', () => {
     const t = parseTokens(f)
     expect(t.fs).toHaveLength(0)
     expect(t.env).toHaveLength(0)
-    expect(isDeclared(f, t)).toBe(true)
+    // 同上：解析结论到此为止。`process.env` 裸引用不产生 env token 是对的；它是否算
+    // 「已声明」是另一条规则（0.5.15 起：无 token → 保留）。
   })
   it('真实 .env 文件路径仍命中', () => {
     const t = parseTokens(F({ rule: 'R11', severity: 'high', message: '敏感文件', evidence: 'path/to/.env.production', file: 'a.ts' }))
@@ -71,6 +74,38 @@ describe('parseTokens', () => {
 })
 
 describe('annotateSelfScan', () => {
+  /**
+   * 0.5.15 回归：**空 token 不得被算成「已声明」**。
+   *
+   * 0.5.14 及以前 `isDeclared` 在五类 token 全空时 `return true`，于是「一个能说清自己
+   * 碰到什么能力的 token 都没有」被判成「声明完整、可以降级」。这是自审信任链上最脆的
+   * 一格：一份**根本没被解析出能力面**的逃逸，反而最难被 retained 拦住。
+   *
+   * 实测过的两个具体形态（两条 critical）在旧版被判 declared、verdict=clean。现在它们必须
+   * 留在 retained 里，并把 verdict 拉到 critical。
+   */
+  it('空 token 的 critical 逃逸不得被算成已声明（0.5.15）', () => {
+    const escapes = [
+      F({ rule: 'R1', severity: 'critical', message: '构造器链逃逸', evidence: 'agent.constructor("return process")()', file: 'a.js', confidence: 'certain' }),
+      F({ rule: 'R2', severity: 'critical', message: '动态构造', evidence: 'new Function("return process")()', file: 'b.js', confidence: 'certain' }),
+    ]
+    // 前提：这两条的 token 确实是空的（否则这条用例测的就不是它声称的东西）
+    for (const f of escapes) {
+      const t = parseTokens(f)
+      expect([t.modules.length, t.env.length, t.hosts.length, t.fs.length, t.spawn.length]).toEqual([0, 0, 0, 0, 0])
+      expect(isDeclared(f, t)).toBe(false)
+    }
+    const info = annotateSelfScan(escapes, { pin: 'pinned-match' })
+    expect(info.annotation.declared).toBe(0)
+    expect(info.annotation.retained).toHaveLength(2)
+    expect(info.verdict).toBe('critical')
+  })
+
+  it('禁区模块不得被降级（worker_threads / vm 恒保留）', () => {
+    const f = F({ rule: 'R3', severity: 'critical', message: 'IPC 原语', evidence: 'require("worker_threads")', file: 'a.js', confidence: 'certain' })
+    expect(isDeclared(f, parseTokens(f))).toBe(false)
+  })
+
   it('pinned：已声明模块 finding → declared、verdict clean、score 100', () => {
     const info = annotateSelfScan([
       F({ rule: 'R3', severity: 'critical', message: '进程访问', evidence: 'child_process', file: 'src/guard/runtime-guard.ts', confidence: 'certain' }),

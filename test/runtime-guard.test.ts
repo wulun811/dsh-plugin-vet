@@ -14,6 +14,8 @@ import { decideRespawn, t2AlarmId, t2Severity, installRuntimeGuard, applyRuntime
 import { envSidecarPid } from '../lib/guard/runtime-sidecar.js'
 import { hasAuditRecord, setArchiveDirForTest } from '../lib/audit/archive.js'
 import { setDismissedFileForTest } from '../lib/guard/dismissed-alerts.js'
+import { resetReceiptOracle, rememberReceipt } from '../lib/guard/receipt-oracle.js'
+import { buildReceipt } from '../lib/domain/receipt.js'
 import { setUpdateCheckDirForTest, setUpdateAutoCheck } from '../lib/guard/update-check.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import fsDefault from 'node:fs'
@@ -23,7 +25,9 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import * as yaml from 'js-yaml'
 
-const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512, growthMb: 256, growthWindowMs: 600_000 }
+// 0.5.22：暖机与内存持续判定关掉（0），这样这些用例仍逐拍判定——新默认值的行为由
+// test/t1-warmup.test.ts 单独钉住，不在既有用例里悄悄改语义。
+const CFG: WatchConfig = { intervalMs: 2000, memLimitMb: 1024, forkBurstN: 5, fdLimit: 512, growthMb: 256, growthWindowMs: 600_000, warmupMs: 0, memSustainMs: 0 }
 
 /** 0.4.2：本文件多处用 mkdtemp（/tmp）模拟「用户目录」再往里写敏感名文件——/tmp 现在属于
  * OS 临时根豁免面（用户反馈修复），而这几条用例要验证的是「敏感路径照报」本身。
@@ -1010,6 +1014,95 @@ describe('writeRuntimeGuardConfig（profile 配置写入）', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  /**
+   * 0.5.17（打包产物验收首次运行发现）：DSH 下发的 profile 模板不是裸 `[]`，而是
+   * 三行说明注释 + `[]`。旧实现只判 `content.trim() === '[]'`，对模板恒为假 → 走
+   * 「末尾追加条目」分支，写出 `[]` 后面再跟 `- id:` 的非法 YAML → 原子写校验拦下
+   * → 面板回 500「写入失败」。
+   *
+   * 触发条件是**全新 profile 第一次点开关**，恰好是每个新用户的第一步。此前所有
+   * 用例用的都是裸 `[]`/空文件/已有条目，没有一条用 DSH 真实模板，所以长期没红。
+   */
+  describe('DSH 真实模板（注释头 + []）—— 0.5.17', () => {
+    // 逐字节取自 @deepseek-ai/dsh-app-boot 的 PROFILE_PATCH_TEMPLATE
+    const TEMPLATE = '# Your patch layer for this dsh profile, applied after every bundle layer:\n'
+      + '# a top-level YAML array of loader patch entries (id-targeted config\n'
+      + '# overrides, disables, and insert lists; `!!js` expressions allowed).\n'
+      + '[]\n'
+
+    const write = (dir: string): string => {
+      const patch = join(dir, 'cordis.patch.yml')
+      writeFileSync(patch, TEMPLATE)
+      return patch
+    }
+
+    it('首次开启守卫成功，且写出的文件仍是合法 YAML 数组', () => {
+      const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-template-'))
+      const patch = write(dir)
+      const r = writeRuntimeGuardConfig(mkCtx(dir), true)
+      expect(r.ok).toBe(true)
+      expect(r.profile).toBe('hardened')
+      const content = readFileSync(patch, 'utf8')
+      expect(content).toContain('runtimeGuard: watch')
+      expect(content).toContain('profile: hardened')
+      // 关键：不能出现 `[]` 后面再跟列表项的双根形态
+      const parsed = yaml.load(content) as unknown
+      expect(Array.isArray(parsed)).toBe(true)
+      expect((parsed as unknown[]).length).toBe(1)
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('注释头原样保留（那是 DSH 写给用户的说明，写入不该吃掉它）', () => {
+      const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-template-'))
+      const patch = write(dir)
+      expect(writeRuntimeGuardConfig(mkCtx(dir), true).ok).toBe(true)
+      const content = readFileSync(patch, 'utf8')
+      expect(content.startsWith('# Your patch layer')).toBe(true)
+      expect(content).toContain('`!!js` expressions allowed).')
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('首次直接选档位（writeVetTierConfig）同样可用', () => {
+      const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-template-'))
+      const patch = write(dir)
+      const r = writeVetTierConfig(mkCtx(dir), 'hardened')
+      expect(r.ok).toBe(true)
+      const parsed = yaml.load(readFileSync(patch, 'utf8')) as unknown
+      expect(Array.isArray(parsed)).toBe(true)
+      expect((parsed as unknown[]).length).toBe(1)
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('开关往返：开 → 关 → 开，注释头不丢、每次都是合法数组', () => {
+      const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-template-'))
+      const patch = write(dir)
+      for (const enable of [true, false, true]) {
+        expect(writeRuntimeGuardConfig(mkCtx(dir), enable).ok).toBe(true)
+        const content = readFileSync(patch, 'utf8')
+        const parsed = yaml.load(content) as unknown
+        expect(Array.isArray(parsed)).toBe(true)
+        expect(content.startsWith('# Your patch layer')).toBe(true)
+        // 关闭后必须留下 `[]` 标记——只剩注释的文件在 YAML 里是 null，不是数组
+        expect((parsed as unknown[]).length).toBe(enable ? 1 : 0)
+      }
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('非空文档（已有用户条目）不会被误判成空文档——只追加，不覆盖', () => {
+      const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-template-'))
+      const patch = join(dir, 'cordis.patch.yml')
+      writeFileSync(patch, '# 用户自己的说明\n- id: settings\n  config:\n    watch: false\n')
+      expect(writeRuntimeGuardConfig(mkCtx(dir), true).ok).toBe(true)
+      const content = readFileSync(patch, 'utf8')
+      expect(content).toContain('- id: settings')
+      expect(content).toContain('watch: false')
+      const parsed = yaml.load(content) as unknown
+      expect(Array.isArray(parsed)).toBe(true)
+      expect((parsed as unknown[]).length).toBe(2)
+      rmSync(dir, { recursive: true, force: true })
+    })
+  })
+
   it('H2：开启守卫保留已有 config 的非 runtimeGuard 键（deny/allowlist 不被冲掉）', () => {
     const dir = mkdtempSync(join(tmpdir(), '.tmp-guard-test-'))
     const patch = join(dir, 'cordis.patch.yml')
@@ -1150,7 +1243,7 @@ describe('/vet/profile 端点', () => {
   it('无 Origin → 403（跨站防护）', () => {
     const handler = mkHandler()
     const res = mkRes()
-    handler({ method: 'POST', url: '/vet/profile', headers: {} }, res as never)
+    handler({ method: 'POST', socket: { remoteAddress: '127.0.0.1' }, url: '/vet/profile', headers: {} }, res as never)
     expect(res.code).toBe(403)
   })
 
@@ -1158,7 +1251,7 @@ describe('/vet/profile 端点', () => {
     const handler = mkHandler()
     const res = mkRes()
     handler({
-      method: 'POST',
+      method: 'POST', socket: { remoteAddress: '127.0.0.1' },
       url: '/vet/profile',
       headers: { origin: 'http://x', host: 'x' },
       on: (ev: string, cb: (c?: Buffer) => void) => {
@@ -1168,6 +1261,69 @@ describe('/vet/profile 端点', () => {
     }, res as never)
     expect(res.code).toBe(400)
     expect((res.body as { note: string }).note).toContain('非法档位')
+  })
+})
+
+describe('/vet 写入口的对端闸门（0.5.14 · controlLocalOnly）', () => {
+  const mkHandler = (config: Record<string, unknown> = {}): ((req: never, res: never) => void) => {
+    const routes: { handler: (req: never, res: never) => void }[] = []
+    const ctx = {
+      get: (name: string) => name === 'webServer' ? { register: (r: never) => { routes.push(r as never) } } : undefined,
+      effect: (fn: () => unknown): unknown => fn(),
+    }
+    registerStatusRouteOnce(ctx as never, { profile: 'standard', ...config } as never, new VetStatus())
+    return routes[0]!.handler
+  }
+  const mkRes = (): { code: number; body: unknown } => {
+    const r = { code: 0, body: null as unknown }
+    return Object.assign(r, {
+      writeHead: (c: number) => { r.code = c },
+      end: (b: string) => { r.body = JSON.parse(b) },
+    })
+  }
+  /** 同源合法（origin/host 一致）+ 指定对端地址的 POST /vet/profile。 */
+  const post = (socket: unknown) => ({
+    method: 'POST',
+    url: '/vet/profile',
+    headers: { origin: 'http://x', host: 'x' },
+    socket,
+    on: (ev: string, cb: (c?: Buffer) => void) => {
+      if (ev === 'data') cb(Buffer.from(JSON.stringify({ tier: 'bogus' })))
+      if (ev === 'end') cb()
+    },
+  })
+
+  it('默认（controlLocalOnly 未开）：远端对端也能改——面板从别的机器打开是常态', () => {
+    const res = mkRes()
+    mkHandler()(post({ remoteAddress: '203.0.113.7' }) as never, res as never)
+    expect(res.code).toBe(400)
+    expect((res.body as { note: string }).note).toContain('非法档位')
+  })
+
+  it('controlLocalOnly: true + 非本机对端 → 403（Origin 能自己拼，对端地址不能）', () => {
+    const res = mkRes()
+    mkHandler({ controlLocalOnly: true })(post({ remoteAddress: '203.0.113.7' }) as never, res as never)
+    expect(res.code).toBe(403)
+    expect((res.body as { note: string }).note).toContain('只接受本机请求')
+  })
+
+  it('controlLocalOnly: true + 拿不到对端地址 → 按非本机处理（失败即拒）', () => {
+    const res = mkRes()
+    mkHandler({ controlLocalOnly: true })(post(undefined) as never, res as never)
+    expect(res.code).toBe(403)
+  })
+
+  it('controlLocalOnly: true + 本机回环 → 过闸门，继续走同源与参数校验', () => {
+    const res = mkRes()
+    mkHandler({ controlLocalOnly: true })(post({ remoteAddress: '127.0.0.1' }) as never, res as never)
+    expect(res.code).toBe(400)
+    expect((res.body as { note: string }).note).toContain('非法档位')
+  })
+
+  it('只读的 /vet/status.json 不受对端闸门影响（远端浏览器仍能看面板）', () => {
+    const res = mkRes()
+    mkHandler({ controlLocalOnly: true })({ method: 'GET', url: '/vet/status.json', headers: {}, socket: { remoteAddress: '203.0.113.7' } } as never, res as never)
+    expect(res.code).toBe(200)
   })
 })
 
@@ -1295,6 +1451,8 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
     // 0.3：runtimeGuard = 档位展开后的生效值（= config）；patchRuntimeGuard = 文件级实际状态
     expect((getRes.body as { runtimeGuard: string }).runtimeGuard).toBe('watch')
     expect((getRes.body as { patchRuntimeGuard: string }).patchRuntimeGuard).toBe('off')
+    // 0.5.20：投影比对的计数进状态报文（0.5.18 起三种模式都比对，结果此前只有测试读）
+    expect((getRes.body as { domainProjection?: { mismatches: number } }).domainProjection?.mismatches).toBe(0)
 
     // POST /vet/runtime-guard 无 Origin → 403（跨站防护，M4）
     const postRes: { code: number; body: unknown } = { code: 0, body: null }
@@ -1304,7 +1462,7 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
       end: (body: string) => { postRes.body = JSON.parse(body) },
       on: () => {},
     }
-    handler({ method: 'POST', url: '/vet/runtime-guard', headers: {} }, pres)
+    handler({ method: 'POST', socket: { remoteAddress: '127.0.0.1' }, url: '/vet/runtime-guard', headers: {} }, pres)
     expect(postRes.code).toBe(403)
 
     // 未知路径 → 404
@@ -1328,7 +1486,7 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
     const disRes = mkRes()
     handler(
       {
-        method: 'POST',
+        method: 'POST', socket: { remoteAddress: '127.0.0.1' },
         url: '/vet/dismiss',
         headers: { origin: 'http://x', host: 'x' },
         on: (ev: string, cb: (c?: Buffer) => void) => {
@@ -1349,7 +1507,7 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
     const resRes = mkRes()
     handler(
       {
-        method: 'POST',
+        method: 'POST', socket: { remoteAddress: '127.0.0.1' },
         url: '/vet/restore',
         headers: { origin: 'http://x', host: 'x' },
         on: (ev: string, cb: (c?: Buffer) => void) => {
@@ -1367,12 +1525,12 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
 
     // dismiss 无 Origin → 403；缺 id / 非字符串 → 400
     const noOrigin = mkRes()
-    handler({ method: 'POST', url: '/vet/dismiss', headers: {}, on: () => {} }, noOrigin)
+    handler({ method: 'POST', socket: { remoteAddress: '127.0.0.1' }, url: '/vet/dismiss', headers: {}, on: () => {} }, noOrigin)
     expect(noOrigin.code).toBe(403)
     const badId = mkRes()
     handler(
       {
-        method: 'POST',
+        method: 'POST', socket: { remoteAddress: '127.0.0.1' },
         url: '/vet/dismiss',
         headers: { origin: 'http://x', host: 'x' },
         on: (ev: string, cb: (c?: Buffer) => void) => {
@@ -1383,6 +1541,50 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
       badId,
     )
     expect(badId.code).toBe(400)
+  })
+
+  it('status.json 带 receipts：最近一次拦截判定的回执（0.5.7）', () => {
+    let handler: (req: unknown, res: unknown) => void
+    const routes: unknown[] = []
+    const ws = { register: (r: unknown) => { routes.push(r); return () => {} } }
+    const ctx = {
+      baseUrl: '/tmp',
+      get: (name: string) => (name === 'webServer' ? ws : undefined),
+      effect: (fn: () => unknown) => { fn() },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    } as never
+    registerStatusRouteOnce(ctx as never, { runtimeGuard: 'watch' } as never, new VetStatus())
+    handler = (routes[0] as { handler: typeof handler }).handler
+
+    const get = (): { code: number; body: unknown } => {
+      const r: { code: number; body: unknown } = { code: 0, body: null }
+      const res = {
+        writableEnded: false,
+        writeHead: (code: number) => { r.code = code },
+        end: (body: string) => { r.body = JSON.parse(body) },
+      }
+      handler({ method: 'GET', url: '/vet/status.json', headers: {} }, res)
+      return r
+    }
+
+    // 没有拦截判定 → 空数组（不是「一切正常」的证明，面板整块不渲染）
+    expect((get().body as { receipts: unknown[] }).receipts).toEqual([])
+
+    resetReceiptOracle()
+    rememberReceipt(buildReceipt({
+      id: 'n7-block:@acme/p:/home/u/data',
+      boundary: 'fs_write',
+      attemptedAt: Date.now(),
+      action: 'deny',
+      beforeBoundary: true,
+      forwardedBefore: 0,
+      forwardedAfter: 0,
+      operationId: 'fs_write#7',
+    }))
+    const row = (get().body as { receipts: { boundary: string; result: string; claimsBlocked: boolean; operationId?: string }[] }).receipts
+    expect(row).toHaveLength(1)
+    expect(row[0]).toMatchObject({ boundary: 'fs_write', result: 'applied', claimsBlocked: true, operationId: 'fs_write#7' })
+    resetReceiptOracle()
   })
 })
 
@@ -1759,7 +1961,7 @@ describe('即时装配（0.4.1）：setGuardToggleHook 接线 + 进程内切换'
   const post = (handler: (req: unknown, res: unknown) => void, body: unknown, origin = true): { code: number; body: unknown } => {
     const res = mkRes()
     const req = {
-      method: 'POST',
+      method: 'POST', socket: { remoteAddress: '127.0.0.1' },
       url: '/vet/runtime-guard',
       headers: origin ? { origin: 'http://x', host: 'x' } : {},
       on: (ev: string, cb: (c?: Buffer) => void) => {

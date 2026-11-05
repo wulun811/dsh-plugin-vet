@@ -36,7 +36,13 @@ function renderLabel(value: CapabilityLabel): string {
   if (m.hasExec) flags.push('执行')
   // C4（0.3.8）：原生二进制——预编译产物对 JS 规则面不可审，营养标签必须显影。
   if (m.hasNativeBinary === true) flags.push('📦 原生二进制')
-  if (m.esmNamedBuiltins === true) flags.push('⚠️ ESM 具名导入盲区')
+  // 0.5.3：有模块名就把命中的点出来（布尔说不出哪一面有盲区）
+  if (m.esmNamedBuiltins === true) {
+    const mods = Array.isArray(m.esmNamedBuiltinModules) && m.esmNamedBuiltinModules.length > 0
+      ? `（${m.esmNamedBuiltinModules.join(',')}）`
+      : ''
+    flags.push('⚠️ ESM 具名导入盲区' + mods)
+  }
   lines.push('  能力: ' + (flags.length > 0 ? flags.join(' / ') : '（无网络/执行声明）'))
 
   const hosts = Array.isArray(m.hosts) ? m.hosts : []

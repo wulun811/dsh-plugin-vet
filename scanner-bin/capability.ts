@@ -72,6 +72,8 @@ const CMD_CAP = 20
 const IMPORT_CAP = 50
 /** C4（0.3.8）：原生二进制清单展示上限（超出只报布尔 + 「…更多」由消费方处理）。 */
 const NATIVE_CAP = 10
+/** 0.5.3：C2 盲区模块清单上限（盲区集合本身只有 11 个，留一点余量）。 */
+const ESM_MODULE_CAP = 16
 
 const PUSH_UNIQ = (arr: string[], item: string, cap: number): void => {
   const v = item.trim()
@@ -367,7 +369,12 @@ export function extractCapabilities(sf: ts.SourceFile): CapabilityManifest {
       if (ESM_T2_BLIND_BUILTINS.has(bare) && n.importClause !== undefined
         && (n.importClause.namedBindings !== undefined || n.importClause.name !== undefined)) {
         // 仅具名/命名空间绑定触发（默认导入 name 单独不算——它引用的是可 patch 的对象本身）
-        if (n.importClause.namedBindings !== undefined) out.esmNamedBuiltins = true
+        if (n.importClause.namedBindings !== undefined) {
+          out.esmNamedBuiltins = true
+          // 0.5.3：记录**命中的模块**（布尔说不出哪个执行面有盲区，覆盖面归因要模块名）。
+          const mods = out.esmNamedBuiltinModules ?? (out.esmNamedBuiltinModules = [])
+          PUSH_UNIQ(mods, bare, ESM_MODULE_CAP)
+        }
       }
     }
     if (ts.isCallExpression(n)) {
@@ -478,6 +485,12 @@ export function aggregateCapabilities(parts: CapabilityManifest[]): CapabilityMa
     if (p.hasNetwork) out.hasNetwork = true
     if (p.hasExec) out.hasExec = true
     if (p.esmNamedBuiltins === true) out.esmNamedBuiltins = true
+    // 0.5.3：模块名并集（任一文件命中即入列）——单个文件命中 child_process、另一个命中 fs，
+    // 聚合后必须两个都在，否则覆盖面会把一个真实盲区算丢。
+    for (const m of p.esmNamedBuiltinModules ?? []) {
+      const mods = out.esmNamedBuiltinModules ?? (out.esmNamedBuiltinModules = [])
+      PUSH_UNIQ(mods, m, ESM_MODULE_CAP)
+    }
     // C4（0.3.8）：原生二进制为文件面证据（scanFiles 主循环注入 per-file manifest，AST 提取不产出）；
     // 聚合同步并集——scanFiles 的清单也走这里，不另开第二条聚合路。
     if (p.hasNativeBinary === true) out.hasNativeBinary = true

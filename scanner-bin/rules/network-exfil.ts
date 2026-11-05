@@ -1,7 +1,7 @@
 import ts from 'typescript'
 import type { Finding, RuleContext } from '../protocol.js'
 import { walk, lineOf } from '../ast.js'
-import { isTestOrCiFile } from './process-direct.js'
+import { isTestOnlyFile } from './process-direct.js'
 
 /**
  * R13 network-exfil: hardcoded exfiltration sinks in string literals.
@@ -216,7 +216,7 @@ function emit(
   } else {
     const guard = n !== undefined && guardContextOf(n, uses, elemUses)
     if (guard) reasons.push('拒绝名单/守卫语义（非外联目标）')
-    else if (isTestOrCiFile(ctx.filePath ?? sf.fileName)) reasons.push('能力触达面（测试/CI 文件）')
+    else if (isTestOnlyFile(ctx.filePath ?? sf.fileName, ctx.entryFiles)) reasons.push('能力触达面（测试/CI 文件）')
   }
   const severity = reasons.length > 0 ? 'info' : 'high'
   const prefix = reasons.length > 0 ? reasons[0] + '：' : ''

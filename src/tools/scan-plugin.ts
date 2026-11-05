@@ -3,10 +3,12 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '../json-value.js'
 import { scan, scanBudget } from '../scanner/client.js'
-import { listSourceFiles, listInstructionFiles } from '../scanner/package-sources.js'
+import { buildFileScanRequest } from '../scanner/scan-request.js'
 import type { ScanRequest } from '../scanner/protocol.js'
 import type { PluginScorecard } from '../report/types.js'
 import { renderScorecard } from '../report/render.js'
+import { coverageForScan } from '../guard/coverage.js'
+import { withUnknownDefaults } from '../domain/coverage.js'
 import { PACKAGE_NAME } from '../package-meta.js'
 import { isVetSelfPath } from '../pkg-root.js'
 import { withVetSelfIo } from '../guard/runtime-hooks.js'
@@ -170,7 +172,21 @@ function readPackageVersion(root: string): string | undefined {
   })
 }
 
-export function buildRequest(args: ScanPluginArgs, acknowledged?: AcknowledgedPackageHashes): { request: ScanRequest; pluginName: string; pluginVersion?: string } {
+/** 工具面/门禁面的策略输入（0.5.10）：扫描面与网络增强项由部署者配置决定，不由调用方拼。 */
+export interface ScanPolicyOptions {
+  /** 部署者的扫描面开关（config.scanSurface）。undefined = 全开。 */
+  surface?: { configFiles?: boolean; instructionFiles?: boolean }
+  osv?: boolean
+  transitiveDeps?: boolean
+  /**
+   * 部署者的规则开关（config.rules，0.5.15）。undefined / `{}` = 全开。
+   * 0.5.14 及以前这个键只存在于配置里，从不进入 `ScanRequest`——用户照 README 写
+   * `rules: {R17: false}` 什么也没关掉（见 `docs/FAILURES.md` F12 同类）。
+   */
+  rules?: Record<string, boolean>
+}
+
+export function buildRequest(args: ScanPluginArgs, acknowledged?: AcknowledgedPackageHashes, policy: ScanPolicyOptions = {}): { request: ScanRequest; pluginName: string; pluginVersion?: string } {
   if (args.target === 'dynamic-code') {
     if (typeof args.source !== 'string') throw new Error('vet: dynamic-code 需要 source')
     return {
@@ -205,42 +221,56 @@ export function buildRequest(args: ScanPluginArgs, acknowledged?: AcknowledgedPa
         files: [args.source],
         targetKind,
         ...(officialFamily ? { officialFamily: true } : {}),
+        ...(policy.rules !== undefined ? { rules: policy.rules } : {}),
       },
     }
   }
   if (args.target === 'package') {
     if (typeof args.packagePath !== 'string') throw new Error('vet: package 需要 packagePath')
     const packagePath = args.packagePath // 闭包内 TS 不保留属性 narrowing（同 status-route 修法）
-    // P2-2：列目录/读 package.json 属 vet 审计操作——vetSelfIo 直通，.dsh 下不自报警
-    // vet 本体自扫：用权威自扫范围（排除 lib/dsh-src/plugin-scan-tmp 等非本体目录，且已含
-    // 经 self-scope 过滤的指令/技能文件——R18 面），与钉扎/门禁同集——否则 pin 算不一致、
-    // 豁免失效（普通插件仍全量扫安装产物 + 追加指令文件）。
-    // round-16 review（决策 2）：vet 本体自扫用发布物范围（self-scope.listShippedFiles）
-    // ——与钉扎/门禁同集：生产安装（tarball 只含 lib/）与开发树字节一致时可 pinned-match，
-    // Trusted 可达；旧范围（src 源码树）生产永远 dev-tree（升级后自己不认自己）。
-    const files = withVetSelfIo(() => isSelfPackage(packagePath)
-      ? listShippedFiles(packagePath)
-      : [...listSourceFiles(packagePath), ...listInstructionFiles(packagePath)])
-    if (files.length === 0) throw new Error('vet: ' + packagePath + ' 下没有可扫描的源码')
-    // 0.3.13：官方目录成员 + 字节可信（first-seen/match，或 mismatch 但已声明补丁）→ 非授权源码
-    // 产物降噪；未登记 mismatch / 第三方不加此位
-    const cls = classifyTarget(packagePath, acknowledged)
     return {
       pluginName: basename(packagePath),
       pluginVersion: readPackageVersion(packagePath),
-      request: {
-        kind: 'files',
-        files,
-        targetKind: cls.targetKind,
-        ...(cls.officialFamily ? { officialFamily: true } : {}),
-      },
+      request: packageScanRequest(packagePath, acknowledged, policy),
     }
   }
   throw new Error('vet: 未知 target ' + String(args.target))
 }
 
+/**
+ * 包目录 → 扫描请求（0.5.10）。从 `buildRequest` 里拆出来，一是让三分支的入口函数回到可读长度，
+ * 二是让「工具面怎么给策略」单独可读：身份、扫描面、网络增强项各自从哪儿来，一目了然。
+ */
+function packageScanRequest(packagePath: string, acknowledged: AcknowledgedPackageHashes | undefined, policy: ScanPolicyOptions): ScanRequest {
+  // P2-2：列目录/读 package.json 属 vet 审计操作——vetSelfIo 直通，.dsh 下不自报警
+  // vet 本体自扫：用权威自扫范围（排除 lib/dsh-src/plugin-scan-tmp 等非本体目录，且已含
+  // 经 self-scope 过滤的指令/技能文件——R18 面），与钉扎/门禁同集——否则 pin 算不一致、
+  // 豁免失效（普通插件仍全量扫安装产物 + 追加指令文件）。
+  // round-16 review（决策 2）：vet 本体自扫用发布物范围（self-scope.listShippedFiles）
+  // ——与钉扎/门禁同集：生产安装（tarball 只含 lib/）与开发树字节一致时可 pinned-match，
+  // Trusted 可达；旧范围（src 源码树）生产永远 dev-tree（升级后自己不认自己）。
+  const selfFiles = withVetSelfIo(() => isSelfPackage(packagePath) ? listShippedFiles(packagePath) : undefined)
+  // 0.3.13：官方目录成员 + 字节可信（first-seen/match，或 mismatch 但已声明补丁）→ 非授权源码
+  // 产物降噪；未登记 mismatch / 第三方不加此位
+  const cls = classifyTarget(packagePath, acknowledged)
+  // 0.5.10：请求形状收口到 scan-request——与「加载前自动扫描」同一构造点（不变式 9）。
+  // 指令文件开关从此由部署者的 scanSurface 决定，工具面不再无条件扫 AGENTS.md。
+  const request = buildFileScanRequest(packagePath, {
+    ...(selfFiles !== undefined ? { files: selfFiles } : {}),
+    ...(policy.surface?.instructionFiles !== undefined ? { instructionFiles: policy.surface.instructionFiles } : {}),
+    ...(policy.surface?.configFiles !== undefined ? { configFiles: policy.surface.configFiles } : {}),
+    targetKind: cls.targetKind,
+    officialFamily: cls.officialFamily,
+    ...(policy.osv === true ? { osv: true } : {}),
+    ...(policy.transitiveDeps === true ? { transitiveDeps: true } : {}),
+    ...(policy.rules !== undefined ? { rules: policy.rules } : {}),
+  })
+  if ((request.files ?? []).length === 0) throw new Error('vet: ' + packagePath + ' 下没有可扫描的源码')
+  return request
+}
+
 /** scan_plugin：确定性静态扫描工具（verdict 只来自静态层，LLM 不参与）。 */
-export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeoutMs?: number; transitiveDeps?: boolean; acknowledgedPackageHashes?: AcknowledgedPackageHashes } = {}): ReturnType<typeof defineTool> {
+export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeoutMs?: number; transitiveDeps?: boolean; acknowledgedPackageHashes?: AcknowledgedPackageHashes; scanSurface?: { configFiles?: boolean; instructionFiles?: boolean }; rules?: Record<string, boolean> } = {}): ReturnType<typeof defineTool> {
   return defineTool({
     name: 'scan_plugin',
     description: 'Static-scan plugin code or an installed package for escape patterns (constructor-chain, direct process access), dynamic execution, hardcoded secrets, and Cordis/DSH bundle contract. Deterministic rule engine in an isolated process; returns a scorecard with verdict (critical/suspicious/clean) and staticScore. 静态层为确定性判定，LLM 不参与。',
@@ -271,6 +301,9 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
             properties: {
               verdict: { type: 'string', required: true },
               staticScore: { type: 'number', required: true },
+              // 0.5.20：产出这条结论的引擎。审计档案要写 `rule_set_version:`，而 agent 只能从这里
+              // 拿到它——没有这个字段，协议里那一行就成了让 agent 自己猜的值。
+              engine: { type: 'string' },
               findings: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } },
               capabilities: {
                 type: 'object',
@@ -284,6 +317,8 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
                   hasNetwork: { type: 'boolean' },
                   hasExec: { type: 'boolean' },
                   esmNamedBuiltins: { type: 'boolean' },
+                  // 0.5.3：命中的具体内建模块（布尔说不出哪个执行面有盲区）
+                  esmNamedBuiltinModules: { type: 'array', items: { type: 'string' } },
                   ghostDeps: { type: 'array', items: { type: 'string' } },
                   zombieDeps: { type: 'array', items: { type: 'string' } },
                   // C4（0.3.8）：原生二进制感知（文件面证据：.node/.so/.dll/.dylib/.exe/.wasm 等
@@ -291,6 +326,20 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
                   hasNativeBinary: { type: 'boolean' },
                   nativeBinaries: { type: 'array', items: { type: 'string' } },
                 },
+              },
+            },
+          },
+          coverage: {
+            type: 'array',
+            description: '九个观测面的结论（九行固定；没表态的面是 unknown，不是「没问题」）',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                surface: { type: 'string', required: true },
+                result: { type: 'string', required: true },
+                reasons: { type: 'array', required: true, items: { type: 'string' } },
+                observedAt: { type: 'number', required: true },
               },
             },
           },
@@ -313,9 +362,18 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
       render: (_args, value) => [{ type: 'text', text: renderScorecard(value as unknown as PluginScorecard) }],
     },
     async execute(args) {
-      const { request, pluginName, pluginVersion } = buildRequest(args as unknown as ScanPluginArgs, config.acknowledgedPackageHashes)
-      request.osv = config.osvCheck === true
-      request.transitiveDeps = config.transitiveDeps === true
+      // 0.5.10：扫描面与网络增强项由部署者配置决定——工具面与加载前扫描从此同一份策略、
+      // 同一个构造点（不变式 9）。此前 request.osv 之类是这里逐行补的，补漏一个就分叉。
+      const { request, pluginName, pluginVersion } = buildRequest(
+        args as unknown as ScanPluginArgs,
+        config.acknowledgedPackageHashes,
+        {
+          ...(config.scanSurface !== undefined ? { surface: config.scanSurface } : {}),
+          ...(config.osvCheck === true ? { osv: true } : {}),
+          ...(config.transitiveDeps === true ? { transitiveDeps: true } : {}),
+          ...(config.rules !== undefined ? { rules: config.rules } : {}),
+        },
+      )
       // P0-3：scanBasis 接线（协议已支持——git 源码仓回扫不误报 R12 入口缺失）
       if (args.scanBasis === 'git' || args.scanBasis === 'npm') request.scanBasis = args.scanBasis
       // P2-1 系列：工具超时与 internal/plugin 同公式（scanBudget：按文件数放大、60s 封顶），
@@ -333,14 +391,35 @@ export function createScanPluginTool(config: { osvCheck?: boolean; scannerTimeou
         const pin = pinStateFor(loadSelfPins(), pluginVersion, hashScanFiles(request.files, args.packagePath))
         selfScan = annotateSelfScan(response.report.findings, { pin, ...(pluginVersion !== undefined ? { version: pluginVersion } : {}) })
       }
+      // 0.5.0（补漏）：单次扫描也要说清「哪些面没看」。agent 在审计协议里最需要知道的
+      // 不是「clean」，而是「这份 clean 建立在什么之上」——被跳过的文件、没问到情报的 OSV。
+      const coverage = withUnknownDefaults(coverageForScan({
+        osvEnabled: request.osv === true,
+        // 0.5.4：把扫描器自述的 OSV 统计带进覆盖面——单次扫描同样要能说「问了没有问到」。
+        osv: response.report.osv,
+        transitiveDeps: false,
+        runtimeGuard: 'off',
+        scanFailed: false,
+        sourceCount: response.report.sourceCount,
+        skippedFiles: response.report.findings.filter((f) => f.rule === 'R8').length,
+        observedAt: Date.now(),
+        scope: 'tool',
+      })).map((entry) => ({
+        surface: entry.surface,
+        result: entry.result,
+        reasons: [...entry.reasons],
+        observedAt: entry.observedAt,
+      }))
       return {
         pluginName,
+        coverage,
         ...(selfScan !== undefined ? { selfScan } : {}),
         ...(pluginVersion !== undefined ? { pluginVersion } : {}),
         scannedAt: new Date().toISOString(),
         static: {
           verdict: response.report.verdict,
           staticScore: response.report.staticScore,
+          engine: response.report.engine,
           // 输出 schema 推断的 findings 项为开放对象，静态 Finding[] 断言为 JSON 值形状
           findings: response.report.findings as unknown as Record<string, JsonValue>[],
           // N1 能力清单：插件静态触达面（hosts/fsPaths/spawnCmds/imports/hasNetwork/hasExec）

@@ -5,7 +5,9 @@ import {
 import {
   DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, isTrackedNetHost, chunkBytes,
 } from '../lib/guard/runtime-hooks.js'
-import type { LedgerFsEvent, LedgerNetEvent } from '../lib/guard/exfil-ledger.js'
+import type { LedgerAlarm, LedgerFsEvent, LedgerNetEvent } from '../lib/guard/exfil-ledger.js'
+import { specFor } from '../lib/domain/kinds.js'
+import { projectAlarm } from '../lib/domain/project.js'
 
 function fsEvt(patch: Partial<LedgerFsEvent> & { plugin: string }): LedgerFsEvent {
   return {
@@ -448,4 +450,75 @@ describe('round-21：readTimes 修剪时间闸（观测放大防护）', () => {
       vi.useRealTimers()
     }
   })
+})
+
+/**
+ * 0.5.16 回归（FAILURES.md F16）：N3 单签名的严重度必须与注册表一致。
+ *
+ * 原来那条「旧字面量 severity 与注册表一致」的测试跳过了这些采集点——fixture 里
+ * exfil-ledger 的 12 行 `source` 是 null，测试 `continue` 掉了。于是注册表把六个单签名
+ * 写成 red、代码一直发 yellow，两边全绿了很多版。
+ *
+ * 这不是文案问题：切到 active 投影后，常量行会覆盖采集点，这六类会**真的变红**。
+ * 所以断言必须经过 projectAlarm（投影入口），而不是只看 ledger 的返回值。
+ */
+describe('N3 单签名严重度 ↔ 注册表（F16）', () => {
+  const SINGLES: ReadonlyArray<{ kind: string; drive: (l: ExfilLedger) => void }> = [
+    { kind: 'n3-mass-delete', drive: l => { for (let i = 0; i < 25; i++) l.observeFs(fsEvt({ plugin: 'p', op: 'unlink', target: '/home/u/d/f' + i, paths: ['/home/u/d/f' + i], sensitive: false })) } },
+    { kind: 'n3-mass-rename', drive: l => { for (let i = 0; i < 8; i++) l.observeFs(fsEvt({ plugin: 'p', op: 'rename', target: '/home/u/d/f' + i, paths: ['/home/u/d/f' + i, '/home/u/d/f' + i + '.crypt'], sensitive: false })) } },
+    { kind: 'n3-in-place', drive: l => { for (let i = 0; i < 12; i++) { l.observeFs(fsEvt({ plugin: 'p', op: 'readFile', target: '/home/u/d/f' + i, paths: ['/home/u/d/f' + i], sensitive: false, bytes: 40 })); l.observeFs(fsEvt({ plugin: 'p', op: 'writeFile', target: '/home/u/d/f' + i, paths: ['/home/u/d/f' + i], sensitive: false, bytes: 40 })) } } },
+    { kind: 'n3-high-freq-read', drive: l => { for (let i = 0; i < 8; i++) l.observeFs(fsEvt({ plugin: 'p', op: 'readFile', target: '/home/u/d/s' + i, paths: ['/home/u/d/s' + i], sensitive: false, bytes: 100 })) } },
+    { kind: 'n3-write-amplify', drive: l => { for (let i = 0; i < 4; i++) l.observeFs(fsEvt({ plugin: 'p', op: 'writeFile', target: '/home/u/d/b' + i, paths: ['/home/u/d/b' + i], sensitive: false, bytes: 40 * 1024 * 1024 })) } },
+    // 软黄档：读→写间隔要「超过序列红窗口但仍在关联窗口内」（30s < gap ≤ 120s），
+    // 立即连发只会落在红窗口里，根本到不了这一支——所以这里必须操纵时钟。
+    { kind: 'n3-exfil', drive: l => {
+      vi.useFakeTimers()
+      try {
+        const t0 = 1_700_000_000_000
+        vi.setSystemTime(t0)
+        // 读 8KB、只发出 512B：量级比值 0.06 落在 [0.4, 3.0] 之外，所以不构成
+        // n3-exfil-match（red），才轮得到这一档软黄。
+        l.observeFs(fsEvt({ plugin: 'p', op: 'readFileSync', target: '/home/u/.ssh/id_rsa', sensitive: true, bytes: 8192 }))
+        vi.setSystemTime(t0 + 60_000)
+        l.observeNet(netEvt({ plugin: 'p', bytes: 512 }))
+      } finally {
+        vi.useRealTimers()
+      }
+    } },
+  ]
+
+  for (const { kind, drive } of SINGLES) {
+    it(`${kind}：采集点严重度 == 注册表常量 == 投影结果`, () => {
+      const l = new ExfilLedger()
+      let siteSeverity: string | undefined
+      // 两条采集通道都要接：外泄档落在 observeNet，破坏族落在 observeFs。
+      const origFs = l.observeFs.bind(l)
+      const origNet = l.observeNet.bind(l)
+      const grab = (out: LedgerAlarm[]): LedgerAlarm[] => {
+        for (const a of out) if (a.kind === kind && siteSeverity === undefined) siteSeverity = a.severity
+        return out
+      }
+      l.observeFs = (evt: LedgerFsEvent) => grab(origFs(evt))
+      l.observeNet = (evt: LedgerNetEvent) => grab(origNet(evt))
+      drive(l)
+      expect(siteSeverity, `${kind} 没有被驱动出来（阈值或驱动写错了）`).toBeDefined()
+      const spec = specFor(kind)
+      expect(spec, `${kind} 未在注册表登记`).toBeDefined()
+      expect(spec!.severity, `${kind} 注册表与采集点不一致`).toBe(siteSeverity)
+      // active 投影会用注册表的常量覆盖采集点——颜色必须不变
+      const projected = projectAlarm({
+        id: 't2:' + kind,
+        subject: { subjectId: 'npm:@acme/p@1.0.0', kind: 'npm', name: '@acme/p', version: '1.0.0' },
+        source: 'runtime_hook',
+        producer: 'vet',
+        code: kind,
+        observedAt: 1_700_000_000_000,
+        outcome: 'observed',
+        attribution: 'exact',
+        target: '/home/u/d/x',
+        message: 'm',
+      }, { severity: siteSeverity as 'yellow' | 'red' | 'info' })
+      expect(projected.severity, `${kind} 投影后换了颜色`).toBe(siteSeverity)
+    })
+  }
 })

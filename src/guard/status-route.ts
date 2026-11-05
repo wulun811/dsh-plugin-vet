@@ -7,10 +7,14 @@
  *   档位预设其余扩展键在 apply 时展开——重启/热重载后生效；保留其他配置键）
  * webServer 是可选服务且可能晚于本插件就绪：注册带轮询重试（插件加载顺序无关）。
  * POST 同源校验（Origin 缺失或不同源 → 403），防止跨站触发。
+ * POST 还可选对**对端**设卡（0.5.13 加、0.5.14 改成 opt-in）：同源校验读的是请求头，非浏览器
+ * 客户端可以自己拼，所以它只能证明「不是跨站表单」，不能证明「操作者是本机主人」。
+ * `controlLocalOnly: true` 时才要求对端是本机（回环 ∪ 本机网卡地址，见 guard/local-peer.ts）。
+ * 默认关：从另一台机器开面板是常态，0.5.13 默认开把用户自己的按钮锁死了。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { readFileSync, renameSync, rmSync, openSync, fsyncSync, closeSync } from 'node:fs'
+import { readFileSync, renameSync, rmSync, openSync, fsyncSync, closeSync, readdirSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,7 +29,13 @@ import { getUpdateView, maybeCheckForUpdate } from './update-check.js'
 import { buildAuditSummary } from './audit-summary.js'
 import { getScanSummary } from './scan-summaries.js'
 import { label as capabilityLabel, history as diffHistory, type CapabilityLabel } from './version-diff.js'
-import { hasAuditRecordBatch } from '../audit/archive.js'
+import { archiveDir, hasAuditRecordBatch } from '../audit/archive.js'
+import { derivePosture } from './posture.js'
+import { isLocalPeer } from './local-peer.js'
+import { effectiveConfigView } from '../config-view.js'
+import { domainProjectionStats } from './alarm-emit.js'
+import { currentReceipts } from './receipt-view.js'
+import { hookHeartbeat } from './runtime-heartbeat.js'
 import { confirmBlock } from './confirm-block.js'
 import { isOfficial } from './runtime-attrib.js'
 
@@ -145,6 +155,54 @@ function reconstructVetOnly(content: string, enable: boolean, key?: string, valu
 /** 新条目块（标准 2/4 缩进；写路径唯一建档格式）。0.3.1 联动：开启守卫 ≡ 中级防御。 */
 const VET_ENTRY_BLOCK = '- id: plugin-vet\n  config:\n    runtimeGuard: watch\n    profile: hardened\n'
 
+/**
+ * 空 patch 文档判定：全文只有注释与空行，外加**至多一个** `[]` 列表标记。
+ *
+ * 为什么不能只判 `content.trim() === '[]'`（0.5.17 修）：DSH 下发的 profile 模板
+ * 不是裸 `[]`，而是三行说明注释 + `[]`。旧判定对模板恒为假，于是走「末尾追加条目」
+ * 分支，写出 `[]` 后面再跟一个 `- id:`——非法 YAML，`atomicWritePatch` 的校验
+ * 拦下写入并回 500。触发条件是**全新 profile 第一次点开关**，恰好是每个新用户
+ * 的第一步；已有配置的老 profile 走不到这条分支，所以自测与线上长期都没暴露。
+ *
+ * 判据刻意写成「注释与空行随便有，`[]` 至多一个，其余一律不算空」——宁可把它判成
+ * 非空（退回追加语义，写出非法 YAML 被校验拦下、用户看到错误），也不要把它误判成
+ * 空而**覆盖掉用户手写的条目**。方向不对称的地方，往不损坏数据那边偏。
+ */
+function isEmptyPatchDocument(content: string): boolean {
+  let markers = 0
+  for (const line of content.split('\n')) {
+    const t = line.trim()
+    if (t === '' || t.startsWith('#')) continue
+    if (t === '[]') {
+      markers += 1
+      if (markers > 1) return false
+      continue
+    }
+    return false
+  }
+  return true
+}
+
+/** 去掉 `[]` 空数组标记行（注释头与空行原样保留）；空文档追加条目前的必经一步。 */
+function stripEmptyArrayMarker(content: string): string {
+  return content.split('\n').filter(line => line.trim() !== '[]').join('\n')
+}
+
+/**
+ * 收尾：条目删光后必须留下 `[]` 标记。
+ *
+ * DSH boot 契约要求 patch 文档是**数组**；只剩注释的文件在 YAML 里解析成 null，
+ * 与「空文件」同类。0.5.17 之前这里靠 `out.trim() === ''` 兜底，只对「裸条目文件」
+ * 成立——模板形态（注释头 + []）删掉条目后仍剩下注释，`trim()` 非空，于是写出一个
+ * 解析为 null 的初始化文件。注释是 DSH 写给用户的说明，删掉它不对；补回标记才对。
+ */
+function finalizeEmptyDocument(content: string): string {
+  if (!isEmptyPatchDocument(content)) return content
+  const kept = stripEmptyArrayMarker(content)
+  const head = kept.trim() === '' ? '' : kept.endsWith('\n') ? kept : kept + '\n'
+  return head + '[]\n'
+}
+
 /** 块内查找：返回 lines[start..end) 中首个匹配行下标，无则 -1。 */
 function findInBlock(lines: string[], start: number, end: number, re: RegExp): number {
   for (let i = start; i < end; i++) {
@@ -191,9 +249,13 @@ function spliceRuntimeGuardText(content: string, enable: boolean): { content: st
   const start = lines.findIndex(isVetEntryLine)
   if (start === -1) {
     if (!enable) return { content, repaired: false }
-    // 空文件 / DSH boot 空数组（[]）形态：直接生成新条目文件
-    if (lines.length === 1 && lines[0].trim() === '') return { content: VET_ENTRY_BLOCK + '\n', repaired: false }
-    if (content.trim() === '[]') return { content: VET_ENTRY_BLOCK + '\n', repaired: false }
+    // 空文档（空文件 / 裸 `[]` / DSH 模板的「注释头 + []」）：换掉 `[]` 标记并追加条目。
+    // 注释头原样保留——那是 DSH 写给用户的说明，不该被我们的写入吃掉。
+    if (isEmptyPatchDocument(content)) {
+      const kept = stripEmptyArrayMarker(content)
+      const head = kept.trim() === '' ? '' : kept.endsWith('\n') ? kept : kept + '\n'
+      return { content: head + VET_ENTRY_BLOCK + '\n', repaired: false }
+    }
     const tail = content.endsWith('\n') ? '' : '\n'
     return { content: content + tail + VET_ENTRY_BLOCK + '\n', repaired: false }
   }
@@ -239,9 +301,9 @@ function spliceRuntimeGuardText(content: string, enable: boolean): { content: st
     }
   }
   let out = lines.join('\n')
-  if (out.trim() === '') return { content: '[]', repaired: false }
   if (!out.endsWith('\n')) out += '\n'
-  return { content: out, repaired: false }
+  // 条目删光后补回 `[]` 标记（注释头保留）——只剩注释的文件在 YAML 里是 null，不是数组。
+  return { content: finalizeEmptyDocument(out), repaired: false }
 }
 
 /**
@@ -257,8 +319,14 @@ function spliceVetEntryKeyText(content: string, key: string, value: string): { c
   const start = lines.findIndex(isVetEntryLine)
   if (start === -1) {
     if (value === 'standard') return { content, repaired: false }
-    if (lines.length === 1 && lines[0].trim() === '') return { content: '- id: plugin-vet\n  config:\n    ' + key + ': ' + value + '\n', repaired: false }
-    if (content.trim() === '[]') return { content: '- id: plugin-vet\n  config:\n    ' + key + ': ' + value + '\n', repaired: false }
+    // 与 spliceRuntimeGuardText 同一判据：空文档（含 DSH 模板的「注释头 + []」）保留注释头，
+    // 只换掉 `[]` 标记。旧实现只认裸 `[]`，对模板会追加出 `[]` + 条目的非法 YAML。
+    if (isEmptyPatchDocument(content)) {
+      const block = '- id: plugin-vet\n  config:\n    ' + key + ': ' + value + '\n'
+      const kept = stripEmptyArrayMarker(content)
+      const head = kept.trim() === '' ? '' : kept.endsWith('\n') ? kept : kept + '\n'
+      return { content: head + block, repaired: false }
+    }
     const tail = content.endsWith('\n') ? '' : '\n'
     return { content: content + tail + '- id: plugin-vet\n  config:\n    ' + key + ': ' + value + '\n', repaired: false }
   }
@@ -291,16 +359,15 @@ function spliceVetEntryKeyText(content: string, key: string, value: string): { c
     const shellOnly = meaningful.every(l => /^-\s*id:/.test(l) || /^\s*config:\s*$/.test(l))
     if (shellOnly) lines.splice(start, blockEnd - start)
     let out = lines.join('\n')
-    if (out.trim() === '') return { content: '[]', repaired: false }
     if (!out.endsWith('\n')) out += '\n'
-    return { content: out, repaired: false }
+    return { content: finalizeEmptyDocument(out), repaired: false }
   } else {
     lines[keyIdx] = lines[keyIdx].replace(new RegExp('^(\\s*)' + key + ':.*$'), '$1' + key + ': ' + value)
   }
   let out = lines.join('\n')
-  if (out.trim() === '') return { content: '[]', repaired: false }
   if (!out.endsWith('\n')) out += '\n'
-  return { content: out, repaired: false }
+  // 条目删光后补回 `[]` 标记（注释头保留）——只剩注释的文件在 YAML 里是 null，不是数组。
+  return { content: finalizeEmptyDocument(out), repaired: false }
 }
 
 /**
@@ -889,6 +956,19 @@ export function registerStatusRouteOnce(
       path: '/vet',
       handler: (req, res) => {
         const pathname = (req.url ?? '').split('?')[0]
+        // 0.5.13（Q4）：写入口只接受本机来源。放在分发之前——四个写路由共用一道闸，
+        // 以后再加一个写端点不会漏网。GET 不受影响（只读，且已有同源校验）。
+        if (req.method === 'POST' && config.controlLocalOnly === true) {
+          const peer = req.socket?.remoteAddress
+          if (!isLocalPeer(peer)) {
+            writeJson(res, 403, {
+              ok: false,
+              note: `已开启 controlLocalOnly：控制面写入口只接受本机请求（对端 ${peer ?? '未知'}）。`
+                + '要在别的机器上操作面板，把 controlLocalOnly 改回 false（默认）——它只是同源校验之外的一道额外收紧，不是鉴权。',
+            })
+            return
+          }
+        }
         if (req.method === 'POST' && pathname.endsWith('/vet/dismiss')) {
           handleDismiss(req, res, status, false)
           return
@@ -950,6 +1030,26 @@ export function registerStatusRouteOnce(
             isBlocked: name => confirmBlock.isFamily1Blocked(name),
           }),
           lastUpgradeDiff: lastUpgradeDiffOf(snap.alarms),
+          // 0.5.2：六个面的生效姿态。`desired ≠ effective` 必须能被看到——静默对齐成
+          // 「看着还行」是被这套设计明确禁止的那种呈现。
+          effectivePosture: derivePosture({
+            autoScan: config.autoScan,
+            requireAudit: config.requireAudit === true,
+            runtimeGuard: config.runtimeGuard,
+            confirmBlock: config.confirmBlock,
+            hookChecks: hookHeartbeat().checks,
+            archiveDirReadable: archiveDirReadable(),
+            lastScanOk: snap.lastScan === undefined ? undefined : true,
+          }),
+          // 0.5.7：最近一次拦截判定的回执。空数组表示「本次没有可展示的拦截判定」，不是
+          // 「一切正常」——面板据此不渲染整块，而不是渲染一条绿色的「未拦截任何操作」。
+          receipts: currentReceipts(),
+          // 0.5.12：你动过的键里，哪些当前真的在起作用。只给事实与原因，不给分数。
+          // 0.5.20：0.5.12 起就有这块，但客户端从没读过——数据在，没人看（见 docs/FAILURES.md）。
+          effectiveConfig: effectiveConfigView(config),
+          // 0.5.20：投影与旧字面量的比对计数。0.5.18 起三种模式都比对（保险丝在生产里真的通着电），
+          // 但结果此前只被测试读——这条让它有地方可去：一旦某处投影不再等价，面板上看得见。
+          domainProjection: { mode: config.domainProjection, ...domainProjectionStats() },
         })
       },
     }),
@@ -1013,6 +1113,22 @@ function handleDismiss(req: IncomingMessage, res: ServerResponse, status: VetSta
  * 安装盾牌状态路由：webServer 可能晚于本插件就绪（fiber 未 ACTIVE 时
  * ctx.get 返回 undefined），轮询重试直到注册成功；超时只告警不阻断。
  */
+/**
+ * 档案目录当前是否可用。`requireAudit` 打开却读不到 = 没人能被审，必须显示成 gap。
+ *
+ * 注意「不存在」与「读不了」不是一回事：首次审计之前目录本来就不存在，那时闸门是好的
+ * （它会拦下所有第三方插件，这正是 requireAudit 的语义）。把「不存在」也算成 gap，
+ * 会让每个刚打开 requireAudit 的用户看到一条假故障。
+ */
+function archiveDirReadable(): boolean {
+  try {
+    readdirSync(archiveDir())
+    return true
+  } catch (error) {
+    return (error as { code?: string }).code === 'ENOENT'
+  }
+}
+
 export function installStatusRoute(ctx: Context, config: VetConfig, status: VetStatus): void {
   const c = ctx as unknown as ContextLike
   if (registerStatusRouteOnce(c, config, status)) return
