@@ -14,8 +14,9 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { readFileSync, renameSync, rmSync, openSync, fsyncSync, closeSync, readdirSync } from 'node:fs'
+import { existsSync, renameSync, rmSync, openSync, fsyncSync, closeSync, readdirSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
+import { readSmallRegularFile, PATCH_FILE_MAX_BYTES } from './fs-read.js'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as yaml from 'js-yaml'
@@ -106,19 +107,24 @@ function reconstructVetOnly(content: string, enable: boolean, key?: string, valu
   if (/^---\s*$/m.test(content)) {
     return { content, repaired: false, refused: true }
   }
+  // round-23 review（数据丢失，2026-08-26 事故的完整形状）：解析不出来就**拒绝写入**。
+  // 旧实现 `catch { entries = [] }` 之后继续重建——输出只剩 vet 一条，用户手写的
+  // webserver/insert/其他插件条目**整段消失**，而提示语只说「已修复」。解析失败意味着
+  // 「我们不知道文件里还有什么」，这个前提下任何写入都是在赌；`!!js` 是最常见的触发
+  // （默认 schema 不认该 tag，而本模块自己为它扩了 JS_TAGS —— 同一个文件两种读法）。
+  // 与多文档同待遇：refused，交给用户手动合并。
+  if (/!!js/.test(content)) return { content, repaired: false, refused: true }
   let entries: unknown[] = []
   let parsed: unknown
   try {
     parsed = yaml.load(content)
-    if (parsed === null || parsed === undefined) {
-      entries = []
-    } else if (Array.isArray(parsed)) {
-      entries = parsed
-    } else {
-      entries = []
-    }
   } catch {
-    entries = []
+    return { content, repaired: false, refused: true }
+  }
+  if (parsed !== null && parsed !== undefined) {
+    if (Array.isArray(parsed)) entries = parsed
+    // 非数组（标量/映射）= 结构不是 patch 层：同样不知道该怎么合并，拒绝而不是重建
+    else return { content, repaired: false, refused: true }
   }
   const existingVetConfig: Record<string, unknown> = {}
   let captured = false
@@ -127,13 +133,13 @@ function reconstructVetOnly(content: string, enable: boolean, key?: string, valu
     const id = (e as Record<string, unknown>).id
     const isVet = id === PLUGIN_ENTRY_ID || id === '@jieai/dsh-plugin-vet'
     if (isVet && !captured) {
+      // 0.5.30：key/value 的应用移出 `if (config)`——vet 条目只写 `- id: plugin-vet`
+      // （无 config 键）时，请求的档位此前被静默丢弃，调用方却照常回报 profile。
       const config = (e as Record<string, unknown>).config
-      if (config && typeof config === 'object') {
-        Object.assign(existingVetConfig, config)
-        if (key !== undefined && value !== undefined) existingVetConfig[key] = value
-        else if (enable) existingVetConfig.runtimeGuard = 'watch'
-        else delete existingVetConfig.runtimeGuard
-      }
+      if (config && typeof config === 'object') Object.assign(existingVetConfig, config)
+      if (key !== undefined && value !== undefined) existingVetConfig[key] = value
+      else if (enable) existingVetConfig.runtimeGuard = 'watch'
+      else delete existingVetConfig.runtimeGuard
       captured = true
     }
     return !isVet
@@ -433,12 +439,43 @@ function sameOrigin(req: IncomingMessage): boolean {
     const o = new URL(origin)
     // 协议比对：req.url 是路径（/vet/...），无法直接取 scheme——用标准端口推断不安全；
     // 稳妥做法：Origin scheme 必须是 http/https 之一（file: 服务桌面面板的 Origin 仅测试用），
-    // 且 host 精确匹配（包含端口）。Host 头本身由 HTTP 栈保证与请求目标一致。
+    // 且 host 精确匹配（包含端口）。
     if (o.protocol !== 'http:' && o.protocol !== 'https:') return false
-    return o.host === host
+    if (o.host !== host) return false
+    // round-23（DNS 重绑定）：`Origin === Host` 只证明「浏览器认为它同源」——而 Host 头
+    // 是**请求方给的**。攻击者可让 evil.example 解析到 127.0.0.1，页面的 Origin 与随后
+    // 发出的 Host 都是 evil.example:3456，两项天然相等，TCP 对端还确实是回环，
+    // controlLocalOnly 也拦不住。所以 Host 本身必须是「本机权威」：回环名/IP，或本机网卡
+    // 上的 IP 字面量。域名一律不接受——重绑定正是靠域名成立。
+    return isLocalAuthority(host)
   } catch {
     return false
   }
+}
+
+/**
+ * `Host` 头是否指向**本机**（round-23）：`localhost`、回环地址，或本机某块网卡的 IP 字面量。
+ * 复用 `isLocalPeer` 的地址判定，只是把「TCP 对端」换成「请求指向的主机」——
+ * 域名（含被重绑定到 127.0.0.1 的域名）不在其中，这正是要挡的那一类。
+ * 代价写在 SECURITY.md：用**主机名**（而非 IP）打开面板时，写入口会被拒——改用 IP 即可。
+ */
+function isLocalAuthority(hostHeader: string): boolean {
+  const raw = hostHeader.trim()
+  if (raw === '') return false
+  // 取 hostname 段：IPv6 是 [::1]:3456，IPv4/域名是 host:port。不用 URL 解析——
+  // `new URL('http://' + raw)` 对畸形 Host 会抛，而这里只需要字符串切分。
+  let hostname: string
+  if (raw.startsWith('[')) {
+    const end = raw.indexOf(']')
+    if (end < 0) return false
+    hostname = raw.slice(1, end)
+  } else {
+    const colon = raw.lastIndexOf(':')
+    hostname = colon < 0 ? raw : raw.slice(0, colon)
+  }
+  if (hostname === '') return false
+  if (hostname.toLowerCase() === 'localhost') return true
+  return isLocalPeer(hostname)
 }
 
 /**
@@ -493,7 +530,10 @@ export function readPatchRuntimeGuard(ctx: ContextLike): 'watch' | 'off' {
   // P2-6：vet 自读 patch（盾牌 5s 轮询）在 .dsh 敏感段下会自报警——vetSelfIo 直通
   return withVetSelfIo(() => {
     try {
-      const content = readFileSync(join(resolveProfileDir(baseUrl), 'cordis.patch.yml'), 'utf8')
+      // round-23：有界读取（FIFO/设备文件/超大文件一律按「读不到」处理）——同步路径上
+      // 一次裸 readFileSync 就能被一个 FIFO 永久阻塞，而盾牌每 5s 轮询走这里。
+      const content = readSmallRegularFile(join(resolveProfileDir(baseUrl), 'cordis.patch.yml'), PATCH_FILE_MAX_BYTES)
+      if (content === null) return 'off'
       const lines = content.split('\n')
       const start = lines.findIndex(isVetEntryLine)
       if (start === -1) return 'off'
@@ -519,7 +559,10 @@ export function readPatchVetKeys(ctx: ContextLike): Set<string> {
   if (baseUrl === undefined) return new Set()
   return withVetSelfIo(() => {
     try {
-      const content = readFileSync(join(resolveProfileDir(baseUrl), 'cordis.patch.yml'), 'utf8')
+      // round-23：有界读取（FIFO/设备文件/超大文件一律按「读不到」处理）——同步路径上
+      // 一次裸 readFileSync 就能被一个 FIFO 永久阻塞，而盾牌每 5s 轮询走这里。
+      const content = readSmallRegularFile(join(resolveProfileDir(baseUrl), 'cordis.patch.yml'), PATCH_FILE_MAX_BYTES)
+      if (content === null) return new Set()
       const lines = content.split('\n')
       const start = lines.findIndex(isVetEntryLine)
       if (start === -1) return new Set()
@@ -550,14 +593,13 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
   const patchPath = join(resolveProfileDir(ctx.baseUrl), 'cordis.patch.yml')
   // P2-6：vet 自写自己的 patch 配置（用户点按钮触发）——vetSelfIo 直通，不自报警
   return withVetSelfIo(() => {
-    let content: string
-    try {
-      content = readFileSync(patchPath, 'utf8')
-    } catch (error) {
+    // round-23：有界读取——FIFO/设备文件会让写入路由挂死在同步系统调用里而不是返回错误。
+    const read = readSmallRegularFile(patchPath, PATCH_FILE_MAX_BYTES)
+    if (read === null) {
       if (!enable) return { ok: true, note: '当前未开启', profile: 'standard' }
       // 首次开启时 cordis.patch.yml 可能还不存在 → 直接新建
-      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-        return { ok: false, note: `无法读取 ${profileName()}` }
+      if (existsSync(patchPath)) {
+        return { ok: false, note: `无法读取 ${profileName()}（不是普通文件，或超过 ${PATCH_FILE_MAX_BYTES / 1024}KB 上限）` }
       }
       // 文件不存在：行级手术直接生成新文件（含档位行：开启守卫 ≡ 中级防御）
       const { content: newContent } = spliceRuntimeGuardText('', true)
@@ -569,6 +611,7 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
       }
       return { ok: true, note: `已写入 ${profileName()}，防御等级：中级防御（配置已持久化）`, profile: 'hardened' }
     }
+    const content = read
     // 文件存在：行级手术（只动 runtimeGuard/profile 行，其余行原样保留）
     // 顺序：profile 手术在前、rg 手术在后——两者都缺失时 rg 插在 config 行后、
     // profile 被顺延，最终行序 = [config, runtimeGuard, profile]，与 VET_ENTRY_BLOCK/
@@ -606,8 +649,9 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
     }
     // round-15 review：多文档（refused）→ 拒绝写入，绝不重排破坏用户手写的其他文档
     // （须在 working===content 短路判定之前——多文档时 splice 原样返回，先命中「无配置变化」）
+    // round-23：拒绝面扩到「!!js 表达式 / 解析不出结构」——都是「重建会把不知道的东西删掉」。
     if (refused) {
-      return { ok: false, note: `${profileName()} 含多文档（--- 分隔），无法安全写入——请手动合并为单文档后重试（vet 不修改多文档补丁）` }
+      return { ok: false, note: `${profileName()} 无法安全写入（含多文档分隔、!!js 表达式，或无法解析的内容）——请手动合并为单文档后重试（vet 不修改这类文件）` }
     }
     // 检查是否真的需要写入（避免无意义的文件修改）
     if (working === content && !repaired) {
@@ -619,7 +663,9 @@ export function writeRuntimeGuardConfig(ctx: ContextLike, enable: boolean): { ok
       return { ok: false, note: `写入失败：${String(error)}` }
     }
     if (repaired) {
-      return { ok: true, note: `${profileName()} 已损坏并已修复（其余条目已丢失，请核对）`, profile: tier }
+      // round-23：repaired 现在只发生在「解析成功、只是格式需要重排」的情形（其余一律
+      // refused），因此其余条目是**保留**的——旧文案「其余条目已丢失」会让用户白紧张一场。
+      return { ok: true, note: `${profileName()} 条目格式已重排（其余条目已保留，请核对）`, profile: tier }
     }
     return {
       ok: true,
@@ -649,14 +695,13 @@ export function writeVetTierConfig(ctx: ContextLike, tier: string): { ok: boolea
   const patchPath = join(resolveProfileDir(ctx.baseUrl), 'cordis.patch.yml')
   // P2-6：vet 自写自己的 patch 配置（用户点按钮触发）——vetSelfIo 直通，不自报警
   return withVetSelfIo(() => {
-    let content: string
-    try {
-      content = readFileSync(patchPath, 'utf8')
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-        return { ok: false, note: `无法读取 ${profileName()}` }
-      }
-      content = '[]'
+    // round-23：有界读取（同 writeRuntimeGuardConfig 的理由）
+    const content = readSmallRegularFile(patchPath, PATCH_FILE_MAX_BYTES)
+      ?? (existsSync(patchPath)
+        ? null
+        : '[]') // 文件不存在 → 按空文档起步（历史语义）
+    if (content === null) {
+      return { ok: false, note: `无法读取 ${profileName()}（不是普通文件，或超过 ${PATCH_FILE_MAX_BYTES / 1024}KB 上限）` }
     }
     // 档位行手术在前，守卫行手术在后（插入顺序：profile 在 config 下、rg 更内层）
     const { content: tierContent, repaired: tierRepaired, refused: tierRefused } = spliceVetEntryKeyText(content, 'profile', tier)
@@ -681,7 +726,7 @@ export function writeVetTierConfig(ctx: ContextLike, tier: string): { ok: boolea
       return { ok: false, note: `写入失败：${String(error)}` }
     }
     if (repaired) {
-      return { ok: true, note: `${profileName()} 已损坏并已修复（其余条目已丢失，请核对）：防御等级=${TIER_LABEL[tier] ?? tier}`, profile: tier }
+      return { ok: true, note: `${profileName()} 条目格式已重排（其余条目已保留，请核对）：防御等级=${TIER_LABEL[tier] ?? tier}`, profile: tier }
     }
     return { ok: true, note: `已切换防御等级：${TIER_LABEL[tier] ?? tier}（配置已持久化）`, profile: tier }
   })
@@ -1039,7 +1084,12 @@ export function registerStatusRouteOnce(
             confirmBlock: config.confirmBlock,
             hookChecks: hookHeartbeat().checks,
             archiveDirReadable: archiveDirReadable(),
-            lastScanOk: snap.lastScan === undefined ? undefined : true,
+            // round-27：旧写法 `lastScan === undefined ? undefined : true` 在生产上只能是
+            // true/undefined——扫描器持续崩，preload_scan 也永远显示「已生效」。失败的证据是
+            // 活跃的 scan-fail 报警：有它就是 false，没有且扫过才是 true。
+            lastScanOk: snap.lastScan === undefined
+              ? undefined
+              : snap.alarms.some((a) => a.kind === 'scan-fail') ? false : true,
           }),
           // 0.5.7：最近一次拦截判定的回执。空数组表示「本次没有可展示的拦截判定」，不是
           // 「一切正常」——面板据此不渲染整块，而不是渲染一条绿色的「未拦截任何操作」。
@@ -1085,6 +1135,13 @@ function readIdBody(req: IncomingMessage, res: ServerResponse, onId: (id: string
       writeJson(res, 400, { ok: false, note: '缺少报警 id' })
       return
     }
+    // round-23：长度上限——id 直接进持久化键（200 条 LRU），无上限等于提供一个
+    // 「用垃圾键把用户真实忽略挤出去」的写放大入口。真实 id 是短标识（含包名/路径摘要），
+    // 512 字符已有两个数量级余量。
+    if (id.length > 512) {
+      writeJson(res, 400, { ok: false, note: '报警 id 过长' })
+      return
+    }
     onId(id)
   })
   req.on('error', () => {
@@ -1104,7 +1161,19 @@ function handleDismiss(req: IncomingMessage, res: ServerResponse, status: VetSta
   readIdBody(req, res, (id) => {
     if (id === undefined) return
     if (restore) status.restore(id)
-    else status.dismiss(id)
+    else {
+      // round-23（状态污染）：只接受**当前认识**的 id。旧实现把任意字符串写进持久化库，
+      // 而该库是按 dismissedAt 淘汰的 200 条 LRU——一串不存在的 id 就能把用户真实的忽略
+      // 记录挤掉（重启后那些报警复活），且垃圾键既不在 snapshot().dismissed 里、也没有
+      // 生产调用方展示，用户只能手改文件清理。
+      const snap = status.snapshot()
+      const known = snap.alarms.some(a => a.id === id) || snap.dismissed.some(a => a.id === id)
+      if (!known) {
+        writeJson(res, 404, { ok: false, note: '该报警已不存在（可能已过期或被清理）' })
+        return
+      }
+      status.dismiss(id)
+    }
     writeJson(res, 200, { ok: true })
   })
 }

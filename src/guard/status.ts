@@ -301,6 +301,37 @@ export class VetStatus {
   }
 
   /**
+   * 撤下一条**被证据推翻**的报警（0.5.28）。
+   *
+   * 为什么不复用 dismiss：忽略是用户对当时那条观察的答复——记录保留、可恢复、进「已忽略」区；
+   * 这里是 vet 自己的命题后来被证伪。`official-not-in-catalog` 的前提是「这个名字不在官方全集
+   * 里」，而 registry 核对确认它确实是官方包之后，这个前提就不成立了。留着它，面板上会永远挂着
+   * 一条已知不成立的黄牌，而每一次 DSH 升级都会新增若干条（0.2.2-rc.1 → rc.4 实测 4 条），
+   * 用户只能逐条点掉——这正是 vet 反复在打的警报疲劳。
+   *
+   * 已忽略的行**照撤**：忽略发生在这条观察被证伪之前，不等于用户同意把一个错误结论存档；
+   * 而「已忽略」区存在的意义是「你看过但不想看」，不是「留一条假的」。该观察的忽略状态也随之
+   * 失效（含持久化，否则同名的新观察一出生就是折叠态）。
+   * 记录不留白：调用方补一条 info（`official-catalog-merged`）说明这条黄牌为什么消失，审计链
+   * 仍然完整。
+   *
+   * @returns 是否真的删掉了一行（调用方据此决定文案用「已自动撤下」还是「可忽略」）。
+   */
+  retract(id: string): boolean {
+    const idx = this.alarms.findIndex(a => a.id === id)
+    if (idx < 0) return false
+    const alarm = this.alarms[idx]
+    this.alarms.splice(idx, 1)
+    // 忽略状态一起清：它是「对这条已被证伪的观察」的答复，不该在新观察上继续生效。
+    // 只清内存不够——持久化忽略跨 session，留着会让同名的新黄牌一出生就是折叠态。
+    const key = alarm.mergeKey ?? alarm.id
+    this.dismissedIds.delete(key)
+    this.dismissedIds.delete(id)
+    restorePersistentDismissal(key)
+    return true
+  }
+
+  /**
    * 撤掉这个对象**仍然存活**的旧结论行（`scan-verdict:<name>:*`），保留 `keepId`。
    * 证据变了但仍非 clean（换了一条公告、依赖升级后还有别的问题）时用得到——否则旧行会一直
    * 留到 24h TTL：面板上同一个包两行，且旧行还点着已经修好的那条公告。

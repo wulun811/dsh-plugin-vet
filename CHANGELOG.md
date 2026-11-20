@@ -3,6 +3,304 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [0.5.35] - 2026-11-20
+
+### Changed — the "whole-package exfiltration" red now needs a real amount
+
+The N3 ledger upgraded "read secrets, then wrote something of a similar order" to red. The ratio band was
+`[0.4, 3.0]` and the write floor was the same 512 B as the read floor, so a 2 KB credential read followed by
+17 × 50 B of telemetry over 24 hours (850 B, ratio 0.415) lit the shield red and kept it there. Real
+exfiltration sends the file, so the ratio is close to 1 and the volume is at least the file's size.
+
+Red now requires **≥ 1 KB written** (`exfilMinWriteBytes`, new option) **and ratio ≥ 0.8**; the upper bound
+stays at 3.0 so ordinary large uploads are still not flagged. The yellow read→write observation is unchanged.
+
+### Documented — the trust model's deliberate edges
+
+`SECURITY.md` now states the three decisions taken on 2026-11-20: first-seen official packages keep their
+noise reduction (the next load's hash comparison is what exposes an impostor), the official catalog file stays
+a plain writable file (same-user processes already trust each other), and `requireAudit` keeps skipping
+`@deepseek-ai/` names (the hash baseline is the backstop).
+
+## [0.5.34] - 2026-11-20
+
+### Fixed — three observation holes and one dishonest status
+
+- **`exec('cat ~/.ssh/id_rsa')` produced nothing.** The spawn rule only looked at sensitive
+  paths when the command contained a *destructive* verb (`rm`, `dd`, `shred`…) or a shell
+  redirect. The same read through `fs.readFileSync` is a yellow, so the subprocess path was a
+  free way to touch credentials. Reader tools and interpreters (`cat`, `head`, `base64`, `tar`,
+  `scp`, `curl`, `node`, `python`, `sh`…) now combine with a sensitive path into a yellow
+  `spawn` alarm ("子进程读取敏感路径"); a command without a sensitive path stays silent.
+- **HTTP/2 bodies were invisible.** `session.request()` returns the stream that carries the
+  bytes, but the hooks only sat on `http2.connect`, so `session.request().write(secret)` gave
+  no ledger bytes and no canary match. `http2.connect` now wraps the session's `request` to
+  attach the write counter and canary scanner to the returned stream.
+- **Worker threads' children were not counted.** `/proc/<pid>/task/<pid>/children` is
+  per-thread; a fork bomb spawned inside a `worker_threads` worker was invisible to the T1
+  sentinel. The sample now unions the `children` files of every thread.
+
+### Fixed — `preload_scan` reported "enforced" no matter what
+
+The posture input was `lastScan === undefined ? undefined : true` — in production it can only
+be `true` or `undefined`, so a scanner that kept crashing still showed the surface as working.
+An active `scan-fail` alarm now makes it `false`.
+
+## [0.5.33] - 2026-11-20
+
+### Fixed — two holes in network observation, and the noise between them
+
+- **`new net.Socket()` was completely unobserved.** Every hook lived on the module factories
+  (`net.connect/createConnection/request/get`), so a plugin could do
+  `new Socket(); s.connect(port, host); s.write(secret)` and get no `net-egress` alarm, no
+  ledger bytes and no canary match. `net.Socket.prototype.write` is now hooked once: the first
+  write on a socket that no wrapper owns emits the connection observation (host:port from
+  `remoteAddress/remotePort`), feeds the ledger and runs the canary scan. Sockets belonging to
+  an HTTP request carry `_httpMessage` and are skipped (the HTTP wrapper already counts them);
+  sockets created through `net.connect()` have their own `write` and shadow the prototype, so
+  nothing is counted twice.
+- **One HTTP request was observed twice.** `http.request` internally calls the module's
+  `net.createConnection`, so both wrappers reported: a 4096-byte POST recorded 8286 bytes
+  (body plus the whole wire) and produced two `net-egress` alarms with different targets
+  (`host/path?x=1` and `host/`). The `net` wrapper now defers to the HTTP wrapper when the
+  nearest frames are Node's own `_http_agent`/`_http_client`/`tls` internals — plugin frames in
+  a callback are still observed normally.
+
+### Fixed — two cost paths the caller controls
+
+- `isSensitivePath` charged `segments × config` per call on paths up to 64 KB: a 40 KB path
+  cost 14.3 ms and the kernel answers it with `ENAMETOOLONG` for free, so a plugin could occupy
+  the host event loop in a loop. Only the first and last 64 segments are examined now (sensitive
+  names live at one end or the other), which bounds the cost without narrowing the judgement.
+- `attachCanaryScanner` decoded the whole chunk before applying its 64 KB window: one 256 MB
+  `write` cost 151 ms and an extra 256 MB (`String(buffer)`), and a GB-sized chunk OOMs the
+  host. Buffers are now sliced to the window before decoding.
+
+## [0.5.32] - 2026-11-19
+
+### Fixed — complexity the input controls
+
+- **R3 walked the whole file once per destructured member.** `const { exit } = process` style
+  bindings are checked by name, and the implementation did a full AST traversal for *each*
+  name: k names cost k passes. 8000 members in a 199 KB file took 42 s, past the 15 s scan
+  budget, so the package produced `scan-fail` instead of a verdict. One pass now buckets
+  identifier hits by name; the per-hit judgement is unchanged.
+- **R9's disjointness check compared every branch pair** while the work budget counted only
+  body characters. 40 000 two-character branches (80 KB) fit the budget and took 14.4 s.
+  Comparisons are now charged to the budget (`b·(b−1)/2`), branch count is capped at 512, and
+  over-budget means "cannot prove disjoint" — the conservative side, which reports.
+- **The cache key materialised every file's contents first.** `request.files.map(...)`
+  produced the array before `cacheKey` was even called, so 560 × 8 MB files sat in memory at
+  once (4.8 GB RSS) and that read happened outside the scan budget. `cacheKey` now takes an
+  `Iterable`; the engine feeds it a generator, so contents are hashed and dropped one at a
+  time.
+
+Engine `static-v35` (cache invalidates).
+
+### Fixed — a record that disproves official status no longer gets official treatment
+
+`suspected` means the registry comparison already established that local bytes differ from
+the published tarball. Such a record still received `officialDenyExempt` and the
+`officialFamily` artifact folding — i.e. "we checked and it does not match, but treat it as
+official anyway". Both now require `!suspected`; a suspected official-named package gets the
+same deny path and artifact grading as any third-party package, on top of the existing
+`official-match-suspected` yellow.
+
+### Fixed — a hash it could not compute is no longer reported as "ok"
+
+`checkThirdPartyBaseline` returned `ok` when `computePackageHash` returned `null` (over 50 MB,
+over 1000 files, or over 10 s) — silently turning P7 off for exactly the packages where it
+could not run. It now returns `unverifiable` and the loader records one `info` row
+(`p7-unverifiable:<name>`): loading is not blocked, but the panel shows that no
+"same bytes as last time" evidence was obtained.
+
+## [0.5.31] - 2026-11-19
+
+### Fixed — a package can no longer lower its own verdict by declaring things
+
+Two downgrades in the scanner keyed off what the *package itself* claims:
+
+- `bin`/`scripts` entries lowered R2/R3/R9 severity to the "CLI script" band. A plugin whose
+  entry is `index.js` could add `"bin": {"x": "index.js"}` and turn an R3 `critical`
+  (`process.exit`, constructor-chain escape) into `info`, taking the verdict from `critical`
+  to `clean` with one line of manifest. Module entries (`main`/`module`/`exports`) are now
+  tracked separately from `bin`, and for `targetKind: 'plugin'` a declared module entry is
+  never treated as a CLI script. (`generic` packages and DSH's own CLI packages keep the old
+  semantics.)
+- Files under a `test/`-looking path were folded to `info`. That check only exempted the
+  *declared entry itself*, so a payload at `test/payload.js` imported by the entry was still
+  "a test file" — `process.exit`, `curl|sh`, `exec` all downgraded, package `clean`. The
+  engine now walks relative `import`/`require`/`import()` specifiers from the declared
+  entries (bounded: 500 files, 8 MB each) and adds everything reachable to the "product code"
+  set. Paths are not evidence of reachability; the import graph is. Deliberately
+  one-directional: the reachable set can only *remove* downgrades.
+
+Engine `static-v34` (cache invalidates).
+
+### Fixed — capacity pruning no longer throws away upgrade baselines
+
+`pruneCapabilities` kept the newest 1000 records globally. Records are keyed
+`<name>@<version>`, so one busy scan of unrelated packages could evict a package's only
+record — after which its next upgrade diff had no `prev` and degraded to a cold start
+(`from: null`, no alarm), including the `hasNetwork` + credential-path case that is a red
+when the baseline is there. Pruning now keeps the newest record of every package as
+non-evictable, evicts *older versions* first (oldest first), and only drops whole packages
+when the cap is exceeded by package count alone.
+
+### Compatibility — DSH `0.2.2-rc.5`
+
+Re-verified against 0.2.2-rc.5: devDependencies re-pinned to the rc.5 family (exact peer
+ranges force the whole family to move together), typecheck and the full suite green, the
+official-catalog seed still covers every installed `@deepseek-ai/*` package (337 on this
+machine, all already in the 395-name seed), and the `tools/execute` / client slot contracts
+unchanged. Re-scanning `dsh-plugin-manager`, `dsh-host-webserver` and `dsh-tools` with the new
+engine is `clean` — rc.5 introduces no new capability shapes vet needs to know.
+
+## [0.5.30] - 2026-11-18
+
+### Fixed — a full review round, and the eight things it found
+
+Every item below was reproduced before it was fixed; the reproductions are the new tests in
+`test/round23-review-fixes.test.ts` and in the scanner's own rule tests.
+
+**The scanner could be turned off by its input.** A 36-byte string literal
+(`"169.254.169.254` + `a`×20 + `!"`) drove R13's endpoint-shape regex into exponential
+backtracking — 26 s of CPU, past the 15 s scan budget, so the package got `scan-fail` instead
+of a verdict. R14/R20 had the same shape (`curl[^\n|]*\|` is quadratic on a line full of
+`curl` tokens: 27 s for a 256 KB script). Two more inputs were worse: a ~2000-deep expression
+chain made the recursive AST walk throw `RangeError`, and because that throw happens *before*
+the rules run, every rule for that file was skipped and the package still read `clean`; a
+250 000-argument `String.fromCharCode(...)` did the same. All four are now bounded — the
+endpoint check is linear, the two regexes use bounded quantifiers behind a cheap `includes('|')`
+gate, the walk uses an explicit stack, and the decoder caps its argument count.
+
+**Verdict-level rule gaps.** R11 did not recognise `require('fs').promises.rm('/etc/passwd')`
+(the callee's base is a property chain, not an identifier), so the destructive op never reached
+the verdict. R12 reported "no package entry" for the legal `"exports": ["./index.mjs"]` and
+`"exports": {"import": "./index.mjs"}` forms — a false positive at medium. Skipping files for
+budget left one R8 marker for the *current* file and dropped the rest silently, so the host's
+`skippedFiles` count always read 1.
+
+**Two runtime defects with the same root cause — one coordinate system.** ESM stack frames are
+percent-encoded (`file:///tmp/dir%20with%20space/mod.mjs`), and attribution sliced the `file://`
+prefix without decoding; a plugin installed under a path with a space or a non-ASCII name got
+`hint = undefined`, which switches off N7 family 1/2 blocking entirely — deleting a credential
+file then produced only an unattributed alarm. Separately, the credential block compared the raw
+argument against an absolute credential list, so `chdir(home)` plus `.ssh/id_rsa` was the same
+destruction spelled differently and was not blocked at all. Attribution now resolves frames with
+`fileURLToPath`, and every path predicate in the block/classification layer resolves relative
+paths against the call-time cwd — exactly what the kernel does.
+
+**Data loss and a crash on the status path.** `reconstructVetOnly` parsed the patch file with the
+default YAML schema, which rejects `!!js`; on failure it *rebuilt* the file from the entries it
+had, i.e. none — the user's webserver entry, `insert` list and other plugin entries were deleted
+and the note said "repaired". It now refuses to write a file it cannot parse (multi-document
+files already did). A `null` value in the dismissed-alerts store reached `prune`'s `sort` and
+threw `TypeError` out of the HTTP `end` listener, taking the whole DSH process down; shapes are
+now guarded. And a FIFO planted at `cordis.patch.yml` (or any store file) blocked the event
+loop forever — a single synchronous `readFileSync` on the 5-second status route. Reads now go
+through one bounded helper (`fs-read.ts`: regular files only, size cap, no link following).
+
+**The control plane trusted a header it should not have.** `sameOrigin` only compared `Origin`
+to `Host`, both of which the caller supplies: after DNS rebinding, a page served from
+`evil.example:3456` sends both as `evil.example:3456`, its TCP peer is genuinely 127.0.0.1, and
+`POST /vet/runtime-guard` wrote `[]` over the guard config. Writes now additionally require the
+`Host` header to name this machine (loopback, or an IP literal on a local interface). Accessing
+the panel by hostname is consequently rejected for writes — use the IP; noted in SECURITY.md.
+
+**Smaller.** Dismissing an id that matches no live alarm no longer writes it to the persistent
+store (a stream of junk ids could evict real dismissals from the 200-entry LRU, and the junk was
+invisible to both the panel and the API). The dismissal cache now reloads when the store's
+mtime/size changes, so two DSH instances sharing `~/.dsh/vet` see each other's dismissals.
+`pathArgValue` no longer copies a whole `Uint8Array` payload to read a 64 KB prefix, and a
+string `fetch` body is scanned up to the same 4 MB limit as the streaming path.
+
+## [0.5.29] - 2026-11-18
+
+One yellow card survived the 0.2.2-rc.4 restart, and it was vet's own false positive. **Engine `static-v32`**
+(judgments change, so cached reports are not comparable).
+
+### Fixed — a liveness probe read as a kill
+
+`R3` grades direct `process` members by kind: escape members are critical, side-effect members high, read-only
+members info. `process.kill` sat in the side-effect set, and the rule never looked at the signal argument — so
+`process.kill(pid, 0)`, the POSIX way to ask "is this process still alive?", was reported as a side-effect
+capability at `high`, which is enough to make a package `suspicious`.
+
+The hit that surfaced came from DSH's own `@deepseek-ai/dsh-plugin-manager` (`run-tree.ts`, the `treeAlive`
+helper). Two details made it visible where its siblings stayed quiet: `dsh-atomic-write` and
+`dsh-subprocess-local` use the same probe but ship only `lib/`, where the official-family artifact grading folds
+`high` to `info`; `dsh-plugin-manager` also ships `src/`, and source is deliberately not folded. So the alarm was
+really asking "does this package ship its source?" while claiming to be about behaviour.
+
+- Signal `0` now reports as info ("liveness probe, no signal delivered"). Everything else keeps `high`: `kill(pid)`
+  (defaults to SIGTERM), `kill(pid, signal)` (a variable could be anything), `kill(pid, 'SIGKILL')`, and the
+  computed `process[...]` form. Judging the argument is the point — a rule that cannot tell a probe from a kill
+  should stay on the side of reporting.
+- The official-package advice no longer claims "usually comes from an upstream dependency, fixed by a DSH
+  upgrade". This one came from the package's own source, and that sentence sent the reader looking in the wrong
+  place.
+
+## [0.5.28] - 2026-11-18
+
+Verified against **DSH 0.2.2-rc.4** (the third rc since the last one vet was tested on). The host itself was never
+broken — `dshCompat` already accepted `0.2.2-rc.*`, the live posture stayed 6/6 enforced — but three things that
+had quietly stopped telling the truth are fixed here.
+
+### Adapted — DSH 0.2.2-rc.4
+
+- **The suite now runs on the version users run.** `devDependencies` moved from `0.2.2-rc.1` to `0.2.2-rc.4`, and
+  `typecheck` plus the full suite (1,748 passing, one platform-skipped) is green on it. The rc.4 packages pin exact
+  peers, so a partial bump is rejected by npm; the whole family moves together. One API change landed in between —
+  `ToolGuard` may now return a `ToolGuardDenial` object instead of only a string — which is additive, and vet
+  registers no tool guards.
+- **Official catalog regenerated: 381 → 395 names (+14, none removed).** New in rc.4: the agent-team trio
+  (`agent-team`, `client-ui-agent-team`, `tool-agent-team`), the CUA trio (`cua`, `cua-bundle`, `computer-use`),
+  office (`office-kit`, `tool-office`), `dsh-error`, `mcp-manager`, `terminal-panel`, `util-ripgrep`,
+  `deepseek-chat-import`, `client-ui-account-notifications`. Without the seed these read as name spoofing on first
+  contact; `test/dsh-compat-live.test.ts` goes red until the seed catches up, which is how this was caught.
+- **`@deepseek-ai/dsh-invariants` is gone from the 0.2.2 family**, so `ctx.invariants` is never injected and vet's
+  package invariant is a no-op there. The peer was already marked optional; the code says so now instead of
+  pretending it runs.
+
+### Fixed — a yellow card that outlived its own refutation
+
+`official-not-in-catalog` fires when an `@deepseek-ai/*` name is not in the catalog yet, then vet asks the registry
+and adds the name when it checks out. It never removed the yellow card — it added an info line advising you to
+dismiss it by hand. Every DSH upgrade produces a handful of these (four on the rc.1 → rc.4 upgrade); the user pays
+for vet's own learning curve.
+
+- `VetStatus.retract()` removes an alarm whose premise has been refuted, and clears the dismissal recorded against
+  it — a retracted observation is not something to keep parked in "dismissed". It is distinct from `dismiss`, which
+  stays the user's answer and keeps the record.
+- Confirmation now retracts the yellow card and leaves the info line behind, saying which of the two happened.
+  With nothing left to action, the shield returns to green on its own.
+
+### Fixed — vet reported its own bookkeeping as suspicious
+
+Writing the catalog overlay trips vet's own T2 file hook: `sensitive path write (open flags=wx):
+~/.dsh/vet/official-catalog.json.tmp.<pid>`. That path only runs after a catalog refresh, which only runs when an
+unknown official name appears — i.e. right after an upgrade. Every other vet store write (scan summaries,
+dismissals, snapshots, archives) already ran inside `withVetSelfIo`; this one was missed.
+
+### Fixed — the catalog generator deleted its own history
+
+Regenerating the seed rebuilt the file header from a constant template, so the previous version's notes about
+"which release added which packages" disappeared — the name list was unioned (never shrinks), the prose was not.
+The generator now carries the notes block over verbatim and re-running it is a no-op on a current tree.
+
+### Fixed — the projection cutover had no visible answer
+
+`domainProjection` has defaulted to `active` since 0.5.18, but nothing on screen ever said so: the self-check
+section rendered its projection block only when the mismatch count was non-zero, and `effectiveConfig` lists only
+the keys you changed — a default-valued key is never among them. The source comment still claimed `shadow` was the
+default, so the only way to answer "did the cutover actually happen?" was to read code whose comment was stale.
+
+- The audit page now always shows the mode next to the difference count (`projection mode: active · 0 differences`),
+  coloured by mode. The mode is a configuration fact, not a problem: it does not enter `selfCheckProblemCount`, and
+  the red explanation still appears only when there are real differences.
+- The `config.ts` comment now matches the schema default and records why all three modes compare (F18).
+
 ## [0.5.27] - 2026-11-05
 
 Second pressure pass on the requirement gate, this time against DSH's own evaluator. **Engine `static-v31`**

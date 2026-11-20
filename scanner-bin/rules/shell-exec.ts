@@ -37,13 +37,13 @@ const EXEC_OPS = new Set(['exec', 'execSync', 'spawn', 'spawnSync', 'execFile', 
 
 /** 与 R14 DOWNLOAD_EXEC 同款模式（优先级顺序即判定顺序：管道/编码形态在前，落盘 medium 在后）。 */
 const SUSPECT_PATTERNS: { re: RegExp; desc: string; sev?: 'high' | 'medium' }[] = [
-  { re: /curl[^\n|]*\|\s*(ba|z)?sh\b/i, desc: 'curl|sh 远程代码执行' },
-  { re: /wget[^\n|]*\|\s*(ba|z)?sh\b/i, desc: 'wget|sh 远程代码执行' },
-  { re: /(iwr|Invoke-WebRequest|DownloadString)[^\n]*\|/i, desc: 'PowerShell 下载管道' },
+  { re: /curl[^\n|]{0,256}\|\s*(ba|z)?sh\b/i, desc: 'curl|sh 远程代码执行' },
+  { re: /wget[^\n|]{0,256}\|\s*(ba|z)?sh\b/i, desc: 'wget|sh 远程代码执行' },
+  { re: /(iwr|Invoke-WebRequest|DownloadString)[^\n]{0,512}\|/i, desc: 'PowerShell 下载管道' },
   { re: /powershell[^\r\n]{0,120}-enc(odedcommand)?\b/i, desc: '编码 PowerShell（隐藏载荷）' },
   { re: /\b(IEX|Invoke-Expression)\b/i, desc: 'PowerShell Invoke-Expression' },
   { re: /\b(certutil|bitsadmin|mshta|scrobj|regsvr32|rundll32)\b/i, desc: '系统下载/执行原语' },
-  { re: /curl[^\n]*-o\s+\S+/i, desc: 'curl 下载落盘', sev: 'medium' },
+  { re: /curl[^\n]{0,512}-o\s+\S+/i, desc: 'curl 下载落盘', sev: 'medium' },
   { re: /\bpython[0-9]?\s+-[cC]\b[^\n]{0,220}\b(urllib|requests|urlopen|urlretrieve|exec)\b/i, desc: 'Python -c 网络/执行脚本' },
   { re: /\bruby\s+-[eE]\b[^\n]{0,160}\b(Net::HTTP|open-uri|system|exec)\b/i, desc: 'Ruby -e 网络/执行脚本' },
   { re: /\bperl\s+-[eE]\b[^\n]{0,160}\b(LWP|HTTP::(Tiny|Request)|system|exec)\b/i, desc: 'Perl -e 网络/执行脚本' },

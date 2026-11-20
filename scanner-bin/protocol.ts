@@ -161,8 +161,11 @@ export interface ScanReport {
    * dist-tag/逗号分隔等「能确证非法」的形态补报 high。判定变化，旧缓存作废。
    * 0.5.27（再压一轮）：① x-range（`0.2.x`/`1.2.x`）与 `~>` 进入求值——此前对「按上一版
    * 发布」的常见写法静默；② 任一 OR 组能确证非法时整段判为不满足（DSH 解析整个 range，
-   * `>=0.2 || workspace:^` 是 false，此前在第一组 true 时提前放行）。判定变化，旧缓存作废。 */
-  engine: 'static-v31'
+   * `>=0.2 || workspace:^` 是 false，此前在第一组 true 时提前放行）。判定变化，旧缓存作废。
+   * 0.5.29：R3 认 `process.kill(target, 0)` 为存活探测（info）——0 号信号不投递，此前与
+   * SIGKILL 同判 high，DSH 的 plugin-manager / atomic-write / subprocess-local 都这么写。
+   * 判定变化，旧缓存作废。 */
+  engine: 'static-v35'
   sourceCount: number
   findings: Finding[]
   staticScore: number
@@ -263,10 +266,14 @@ export interface ScanResponse {
  * 0.5.26：发布前自查修正——`^1.2` 的 caret 边界（曾按 x-range 展开，谎报不接纳）、
  * `engines.dsh` 存在时不再看 peer、非法形态（非对象 / 空范围 / dist-tag / 逗号）补报。
  * 0.5.27：x-range 与 `~>` 进入求值；任一 OR 组确证非法 → 整段不满足。
+ * 0.5.29：R3 把 `process.kill(pid, 0)` 认成存活探测（info，不投递信号）。
  * 判定变化，旧缓存作废。 */
-export const ENGINE_VERSION = 'static-v31' as const
+export const ENGINE_VERSION = 'static-v35' as const
 
-/** The rules of static-v31（相对 v30：补 x-range/`~>`、OR 组整体失效语义。前序 v30 相对 v29：修 `^1.2` 的 caret 边界与 engines.dsh/peer 的判定顺序，补非法范围形态。前序 v29 支持部分版本范围 >=0.2 / <0.3。前序 v28 相对 v27：R12 增 DSH 需求闸门；测试/CI 路径降级让位给包声明的入口。前序 v27 只给 capabilities 补了 esmNamedBuiltinModules，不改任何判定。前序 v26（相对 v25）变化：0.3.13 新增 request.officialFamily——官方目录成员包的
+/** The rules of static-v35（相对 v34：R3 解构成员改为单次遍历（199KB/8000 成员 42s→毫秒）；R9 的 alternation 两两比较按次数计入工作预算（40000 分支 14.4s→毫秒，超预算按不互斥保守报）。
+ * 前序 v34（相对 v33：自报元数据不能自我降级——插件包的 bin/scripts 指向模块入口不再降级，入口可达的 test/ 文件不再降级（round-24）。
+ * 前序 v33（相对 v32：R11 认 `require('fs').promises.<op>`；R12 认 exports 数组与顶层条件糖；R13 端点形状改线性判定、R14/R20 量词有界化（ReDoS）；预算跳过时逐个文件留 R8。
+ * 前序 v32（相对 v31：R3 信号 0 存活探测降 info。前序 v31 相对 v30：补 x-range/`~>`、OR 组整体失效语义。前序 v30 相对 v29：修 `^1.2` 的 caret 边界与 engines.dsh/peer 的判定顺序，补非法范围形态。前序 v29 支持部分版本范围 >=0.2 / <0.3。前序 v28 相对 v27：R12 增 DSH 需求闸门；测试/CI 路径降级让位给包声明的入口。前序 v27 只给 capabilities 补了 esmNamedBuiltinModules，不改任何判定。前序 v26（相对 v25）变化：0.3.13 新增 request.officialFamily——官方目录成员包的
  * 非授权源码产物（构建输出路径/压缩内容/.d.ts）里 critical/high 折 info 并加类别前缀（第三方只加
  * 前缀）；R12 支持 dsh.bundle.patch 有序数组并对非法形态报 high。前序 v25（相对 v24）变化：R3 dev/ops 中间态改**相对包根**的根级判定——
  * 0.3.11 首发的深度无关 basename 匹配会把 scripts/、lib/ 等嵌套的运行时文件一并降档（与

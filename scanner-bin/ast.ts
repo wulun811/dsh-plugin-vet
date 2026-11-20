@@ -18,10 +18,27 @@ export function parseSource(code: string, filename: string, language: Language):
   return ts.createSourceFile(filename, code, ts.ScriptTarget.Latest, /*setParentNodes*/ true, scriptKind)
 }
 
-/** Depth-first traversal; `visit` runs on every node including the root. */
+/**
+ * Depth-first traversal; `visit` runs on every node including the root.
+ *
+ * round-23（静默失明）：递归遍历在 ~2000 层深表达式上抛 `RangeError: Maximum call stack
+ * size exceeded`（解析是迭代的，`const s = 'a+' + 'a+' + … ` 两千项能 parse 成功）。
+ * 抛点在 `collectDecodedLiterals` 里、规则执行之前 → 该文件**所有规则**跳过，只剩一条
+ * R8:info，整包判决仍是 clean。也就是说 4KB 的输入能关掉整个静态判定面。
+ * 改成显式栈：与递归同序（前序），但深度不再受调用栈限制。
+ */
 export function walk(node: ts.Node, visit: (n: ts.Node) => void): void {
-  visit(node)
-  ts.forEachChild(node, child => walk(child, visit))
+  const stack: ts.Node[] = [node]
+  while (stack.length > 0) {
+    const current = stack.pop() as ts.Node
+    visit(current)
+    // 子节点逆序入栈 → 弹出顺序即源码顺序（前序稳定，finding 顺序不抖）
+    const children: ts.Node[] = []
+    ts.forEachChild(current, child => {
+      children.push(child)
+    })
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i])
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -147,8 +147,13 @@ export function scanVerdictMessage(e: ScanVerdictEcho): string {
   // 聚合行不谈规则码：不同包的静态规则各不相同，写进来会让人以为规则也适用于所有包。
   const rules = aggregate ? [] : [...new Set(e.rules ?? [])].filter(r => r !== 'OSV')
   const rulesBit = rules.length > 0 ? `规则 ${rules.slice(0, 4).join('/')}${rules.length > 4 ? ' 等' : ''}` : ''
+  // 0.5.29：原先写死「这类命中通常来自上游依赖」——2026-11-18 那条黄牌是
+  // `dsh-plugin-manager` 自己 `src/run-tree.ts` 里的 `process.kill(pid, 0)`（存活探测，
+  // 被 R3 误判成副作用），跟上游依赖没有关系。官方包的命中至少有两种来路：上游依赖的
+  // CVE，和官方包自身源码里的能力调用（后者往往不是缺陷，只是能力事实）。文案不替用户
+  // 做这个判断。
   const advice = e.official === true
-    ? '官方包：这类命中通常来自上游依赖，随 DSH 升级修复；确认知悉后可点「忽略」，该条不再计入黄牌。'
+    ? '官方包：命中可能来自上游依赖，也可能是官方包自身源码里的能力调用（未必是缺陷）；确认知悉后可点「忽略」，该条不再计入黄牌。'
     : '确认知悉后可点「忽略」，该条不再计入黄牌。'
   return `${head}${rulesBit !== '' ? '；' + rulesBit : ''}。${advice}`
 }

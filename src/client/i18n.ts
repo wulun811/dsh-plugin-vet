@@ -200,8 +200,11 @@ export const zh: Record<string, string> = {
   'config.status.inert': '没生效',
   'config.status.partial': '部分生效',
   // 0.5.20：投影比对（0.5.18 起三种模式都比对，这条让差异在面板上可见）
+  // 0.5.28：模式常驻显示——active 与 shadow 在当前等价，切换与否只能由这一行回答
   'projection.title': '投影比对',
-  'projection.mismatches': '处投影与旧字面量不一致——投影器与采集点写的形状不同了，请报告',
+  'projection.modeLabel': '投影模式',
+  'projection.diffCount': '处差异',
+  'projection.mismatches': '投影与旧字面量不一致——投影器与采集点写的形状不同了，请报告',
   'posture.allEnforced': '六个执行面全部生效',
   'posture.surface.preload_scan': '加载前扫描',
   'posture.surface.audit_gate': '审计闸门',
@@ -619,7 +622,9 @@ export const en: Record<string, string> = {
   'config.status.partial': 'partially in effect',
   // 0.5.20: projection comparison (all three modes compare since 0.5.18; this makes divergence visible)
   'projection.title': 'Projection check',
-  'projection.mismatches': 'differences between the projector and the literals — please report',
+  'projection.modeLabel': 'Projection mode',
+  'projection.diffCount': 'differences',
+  'projection.mismatches': 'the projector and the literals disagree — please report',
   'posture.allEnforced': 'All six enforcement surfaces in effect',
   'posture.surface.preload_scan': 'pre-load scan',
   'posture.surface.audit_gate': 'audit gate',

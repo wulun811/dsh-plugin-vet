@@ -101,9 +101,10 @@ export interface VetConfig {
     /** 契约目录；空 = $HOME/.dsh/vet/contracts（env DSH_PLUGIN_VET_CONTRACTS_DIR 可覆盖）。 */
     dir: string
   }
-  /** 0.5.0 语义投影开关（施工图 §8）。'shadow'（默认）：输出仍走旧字面量，同时投影一遍并
-   * 逐字段比对（差异只计数）；'active'：输出走投影；'legacy'：不投影，完全退回 0.4.x 路径。
-   * 影子期保留一个版本——回滚是改配置而不是回滚代码。 */
+  /** 0.5.0 语义投影开关（施工图 §8）。0.5.18 起默认 'active'：告警形状由注册表 + 投影器
+   * 产出；'shadow' 输出仍走旧字面量，同时投影一遍并逐字段比对（差异只计数，回滚用）；
+   * 'legacy' 不投影，完全退回 0.4.x 路径。0.5.18 起三种模式都比对（active 早返回不比对
+   * 的缺陷见 FAILURES F18）——回滚是改配置而不是回滚代码。 */
   domainProjection: 'shadow' | 'active' | 'legacy'
 }
 

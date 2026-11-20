@@ -124,7 +124,7 @@ check.
 |---|---|---|---|
 | R1 | constructor-chain escape | critical | certain/likely |
 | R2 | Dynamic execution (eval/Function/import/require, incl. shadowing check; `new X.constructor` capture reported only when the base is a function literal — object-clone forms (`new n.constructor(...)`) excluded, round-7.2) | high (files) / medium (code) | certain/likely |
-| R3 | Direct process access (runtime-graded; round-7.1: read-only members → info, side-effect members → high, escape members → critical) | critical (host) / high (sandbox) | certain |
+| R3 | Direct process access (runtime-graded; round-7.1: read-only members → info, side-effect members → high, escape members → critical; 0.5.29: `process.kill(pid, 0)` liveness probe → info) | critical (host) / high (sandbox) | certain |
 | R4 | Host-closure capture (agent/TextEncoder…) + host-global prototype pollution (round-7; round-7.1: files always high, independent of targetKind) | critical (code) / high (files) | certain/likely |
 | R5 | ctx-escape attempt signal | medium | code only |
 | R6 | String coarse-scan fallback (obfuscation signals need combined evidence with dynamic execution, round-7) | info | heuristic |
@@ -987,13 +987,20 @@ about the current state.**
 - Config: schemastery schema (`src/config.ts`); all fields in the README Config table.
 - Tools: `scan_plugin` (deterministic static scan; verdict comes only from the static layer).
 - Guards: `internal/plugin` auto-scan + requireAudit gate; `tools/execute` interception.
-- Guard contract dependency (checked on 0.2.2-rc.1, 0.5.23): both hooks hang off surfaces that stay
-  structurally stable — `internal/plugin` is the cordis plugin lifecycle event (still consumed by
-  `dsh-typert-loader` and the inspector), and `tools/execute` is the *single* around-dispatch
-  waterfall: 0.2.2's `dsh-tool-executor-native` / `-ptc` split dispatches through
+- Guard contract dependency (checked on 0.2.2-rc.1, 0.5.23; re-checked on 0.2.2-rc.4, 0.5.28): both hooks
+  hang off surfaces that stay structurally stable — `internal/plugin` is the cordis plugin lifecycle event
+  (still consumed by `dsh-typert-loader` and the inspector), and `tools/execute` is the *single*
+  around-dispatch waterfall: 0.2.2's `dsh-tool-executor-native` / `-ptc` split dispatches through
   `ToolExecutionPipeline`, so splitting the executor does not create a dispatch path vet cannot see.
   `tools/ptc-dispatch-log` was removed in 0.2.2; vet never listened to it. This is why an executor
-  refactor is a *checked* risk rather than an assumed-safe one.
+  refactor is a *checked* risk rather than an assumed-safe one. rc.4 also widened `ToolGuard`'s return
+  type (`string | ToolGuardDenial | undefined`) — additive, and vet registers no `ToolGuard`.
+- Official catalog (0.3.5): the seed (`guards/official-catalog-seed.ts`) is the offline name truth; the
+  registry scope search is the online one. Both are exercised by `test/dsh-compat-live.test.ts`, which
+  compares the *installed* `@deepseek-ai/*` family against the seed — a DSH upgrade that splits out a new
+  package fails the suite until the seed is regenerated. Regeneration (`scripts/gen-official-catalog-seed.mjs`)
+  unions names (never shrinks) and carries the `版本注记` block over verbatim (0.5.28: it used to overwrite
+  the whole header, deleting the previous release's notes).
 - Update notice (0.4.1): `guard/update-check.ts` (host-DSH detection, 24 h-throttled registry
   read, persisted throttle state) + `guard/dsh-compat.ts` (zero-dependency semver subset);
   surfaced through `status.json` → `update` and the shield's *Version & Compatibility* card.

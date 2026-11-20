@@ -41,10 +41,34 @@ const EXFIL_PATTERNS: { re: RegExp; desc: string }[] = [
  * ① 端点形状：整字面量必须是 host/IP/URL（host/IP 部分必选，scheme/端口/路径可选）。
  * 散文（"cloud metadata (169.254.169.254) is not allowed"）、标签、说明串天然不满足。
  */
-const ENDPOINT_SHAPE =
-  /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:\.?[a-z0-9-]+)+(?:\.[a-z]{2,})?(?::\d+)?(?:\/[^\s]*)?$/i
+/** 端点形状的**线性**判定（round-23）：旧正则 `(?:\.?[a-z0-9-]+)+` 是嵌套量词，
+ * 一个 36 字节的字面量 `169.254.169.254aaaaaaaaaaaaaaaaaaaa!` 就能让扫描回溯到 26s
+ * （实测），整包因超时被 SIGKILL、判决丢失。安全插件自己的规则不能是拒绝服务入口。
+ * 语义保持：host/IP 必选，scheme/端口/路径可选，其余一律 false。 */
 function isEndpointShaped(text: string): boolean {
-  return ENDPOINT_SHAPE.test(text)
+  const s = text.trim()
+  if (s.length === 0 || s.length > 512) return false
+  let rest = s
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(rest)
+  if (scheme !== null) {
+    rest = rest.slice(scheme[0].length)
+    if (rest === '') return false
+  }
+  const slash = rest.indexOf('/')
+  let authority = slash < 0 ? rest : rest.slice(0, slash)
+  const path = slash < 0 ? '' : rest.slice(slash)
+  const colon = authority.lastIndexOf(':')
+  if (colon >= 0) {
+    const port = authority.slice(colon + 1)
+    if (!/^\d{1,5}$/.test(port)) return false
+    authority = authority.slice(0, colon)
+  }
+  const host = authority.replace(/^\./, '')
+  if (host === '' || host.length > 253) return false
+  for (const label of host.split('.')) {
+    if (label === '' || !/^[a-z0-9-]+$/i.test(label)) return false
+  }
+  return path === '' || !/\s/.test(path)
 }
 
 /** ④ 脱敏占位：evidence 含 [REDACTED]、***、xxxx 占位串（示例模板，非真实端点）。 */

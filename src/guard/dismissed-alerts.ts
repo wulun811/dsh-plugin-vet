@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, renameSync, mkdirSync, unlinkSync } from 'node:fs'
+import { existsSync, statSync, renameSync, mkdirSync, unlinkSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
+import { readSmallRegularFile, STORE_FILE_MAX_BYTES } from './fs-read.js'
 import { dirname, join } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
 import { vetStoreRoot } from './store-root.js'
@@ -29,6 +30,7 @@ let cachedIds: Set<string> | undefined
 export function setDismissedFileForTest(file: string): void {
   DISMISSED_FILE = file
   cachedIds = undefined
+  cachedStamp = undefined
 }
 
 /** 存储结构：{ dismissed: { [alertId]: { dismissedAt: number, reason?: string } } } */
@@ -98,7 +100,10 @@ function loadDismissed(): DismissedStore {
       if (!existsSync(DISMISSED_FILE)) {
         return { dismissed: {} }
       }
-      const content = readFileSync(DISMISSED_FILE, 'utf8')
+      // round-23：有界读取——本文件在 T2 报警热路径上，裸 readFileSync 遇到 FIFO 会永久
+      // 阻塞（不是抛错）；把它换成符号链接就是一次「点一下盾牌即冻住宿主」。
+      const content = readSmallRegularFile(DISMISSED_FILE, STORE_FILE_MAX_BYTES)
+      if (content === null) return { dismissed: {} }
       const parsed = JSON.parse(content)
       if (parsed && typeof parsed === 'object' && parsed.dismissed && typeof parsed.dismissed === 'object') {
         const store = parsed as DismissedStore
@@ -146,11 +151,30 @@ function saveDismissed(store: DismissedStore): boolean {
   })
 }
 
-/** 检查某警报是否已被用户持久化忽略（热路径：内存缓存 O(1)，不读盘）。
- * 首次调用时惰性加载一次盘上数据。 */
+/** 缓存对应的磁盘指纹（mtime+size）。两个 DSH 实例（profiles/web 与 profiles/headless）
+ * 共用同一个 store 文件，只加载一次就等于「别的实例点忽略，本实例永远看不见」。 */
+let cachedStamp: string | undefined
+
+/** 盘上文件的指纹；读不到 → ''（与「缓存为空」等价）。 */
+function storeStamp(): string {
+  try {
+    const st = statSync(DISMISSED_FILE)
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return ''
+  }
+}
+
+/** 检查某警报是否已被用户持久化忽略（热路径：内存缓存 O(1)；指纹变了才重读盘）。
+ * round-23：旧实现「一生只加载一次」，与注释承诺的「外部改写会在下次写盘时融合」不符——
+ * 写盘路径只把自己的 id 塞进缓存，别处写入的 id 永远进不来（跨进程忽略不生效，
+ * 且 getPersistentDismissedList() 与 isPersistentlyDismissed() 会互相矛盾）。
+ * 现在按 mtime+size 失效：一次 stat 换掉「重启才生效」。 */
 export function isPersistentlyDismissed(alertId: string): boolean {
-  if (cachedIds === undefined) {
+  const stamp = storeStamp()
+  if (cachedIds === undefined || stamp !== cachedStamp) {
     cachedIds = new Set(Object.keys(loadDismissed().dismissed))
+    cachedStamp = stamp
   }
   return cachedIds.has(alertId)
 }
@@ -171,17 +195,31 @@ export function persistentlyDismiss(alertId: string, reason?: string): void {
     reason,
   }
   pruneDismissedStore(store)
-  if (saveDismissed(store) && cachedIds !== undefined) cachedIds.add(alertId)
+  // 写成功即失效缓存：下次读盘拿到的就是权威结果（含别处写入的 id），不再自己拼半个集合
+  if (saveDismissed(store)) {
+    cachedIds = undefined
+    cachedStamp = undefined
+  }
 }
 
 /** 0.3.9：按 dismissedAt 保留最近 DISMISSED_MAX_KEPT 条（非有限值排最末淘汰，与 capabilities LRU 同款纪律）。 */
 function pruneDismissedStore(store: DismissedStore): void {
   const entries = Object.entries(store.dismissed)
   if (entries.length <= DISMISSED_MAX_KEPT) return
+  // round-23（崩溃）：盘上数据不可信——migrateLegacyDismissals 刻意「非对象条目原样带过」，
+  // 于是 `null`/字符串会一路走到这里；旧实现直接 `a[1].dismissedAt` → TypeError 抛出
+  // prune → dismiss → 路由的 http 事件监听器（没有 try/catch）→ **整个 DSH 进程退出**。
+  // 一个坏 JSON 条目就是一条可重复触发的远程崩溃路径。按「最旧」处理即可（-Infinity），
+  // 既保住迁移的「不丢规格外值」语义，又不假设它是对象。
+  const stamp = (v: unknown): number => {
+    if (v === null || typeof v !== 'object') return -Infinity
+    const at = (v as { dismissedAt?: unknown }).dismissedAt
+    return typeof at === 'number' && Number.isFinite(at) ? at : -Infinity
+  }
   entries.sort((a, b) => {
-    const ar = Number.isFinite(a[1].dismissedAt) ? a[1].dismissedAt : -Infinity
-    const br = Number.isFinite(b[1].dismissedAt) ? b[1].dismissedAt : -Infinity
-    return br - ar
+    const ar = stamp(a[1])
+    const br = stamp(b[1])
+    return ar === br ? 0 : br > ar ? 1 : -1
   })
   for (const [key] of entries.slice(DISMISSED_MAX_KEPT)) delete store.dismissed[key]
 }
@@ -190,7 +228,10 @@ function pruneDismissedStore(store: DismissedStore): void {
 export function restorePersistentDismissal(alertId: string): void {
   const store = loadDismissed()
   delete store.dismissed[alertId]
-  if (saveDismissed(store) && cachedIds !== undefined) cachedIds.delete(alertId)
+  if (saveDismissed(store)) {
+    cachedIds = undefined
+    cachedStamp = undefined
+  }
 }
 
 /** 获取所有持久化忽略的警报 ID 列表。 */

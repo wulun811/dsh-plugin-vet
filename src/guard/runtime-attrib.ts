@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url'
+
 /**
  * T2 归因
  * P0-4 结构债拆分自 runtime-hooks.ts（pluginFromStack：栈 → 插件包名；isOfficial：官方包信任降噪）
@@ -5,23 +7,48 @@
 /** 从错误栈提取插件包名：栈帧路径 → 已知插件根目录（root→包名映射）最长前缀匹配。 */
 export function pluginFromStack(stack: string | undefined, roots: Map<string, string>): string | undefined {
   if (stack === undefined || roots.size === 0) return undefined
+  // round-23（性能）：归一化只做一次。旧实现在**每个栈帧**里把每个 root 重新 replace 一遍，
+  // 成本 = 帧数 × 插件数（80 插件实测 34µs/次归因）；而它挂在所有读/写/spawn 事件上。
+  // 顺带按长度降序排好：最长前缀即答案，命中即可返回，不必再比。
+  const normalized: Array<[string, string]> = []
+  for (const [root, name] of roots) normalized.push([root.replace(/\\/g, '/'), name])
+  normalized.sort((a, b) => b[0].length - a[0].length)
   for (const frame of stack.split('\n')) {
     const m = /\((.+?):\d+:\d+\)/.exec(frame) ?? /at (.+?):\d+:\d+/.exec(frame)
     if (m === null) continue
-    let path = m[1].replace(/\\/g, '/')
-    if (path.startsWith('file://')) path = path.slice('file://'.length).replace(/\\/g, '/')
-    let best: { len: number; name: string } | undefined
-    for (const [root, name] of roots) {
-      const normRoot = root.replace(/\\/g, '/')
-      // M4：要求路径边界——/node_modules/foo 不能匹配 /node_modules/foobar/index.js
-      if ((path === normRoot || path.startsWith(normRoot + '/'))
-        && (best === undefined || normRoot.length > best.len)) {
-        best = { len: normRoot.length, name }
-      }
+    const path = framePath(m[1])
+    // M4：要求路径边界——/node_modules/foo 不能匹配 /node_modules/foobar/index.js
+    for (const [normRoot, name] of normalized) {
+      if (path === normRoot || path.startsWith(normRoot + '/')) return name
     }
-    if (best !== undefined) return best.name
   }
   return undefined
+}
+
+/**
+ * 栈帧里的模块标识 → 文件系统路径（round-23，安全）：ESM 栈帧对空格/中文/`#` 一律做
+ * 百分号编码（`file:///tmp/dir%20with%20space/mod.mjs`），Windows 是 `file:///C:/…`。
+ * 旧实现只剥 `file://` 前缀、不解码 → 归因拿到 `…dir%20with%20space…`，与 root 永远不等
+ * → `hint=undefined`。后果不是「少一条报警」：N7 族 1/2 的拦截要求归因可用
+ * （runtime-patch.ts 的 `blockIdentity !== undefined`），于是**目录名带空格或中文时
+ * 拦截整族静默失效**，删除凭据这类操作只留下一张归不到任何人的报警。
+ * `fileURLToPath` 一次解掉百分号编码 + Windows 盘符前导斜杠；畸形 URL 退回手工剥前缀。
+ */
+function framePath(raw: string): string {
+  const slashed = raw.replace(/\\/g, '/')
+  if (!slashed.startsWith('file://')) return slashed
+  try {
+    return fileURLToPath(slashed).replace(/\\/g, '/')
+  } catch {
+    let rest = slashed.slice('file://'.length)
+    try {
+      rest = decodeURIComponent(rest)
+    } catch {
+      // 非法百分号序列：保留原样（归因失败也不该抛进宿主调用栈）
+    }
+    // Windows：file:///C:/x → /C:/x，去掉盘符前的那个斜杠
+    return /^\/[A-Za-z]:\//.test(rest) ? rest.slice(1) : rest
+  }
 }
 // ── 网络出口观测（P1 特性）─────────────────────────────────────
 

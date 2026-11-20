@@ -15,11 +15,12 @@
  * 诚实边界：ruleCodes/osv 来自静态扫描报告快照；运行时观测能力不在本库（capability-diff
  * 观测集只在进程内存），详情页展示时须标注口径。
  */
-import { mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { mkdirSync, renameSync, rmSync } from 'node:fs'
 import { writeTmpExclusive } from './path-utils.js'
 import { join, dirname } from 'node:path'
 import { withVetSelfIo } from './runtime-hooks.js'
 import { vetStoreRoot } from './store-root.js'
+import { readSmallRegularFile, STORE_FILE_MAX_BYTES } from './fs-read.js'
 
 /** 单包扫描摘要（每包保留最新一条）。 */
 export interface ScanSummary {
@@ -77,7 +78,10 @@ export function setSummariesDirForTest(dir?: string): void {
 function loadStore(): ScanSummaryStore {
   return withVetSelfIo(() => {
     try {
-      const raw = readFileSync(summariesPath(), 'utf8')
+      // round-23：有界读取（FIFO/超大文件按「空存储」处理）——本文件在 /vet/status.json
+      // 的同步路径上被读，一次裸 readFileSync 就能被一个 FIFO 永久阻塞。
+      const raw = readSmallRegularFile(summariesPath(), STORE_FILE_MAX_BYTES)
+      if (raw === null) return { records: {} }
       const parsed = JSON.parse(raw) as Partial<ScanSummaryStore>
       if (parsed === null || typeof parsed !== 'object' || parsed.records === null || typeof parsed.records !== 'object') {
         return { records: {} }

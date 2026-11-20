@@ -313,7 +313,12 @@ export function isSensitivePath(
   // /var/folders/<xx>/<yy>/T，否则它命中 sensitiveRoots 的 /var 前缀（这正是「临时清理被判
   // 敏感删除」的另一半根因）。/var/db、/var/log、/etc、/usr 不在临时根内，照旧报警。
   if (mode !== 'read' && isUnderTempRoot(norm, cfg.tempRoots ?? DEFAULT_TEMP_ROOTS, platform)) return false
-  const parts = norm.split('/')
+  // round-26（成本硬闸）：下面的逐段 × 全配置判定是 O(段数 × 配置项)，而路径长度上限
+  // 是 64KB——40KB 的路径实测 14.3ms/次（内核只会返回 ENAMETOOLONG，插件几乎零成本），
+  // 循环调用即可持续占用宿主事件循环。这里按**段数**封顶而不是直接放弃：只看首尾各
+  // 64 段（敏感面要么在开头要么在结尾，中间全是垫料），成本钉在常量内，判定面不缩。
+  const allParts = norm.split('/')
+  const parts = allParts.length <= 128 ? allParts : allParts.slice(0, 64).concat(allParts.slice(-64))
   for (let i = 0; i < parts.length; i++) {
     const low = parts[i].toLowerCase()
     // A9 包目录豁免：node_modules 段之后的路径段不做敏感匹配。包名/包内文件是公开工件——
@@ -397,8 +402,18 @@ export function firstString(args: unknown[]): string | undefined {
 export function pathArgValue(a: unknown): string | undefined {
   if (typeof a === 'string') return capStr(a)
   if (a instanceof Uint8Array) {
-    const b = Buffer.isBuffer(a) ? a : Buffer.from(a)
-    const s = b.toString('utf8', 0, Math.min(b.length, MAX_ARG_CHARS))
+    // round-23（内存）：只解前缀，且**不复制**。旧写法 `Buffer.from(a)` 把整个实参复制一份——
+    // 而 allStrings/pathArgValue 会被每个 fs 写事件调用，`writeFileSync(path, new TextEncoder().encode(<256MB>))`
+    // 就让守卫自己多占 256MB（实测 maxRSS 46MB→310MB）。Buffer.from(arrayBuffer, off, len) 是视图，零拷贝。
+    const len = Math.min(a.byteLength, MAX_ARG_CHARS)
+    if (len === 0) return undefined
+    let s: string
+    try {
+      s = Buffer.from(a.buffer as ArrayBuffer, a.byteOffset, len).toString('utf8')
+    } catch {
+      // SharedArrayBuffer 等非 ArrayBuffer 视图：退回复制（仍然限长）
+      s = Buffer.from(a.subarray(0, len)).toString('utf8')
+    }
     return s.length > 0 ? s : undefined
   }
   if (a instanceof URL) {

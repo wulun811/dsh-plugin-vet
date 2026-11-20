@@ -189,8 +189,21 @@ export function saveCapabilities(store: CapabilityStore): void {
   })
 }
 
-/** LRU 清理：按 recordedAt 降序保留最近 maxKept 个记录，超出部分删除。
- * round-15：recordedAt 非有限值的损坏记录排到最末直接淘汰（NaN 比较恒 false）。 */
+/**
+ * 容量清理（round-24 重写）：**先淘汰旧版本，再淘汰整包**。
+ *
+ * 旧实现是「全局按 recordedAt 保留最新 1000 条」——记录键是 `<name>@<version>`，于是
+ * 一次无关的大批量扫描就足以把某个包的**上一版本**基线挤掉。而那正是下一次升级差分要
+ * 用的 `prev`：`findPreviousRecord` 找不到就退化成冷启动（`from: null`），一条本该是
+ * red 的「新增网络+执行」差分变成静默。
+ *
+ * 现在的顺序：
+ * 1. 每个包的最新一条是**不可淘汰**的（没有它就等于该包从未被观测过）；
+ * 2. 超限时先按时间从旧到新删「非最新」的记录（升级差分的原料）；
+ * 3. 仍然超限（包数 × 1 > cap）才动每包的最新一条，从最旧开始——这时丢的是
+ *    「很久没出现过的包」的观测，属于容量上限的必然代价。
+ * 每包条目数不设单独上限：条目少的包本来就该保留全部历史，全局 cap 已经是总闸。
+ */
 export function pruneCapabilities(store: CapabilityStore, maxKept = VERSION_DIFF_MAX_KEPT): void {
   if (maxKept <= 0) {
     store.records = {}
@@ -198,16 +211,48 @@ export function pruneCapabilities(store: CapabilityStore, maxKept = VERSION_DIFF
   }
   const entries = Object.entries(store.records)
   if (entries.length <= maxKept) return
-  entries.sort((a, b) => {
-    // 0.3.9（审查修复）：单条 null/非对象记录此前直接读 a[1].recordedAt 抛 TypeError →
-    // recordScan 的 catch 吞成整包 noop（该包乃至整个 store 的差分永久静默、审计中心空白）。
-    const ar = a[1] !== null && typeof a[1] === 'object' && Number.isFinite(a[1].recordedAt) ? a[1].recordedAt : -Infinity
-    const br = b[1] !== null && typeof b[1] === 'object' && Number.isFinite(b[1].recordedAt) ? b[1].recordedAt : -Infinity
-    return br - ar
-  })
-  const keptKeys = new Set(entries.slice(0, maxKept).map(e => e[0]))
-  for (const key of entries.map(e => e[0])) {
-    if (!keptKeys.has(key)) delete store.records[key]
+  // 0.3.9（审查修复）：单条 null/非对象记录此前直接读 a[1].recordedAt 抛 TypeError →
+  // recordScan 的 catch 吞成整包 noop（该包乃至整个 store 的差分永久静默、审计中心空白）。
+  const at = (rec: unknown): number =>
+    rec !== null && typeof rec === 'object' && Number.isFinite((rec as CapabilityRecord).recordedAt)
+      ? (rec as CapabilityRecord).recordedAt
+      : -Infinity
+  const nameOf = (key: string, rec: unknown): string =>
+    rec !== null && typeof rec === 'object' && typeof (rec as CapabilityRecord).name === 'string'
+      ? (rec as CapabilityRecord).name
+      : key
+  const byName = new Map<string, Array<[string, unknown]>>()
+  for (const entry of entries) {
+    const name = nameOf(entry[0], entry[1])
+    const list = byName.get(name)
+    if (list === undefined) byName.set(name, [entry])
+    else list.push(entry)
+  }
+  const latest = new Set<string>()
+  for (const list of byName.values()) {
+    list.sort((a, b) => {
+      const ar = at(a[1])
+      const br = at(b[1])
+      return ar === br ? 0 : br > ar ? 1 : -1
+    })
+    latest.add(list[0][0])
+  }
+  let need = entries.length - maxKept
+  // ① 非最新记录：从最旧开始删（保住每包的升级差分基线）
+  const evictable = entries.filter(e => !latest.has(e[0])).sort((a, b) => at(a[1]) - at(b[1]))
+  for (const [key] of evictable) {
+    if (need <= 0) break
+    delete store.records[key]
+    need -= 1
+  }
+  if (need <= 0) return
+  // ② 每包只剩一条时，才按时间从旧到新整包淘汰
+  const survivors = entries.filter(e => latest.has(e[0]) && store.records[e[0]] !== undefined)
+    .sort((a, b) => at(a[1]) - at(b[1]))
+  for (const [key] of survivors) {
+    if (need <= 0) break
+    delete store.records[key]
+    need -= 1
   }
 }
 

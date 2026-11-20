@@ -68,6 +68,8 @@ export interface LedgerOptions {
   exfilRatioMax?: number
   /** 参与量级判定的最小敏感读/网写字节。 */
   exfilMinBytes?: number
+  /** 升级为「整包外传」红牌所需的最小外写字节（默认 1024）。 */
+  exfilMinWriteBytes?: number
   /** 台账空闲清理 TTL（随 VetStatus 的 24h TTL 对齐）。 */
   ttlMs?: number
   /** 疑似恶意（蜜罐/金丝雀确认）后阈值除数。 */
@@ -252,6 +254,7 @@ export class ExfilLedger {
   private readonly exfilRatioMin: number
   private readonly exfilRatioMax: number
   private readonly exfilMinBytes: number
+  private readonly exfilMinWriteBytes: number
   private readonly ttlMs: number
   private readonly suspectedFactor: number
   // 0.1.20 新增阈值
@@ -267,9 +270,15 @@ export class ExfilLedger {
     this.massRenameN = options.massRenameN ?? 5
     this.inPlaceN = options.inPlaceN ?? 10
     this.writeAmplifyBytes = options.writeAmplifyBytes ?? 128 * 1024 * 1024
-    this.exfilRatioMin = options.exfilRatioMin ?? 0.4
+    // round-28（用户拍板 2026-11-20）：比值带收紧到 [0.8, 3.0]，并加 1KB 绝对量门槛。
+    // 误报形态是「读 2KB 凭据 + 24h 内 17 条 50B 遥测」= 850B / 0.415 —— 真实外传几乎
+    // 总是把整份文件发走（比值接近 1），零碎遥测够不到 1KB，也够不到 0.8。
+    this.exfilRatioMin = options.exfilRatioMin ?? 0.8
     this.exfilRatioMax = options.exfilRatioMax ?? 3.0
+    // 红牌的最小绝对量：读取侧沿用 512B（敏感文件可以很小），**写出侧**必须 ≥1KB ——
+    // 少量遥测不应升级成「整包外传」。
     this.exfilMinBytes = options.exfilMinBytes ?? 512
+    this.exfilMinWriteBytes = options.exfilMinWriteBytes ?? 1024
     this.ttlMs = options.ttlMs ?? 24 * 60 * 60 * 1000
     this.suspectedFactor = options.suspectedFactor ?? 4
     // 0.1.20 新增
@@ -466,7 +475,7 @@ export class ExfilLedger {
     // 遥测写就触发 red，盾牌挂 24h）。叠上层下方软黄分支同款 exfilAssocWindowMs：读与写
     // 必须落在关联窗口内才构成「读完立刻同量级外传」的整包外传签名；终身累计但时间解耦的
     // 遥测只落软黄（或完全不报），不再误红。
-    if (row.sensitiveReadBytes >= this.exfilMinBytes && row.netWriteBytes >= this.exfilMinBytes) {
+    if (row.sensitiveReadBytes >= this.exfilMinBytes && row.netWriteBytes >= this.exfilMinWriteBytes) {
       const linked = row.lastSecretReadAt !== 0 && row.lastNetWriteAt !== 0 &&
         row.lastNetWriteAt >= row.lastSecretReadAt &&
         (row.lastNetWriteAt - row.lastSecretReadAt) <= this.exfilAssocWindowMs

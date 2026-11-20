@@ -1253,7 +1253,7 @@ describe('/vet/profile 端点', () => {
     handler({
       method: 'POST', socket: { remoteAddress: '127.0.0.1' },
       url: '/vet/profile',
-      headers: { origin: 'http://x', host: 'x' },
+      headers: { origin: 'http://localhost:3456', host: 'localhost:3456' },
       on: (ev: string, cb: (c?: Buffer) => void) => {
         if (ev === 'data') cb(Buffer.from(JSON.stringify({ tier: 'bogus' })))
         if (ev === 'end') cb()
@@ -1285,7 +1285,7 @@ describe('/vet 写入口的对端闸门（0.5.14 · controlLocalOnly）', () => 
   const post = (socket: unknown) => ({
     method: 'POST',
     url: '/vet/profile',
-    headers: { origin: 'http://x', host: 'x' },
+    headers: { origin: 'http://localhost:3456', host: 'localhost:3456' },
     socket,
     on: (ev: string, cb: (c?: Buffer) => void) => {
       if (ev === 'data') cb(Buffer.from(JSON.stringify({ tier: 'bogus' })))
@@ -1488,7 +1488,7 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
       {
         method: 'POST', socket: { remoteAddress: '127.0.0.1' },
         url: '/vet/dismiss',
-        headers: { origin: 'http://x', host: 'x' },
+        headers: { origin: 'http://localhost:3456', host: 'localhost:3456' },
         on: (ev: string, cb: (c?: Buffer) => void) => {
           if (ev === 'data') cb(Buffer.from(JSON.stringify({ id: 't1:fd:512' })))
           if (ev === 'end') cb()
@@ -1509,7 +1509,7 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
       {
         method: 'POST', socket: { remoteAddress: '127.0.0.1' },
         url: '/vet/restore',
-        headers: { origin: 'http://x', host: 'x' },
+        headers: { origin: 'http://localhost:3456', host: 'localhost:3456' },
         on: (ev: string, cb: (c?: Buffer) => void) => {
           if (ev === 'data') cb(Buffer.from(JSON.stringify({ id: 't1:fd:512' })))
           if (ev === 'end') cb()
@@ -1532,7 +1532,7 @@ describe('registerStatusRouteOnce（webServer 就绪重试）', () => {
       {
         method: 'POST', socket: { remoteAddress: '127.0.0.1' },
         url: '/vet/dismiss',
-        headers: { origin: 'http://x', host: 'x' },
+        headers: { origin: 'http://localhost:3456', host: 'localhost:3456' },
         on: (ev: string, cb: (c?: Buffer) => void) => {
           if (ev === 'data') cb(Buffer.from(JSON.stringify({})))
           if (ev === 'end') cb()
@@ -1963,7 +1963,7 @@ describe('即时装配（0.4.1）：setGuardToggleHook 接线 + 进程内切换'
     const req = {
       method: 'POST', socket: { remoteAddress: '127.0.0.1' },
       url: '/vet/runtime-guard',
-      headers: origin ? { origin: 'http://x', host: 'x' } : {},
+      headers: origin ? { origin: 'http://localhost:3456', host: 'localhost:3456' } : {},
       on: (ev: string, cb: (c?: Buffer) => void) => {
         if (ev === 'data') cb(Buffer.from(JSON.stringify(body)))
         if (ev === 'end') cb()

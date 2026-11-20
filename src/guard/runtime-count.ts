@@ -67,14 +67,39 @@ export function attachCanaryScanner(obj: { write?: unknown; end?: unknown }, onT
   const LIMIT = 64 * 1024
   let head = ''
   let tail = ''
+  // round-26（内存）：大 chunk 先截窗再解码。旧写法 `String(<256MB Buffer>)` 会先把整块
+  // 变成字符串，再被 slice(0, 64KB) 丢掉——实测一次 256MB write 花 151ms、多占 256MB
+  // （UTF-16 路径翻倍），GB 级 chunk 直接 OOM。判定只看首尾窗，没必要读全量。
   const push = (chunk: unknown): void => {
     let text = ''
-    if (typeof chunk === 'string') text = chunk
-    else {
+    if (typeof chunk === 'string') {
+      text = chunk
+    } else if (chunk instanceof Uint8Array) {
+      const n = chunkBytes(chunk)
+      if (n === 0) return
+      const len = Math.min(n, LIMIT)
+      try {
+        const headBuf = Buffer.from(chunk.buffer as ArrayBuffer, chunk.byteOffset, len)
+        pushText(headBuf.toString('utf8'))
+        if (n > LIMIT) {
+          const tailBuf = Buffer.from(chunk.buffer as ArrayBuffer, chunk.byteOffset + n - len, len)
+          pushText(tailBuf.toString('utf8'))
+        }
+        return
+      } catch {
+        // SharedArrayBuffer 等：退回整块解码（仍然限长在字符串侧）
+        text = String(chunk)
+      }
+    } else {
       const n = chunkBytes(chunk)
       if (n === 0) return
       text = typeof chunk === 'object' && chunk !== null && 'toString' in chunk ? String(chunk) : ''
     }
+    pushText(text)
+  }
+  /** 窗口滚动（原 push 的主体；大 chunk 会分首/尾两次调用）。 */
+  const pushText = (text: string): void => {
+    if (text === '') return
     if (head.length < LIMIT) {
       head = (head + text).slice(0, LIMIT)
       // 当次 push 就可能超过 LIMIT：头部一次性填满后固定，尾窗接管滚动

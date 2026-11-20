@@ -60,7 +60,8 @@ export function SelfCheckSection({ pal, dark, t, coverage, posture, coverageSubj
   posture: VetPostureWire[]
   /** 0.5.20：生效配置视图（你动过的键里哪些真在起作用）。缺席 = 旧后端，整段不渲染。 */
   config?: VetEffectiveConfigWire
-  /** 0.5.20：投影比对计数。只在有差异时渲染一行。 */
+  /** 0.5.20：投影比对计数。缺席 = 旧后端。0.5.28：模式常驻显示——切换后 active 与 shadow 输出
+   * 逐字段相同，「切没切」没有任何可观察痕迹，只能由这一行回答（用户 2026-11-06 反馈）。 */
   projection?: VetDomainProjectionWire
   /** 九行只描述一个包时后端给出的包名（多主体时不给出）。 */
   coverageSubject?: string
@@ -68,7 +69,7 @@ export function SelfCheckSection({ pal, dark, t, coverage, posture, coverageSubj
   coverageSubjects?: number
 }): ReactNode {
   const configGaps = (config?.keys ?? []).filter((k) => k.status !== 'active')
-  if (coverage.length === 0 && posture.length === 0 && configGaps.length === 0 && (projection?.mismatches ?? 0) === 0) return null
+  if (coverage.length === 0 && posture.length === 0 && configGaps.length === 0 && projection === undefined) return null
 
   const coverageCovered = coverage.filter((c) => c.result === 'covered').length
   const coverageGaps = coverage.filter((c) => c.result !== 'covered')
@@ -197,14 +198,24 @@ export function SelfCheckSection({ pal, dark, t, coverage, posture, coverageSubj
         </>
       )}
 
-      {(projection?.mismatches ?? 0) > 0 && projection !== undefined && (
+      {projection !== undefined && (
         <>
           <GroupLabel pal={pal}>{t('projection.title')}</GroupLabel>
           <div style={card}>
-            <div style={{ color: pal.rose }}>
-              {projection.mismatches} {t('projection.mismatches')}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: pal.muted }}>
+              <span>{t('projection.modeLabel')}</span>
+              <span style={{ fontWeight: 600, color: projection.mode === 'active' ? pal.sage : pal.ochre }}>
+                {projection.mode}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span style={{ color: projection.mismatches > 0 ? pal.rose : pal.muted, fontWeight: projection.mismatches > 0 ? 600 : undefined }}>
+                {projection.mismatches} {t('projection.diffCount')}
+              </span>
             </div>
-            {projection.first !== undefined && (
+            {projection.mismatches > 0 && (
+              <div style={{ marginTop: 4, color: pal.rose }}>{t('projection.mismatches')}</div>
+            )}
+            {projection.mismatches > 0 && projection.first !== undefined && (
               <div style={{ marginTop: 4, color: pal.faint, wordBreak: 'break-word' }}>{projection.first}</div>
             )}
           </div>

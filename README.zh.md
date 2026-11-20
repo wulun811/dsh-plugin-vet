@@ -268,7 +268,7 @@ critical/high 的那部分。
 | `requireAudit` | `false` | 审计门槛（opt-in，**仅第三方**）：开启后新装第三方插件加载时检查 `~/.dsh/vet/audits/` 健康档案——无档案则 `report` 模式记黄色 `audit-required` 告警、`deny` 模式拦截。档案由 agent 按 `vet-audit-protocol` 技能审查后手写落盘；**0.5.19 起与 `autoScan` 无关**（见 `autoScan` 行）。**0.5.20** 起档案还能钉住它是在哪套规则集下写的（`rule_set_version:` + `scan_verdict:`）：引擎比本构建旧时，只有**当前规则集把这个包判得更差**才作废档案——规则集变了本身不是关于这个包的证据 |
 | `rules` | `{}`（全开） | 单条规则开关，如 `{"R17": false}`。**0.5.15 起才真正接线**——此前这个键是死的：配置里有它、面板把它标成 `active`、但没有任何一条路径把它写进扫描请求，所以你设的每个 `false` 都不起作用。现在三条入口（工具面 / 加载前 / 工具执行）都通。注意 R5 按设计只在 code 场景跑（作用于工具执行的代码字符串，不作用于文件扫描）；对文件扫描强开 `{"R5": true}` 会变成误报机器（扫 vet 自身命中 99 条，全是普通 `ctx` 参数访问） |
 | `scanSurface` | 全开 | 静态扫描面开关：`configFiles`（cordis.yml/patch 的 !!js 检测，R17）、`instructionFiles`（指令/技能注入观测，R18）；关闭只影响新面，旧扫描面照扫 |
-| `domainProjection` | `active`（**0.5.18 起由 `shadow` 改来**） | 一条告警的**形状**（严重度、合并键、`pluginHint`、来源通道）由哪条路生成。`active` 取注册表 + 投影器的结果；`shadow` 取各采集点写的旧字面量；`legacy` 完全跳过投影器。**三种模式都会比对**——比对正是 `VET_DOMAIN_SHADOW_STRICT=1` 下把任何分歧变成 CI 失败的机制，而 0.5.18 起 `active` 分支也会比对（此前它在比对之前就 return，改默认值等于悄悄拆掉保险丝）。面板把这个键报成 *部分生效* 而不是 *在用*：它确实生效，但今天看得到的输出没有变化，因为投影与字面量等价——只有某处投影不再等价时两种模式才会分开。改默认值这件事是对着打包产物验的：同一个包装进干净 profile，两种模式各起一次，`/vet/status.json` 的告警行逐字段相同 |
+| `domainProjection` | `active`（**0.5.18 起由 `shadow` 改来**） | 一条告警的**形状**（严重度、合并键、`pluginHint`、来源通道）由哪条路生成。`active` 取注册表 + 投影器的结果；`shadow` 取各采集点写的旧字面量；`legacy` 完全跳过投影器。**三种模式都会比对**——比对正是 `VET_DOMAIN_SHADOW_STRICT=1` 下把任何分歧变成 CI 失败的机制，而 0.5.18 起 `active` 分支也会比对（此前它在比对之前就 return，改默认值等于悄悄拆掉保险丝）。面板把这个键报成 *部分生效* 而不是 *在用*：它确实生效，但今天看得到的输出没有变化，因为投影与字面量等价——只有某处投影不再等价时两种模式才会分开。改默认值这件事是对着打包产物验的：同一个包装进干净 profile，两种模式各起一次，`/vet/status.json` 的告警行逐字段相同；审计页自检区常驻一行「投影模式 · N 处差异」——两种模式当前输出相同，切没切只能由它回答 |
 | `observeLoopback` | `true` | 本地 API 回环观测：开启后插件对 127.0.0.1 的请求计入 N3 台账，命中 DSH 控制面路径且归因第三方插件 → yellow `loopback-control`（alarm-only、可忽略） |
 | `telemetryDiff` | `true` | 遥测配置敏感化：周期读取 profile 配置 telemetry exporter url/mode 字段哈希，冷启动只记录；主机变化 → yellow。只存哈希，配置内容不进报警/档案 |
 | `thirdPartyBaseline` | `false`（hardened/paranoid 档开） | 第三方安装后完整性基线：非官方包记录首装内容哈希，同版本内容变化 → red（可经 `acknowledgedPackageHashes` 豁免）。定位是变更检测而非信任锚 |
@@ -379,7 +379,7 @@ N7 族 1 名单。
 |---|---|---|---|---|
 | R1 | constructor 链逃逸 | critical | code + files | certain/likely |
 | R2 | 动态执行（eval/Function/import/require） | high（files）/ medium（code；bin 入口降 medium） | both | certain/likely |
-| R3 | process 直接访问（按 runtime 分级；只读成员/generic/bin 入口/应用型包 → info） | critical（host）/ high（sandbox） | both | certain |
+| R3 | process 直接访问（按 runtime 分级；只读成员/generic/bin 入口/应用型包 → info；`process.kill(pid, 0)` 存活探测 → info） | critical（host）/ high（sandbox） | both | certain |
 | R4 | 宿主闭包捕获（agent/TextEncoder…）+ 宿主全局原型污染 | critical（code）/ high（files） | both | certain/likely |
 | R5 | ctx 逃逸尝试信号（withheld 成员/未声明服务；`ctx.logger` 等官方注入服务白名单放行） | medium | **仅 code** | likely |
 | R6 | 字符串粗扫兜底（混淆特征需与动态执行组合证据） | info | both | heuristic |

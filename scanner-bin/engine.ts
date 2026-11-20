@@ -288,9 +288,13 @@ function depsFindings(ghost: string[], zombie: string[]): Finding[] {
  * engine 只见文件 basename，bin/scripts 路径统一归一为 basename 匹配。0.5.24 起同时解析
  * main/module/exports/bin 的**绝对路径**（entryFiles）——测试/CI 路径降级要让位给声明。
  */
-function packageShape(content: string, pkgRoot?: string): { cliFiles: Set<string>; appShape: boolean; entryFiles: Set<string> } {
+function packageShape(content: string, pkgRoot?: string): { cliFiles: Set<string>; appShape: boolean; entryFiles: Set<string>; moduleFiles: Set<string> } {
   const cliFiles = new Set<string>()
   const entryFiles = new Set<string>()
+  /** round-24：main/module/exports 指向的文件（**模块入口**）——与 bin/scripts 分开记。
+   * 插件包自报 `"bin": {"x": "index.js"}` 曾能把真正的模块入口降级成「CLI 脚本」
+   * （R3 critical → info、R2 high → medium、R9 high → medium），一行 manifest 即可翻判决。 */
+  const moduleFiles = new Set<string>()
   let appShape = false
   try {
     const pkg = JSON.parse(content) as Record<string, unknown>
@@ -306,18 +310,20 @@ function packageShape(content: string, pkgRoot?: string): { cliFiles: Set<string
     // 0.5.24：包声明过的入口（main/module/exports/bin）按绝对路径入集合——R3/R13/R20 的
     // 「测试/CI 文件」路径降级必须让位给声明：入口落在 test/ 里的包，test/ 就是产品代码。
     if (pkgRoot !== undefined) {
-      const addEntry = (value: unknown): void => {
+      const addFile = (value: unknown, moduleEntry: boolean): void => {
         if (typeof value !== 'string') return
         const raw = value.trim().replace(/^\.\//, '')
         // 通配符（exports 的 "./x/*"）、绝对路径、带协议的都不是单个文件 → 不入集合
         if (raw === '' || raw.includes('*') || raw.includes(':') || raw.startsWith('/')) return
-        entryFiles.add(resolve(pkgRoot, raw).replace(/\\/g, '/'))
+        const abs = resolve(pkgRoot, raw).replace(/\\/g, '/')
+        entryFiles.add(abs)
+        if (moduleEntry) moduleFiles.add(abs)
       }
-      addEntry(pkg.main)
-      addEntry(pkg.module)
-      for (const e of entries) addEntry(e)
+      addFile(pkg.main, true)
+      addFile(pkg.module, true)
+      for (const e of entries) addFile(e, false)
       const walkExports = (value: unknown): void => {
-        if (typeof value === 'string') { addEntry(value); return }
+        if (typeof value === 'string') { addFile(value, true); return }
         if (Array.isArray(value)) { for (const v of value) walkExports(v); return }
         if (value !== null && typeof value === 'object') {
           for (const v of Object.values(value as Record<string, unknown>)) walkExports(v)
@@ -344,7 +350,7 @@ function packageShape(content: string, pkgRoot?: string): { cliFiles: Set<string
   } catch {
     // 坏 package.json：无形态证据（保守不降级）
   }
-  return { cliFiles, appShape, entryFiles }
+  return { cliFiles, appShape, entryFiles, moduleFiles }
 }
 
 /**
@@ -549,6 +555,57 @@ function scanCode(request: ScanRequest): ScanResponse {
 }
 
 /** Scan a file list with a total budget and content-hash cache (files mode). */
+/**
+ * 从声明入口出发、沿**相对** import/require 走一遍可达集（round-24）。
+ *
+ * 为什么需要它：R3/R13/R20 会把「测试/CI 路径」的文件降级成能力触达面 info。判定依据此前
+ * 只有 manifest 声明的入口（`entryFiles`）本身——于是「入口 import 一个 test 目录下的
+ * payload」仍被当成「测试文件」，其中的 process.exit / curl|sh 全部降级，整包 clean。路径不是
+ * 可达性证据，导入图才是。
+ *
+ * 边界（诚实记录）：只看相对说明符，不解析包名/别名/动态拼接；预算 500 个文件、单文件
+ * 8MB。刻意**只增不减**——把可达集并进 `entryFiles` 只会让降级更少（更保守），
+ * 不会凭空制造降级；解析不到顶多多判几个 high，方向安全。
+ */
+const RELATIVE_IMPORT_RE = /(?:from|import|require)\s*\(?\s*['"](\.[^'"\n]+)['"]/g
+function reachableFromEntries(entries: ReadonlySet<string>): Set<string> {
+  const seen = new Set<string>()
+  const queue = [...entries]
+  let budget = 500
+  while (queue.length > 0 && budget-- > 0) {
+    const file = queue.shift() as string
+    const norm = file.replace(/\\/g, '/')
+    if (seen.has(norm)) continue
+    seen.add(norm)
+    const text = readCapped(file)
+    if (text === '') continue
+    RELATIVE_IMPORT_RE.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = RELATIVE_IMPORT_RE.exec(text)) !== null) {
+      const target = resolveRelativeModule(file, m[1])
+      if (target !== undefined && !seen.has(target)) queue.push(target)
+    }
+  }
+  return seen
+}
+
+/** 相对说明符 → 包内文件（按 Node 的补全顺序试；都不存在则 undefined）。 */
+function resolveRelativeModule(from: string, spec: string): string | undefined {
+  const base = resolve(dirname(from), spec).replace(/\\/g, '/')
+  const candidates = [
+    base, `${base}.js`, `${base}.mjs`, `${base}.cjs`, `${base}.ts`, `${base}.tsx`, `${base}.jsx`,
+    `${base}/index.js`, `${base}/index.mjs`, `${base}/index.cjs`, `${base}/index.ts`,
+  ]
+  for (const candidate of candidates) {
+    try {
+      if (statSync(candidate).isFile()) return candidate
+    } catch {
+      // 不存在 → 下一个
+    }
+  }
+  return undefined
+}
+
 function scanFiles(request: ScanRequest): ScanResponse {
   if (request.files === undefined || request.files.length === 0) {
     return { ok: false, error: 'files 模式需要非空 files 列表' }
@@ -557,24 +614,45 @@ function scanFiles(request: ScanRequest): ScanResponse {
   // round-7：package.json 内容参与缓存 hash（bin 形态变化 → 缓存自然失效），无需额外 context
   const pkgJson = request.files.find(f => basename(f) === 'package.json')
   const shape = pkgJson === undefined ? undefined : packageShape(readCapped(pkgJson), dirname(pkgJson))
+  if (shape !== undefined) {
+    // round-24（自报元数据不能自我降级）：
+    // ① 插件包里「声明过的模块入口」不是 CLI 脚本——把 bin 指向自己的入口不再换来 R2/R3/R9
+    //    降级（只有 targetKind=plugin；generic 包维持原语义，dsh 自己的 CLI 包不受影响）。
+    // ② 测试/CI 降级要让位给**可达性**：入口 import 到的文件同样是产品代码。
+    if (request.targetKind === 'plugin') {
+      for (const abs of shape.moduleFiles) {
+        const name = basename(abs)
+        if (name !== '') shape.cliFiles.delete(name)
+      }
+    }
+    for (const reachable of reachableFromEntries(shape.entryFiles)) shape.entryFiles.add(reachable)
+  }
   // P0-2 #9（R16）：依赖健康上下文（幽灵/僵尸对账 + 缓存指纹）
   const depsInfo = buildDepsInfo(request.files)
   // R8-skip 先于缓存散列：超过 PRE_FILE_SIZE_LIMIT 的文件不会进入扫描循环（stat 先行跳过），
   // 缓存 key 不再整读它们——旧实现 key 阶段对全部文件 readOrDefault，大文件被全量读入 → 内存峰值。
   // 超限文件用 stat 尺寸做 key 占位（超大文件内容从不参与判定，尺寸即"未扫描"的充分表示）。
+  // round-25（内存）：用生成器喂给 cacheKey——内容边读边哈希，读完即丢。
+  // 旧写法 `request.files.map(...)` 会在进入 cacheKey 之前把所有文件同时读进内存
+  // （实测 560 × 8MB → RSS 4.8GB，且这段读盘不受扫描预算约束）。
   const key = cacheKey(
-    request.files.map(file => {
-      try {
-        const st = statSync(file)
-        // round-16 review（D3）：非常规文件（fifo/设备）在 cacheKey 阶段就跳读——
-        // 否则 readOrDefault 在缓存散列前就会 readFileSync 挂死/吸入无限流（size 恒 0
-        // 骗过大小预检；此阶段发生在 sizeWithinBudget 护栏之前）。
-        if (!st.isFile() || st.size > PRE_FILE_SIZE_LIMIT) return { path: file, content: 'vet-skipped:size=' + (st.isFile() ? st.size : 0) }
-      } catch {
-        // stat 失败 → 走 readOrDefault 的空串兜底
+    (function* fileContents() {
+      for (const file of request.files ?? []) {
+        try {
+          const st = statSync(file)
+          // round-16 review（D3）：非常规文件（fifo/设备）在 cacheKey 阶段就跳读——
+          // 否则 readOrDefault 在缓存散列前就会 readFileSync 挂死/吸入无限流（size 恒 0
+          // 骗过大小预检；此阶段发生在 sizeWithinBudget 护栏之前）。
+          if (!st.isFile() || st.size > PRE_FILE_SIZE_LIMIT) {
+            yield { path: file, content: 'vet-skipped:size=' + (st.isFile() ? st.size : 0) }
+            continue
+          }
+        } catch {
+          // stat 失败 → 走 readOrDefault 的空串兜底
+        }
+        yield { path: file, content: readOrDefault(file) }
       }
-      return { path: file, content: readOrDefault(file) }
-    }),
+    })(),
     request.rules,
     {
       targetKind: request.targetKind,
@@ -609,7 +687,10 @@ function scanFiles(request: ScanRequest): ScanResponse {
   for (let i = 0; i < request.files.length; i++) {
     const file = request.files[i]
     if (i > 0 && Date.now() > deadline) {
-      findings.push(skipFinding(file))
+      // round-23（计数失真）：旧实现只给「当前这一个」文件留 R8 然后 break——其后所有文件
+      // 静默消失，而宿主按 R8 条数统计 skippedFiles（gate-decision / scan-plugin），
+      // 于是「到底漏了多少」在报告里永远是 1。
+      for (let j = i; j < request.files.length; j++) findings.push(skipFinding(request.files[j]))
       budgetExceeded = true
       break
     }

@@ -122,6 +122,24 @@ const sorted = [...names].sort()
 const added = sorted.filter(n => !existing.includes(n))
 const retired = existing.filter(n => !sorted.includes(n)) // 恒空（并集保证），留作断言
 const lines = sorted.map(n => `  '${n}',`).join('\n')
+
+// 版本注记块：从既有文件的标记行到 `*/` 之前**原样保留**。
+// 教训（0.5.28）：此前 header 是整段常量模板，重生成 = 用模板覆盖文件头——0.5.23 写的
+// 版本注记在一次重生成里被静默吃掉，而「哪一版加了哪些包」正是这份名单唯一的人话来源。
+// 名字走并集（只增不减），注记也必须走并集（只增不改）。
+const NOTES_MARKER = ' * 版本注记（追加式：重生成原样保留；新版本的注记手工加在本块末尾）：'
+function readNotesBlock(file) {
+  if (!existsSync(file)) return ''
+  const lines2 = readFileSync(file, 'utf8').split('\n')
+  const start = lines2.findIndex(l => l.startsWith(' * 版本注记'))
+  if (start < 0) return ''
+  const end = lines2.findIndex((l, i) => i > start && l.trim() === '*/')
+  if (end < 0) return ''
+  return lines2.slice(start, end).join('\n') + '\n'
+}
+const preservedNotes = readNotesBlock(outFile)
+const notes = preservedNotes === '' ? `${NOTES_MARKER}\n * （尚无）\n` : preservedNotes
+
 const header = `/**
  * 官方包目录种子（M1，0.3.6 首建四源；0.3.7 随 DSH 0.1.5-rc.1 重生成；0.3.13 随 DSH
  * 0.1.7-rc.1 重生成：278 → 319；0.3.16 随 DSH 0.2.0-rc.1 重生成：319 → 330 名，+11 个
@@ -129,30 +147,10 @@ const header = `/**
  * dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的 @deepseek-ai/* 全量包名。
  * 生成方式：node scripts/gen-official-catalog-seed.mjs
  *        （dsh-src 更新或本机 DSH 升级后重跑；收集源：${sources.join('、')}）。
- * 0.2.1 家族注记（0.4.2，随 DSH 0.2.1-rc.5 重生成）：新增插件市场三件（plugin-market、
- * plugin-market-index、client-ui-plugin-market）、远程访问/工作目录/日程（api-remote-access、
- * working-directory、tool-working-directory、tool-schedule、web-deepseek-api、harness-dev-context）、
- * 会话检查器与翻译（experimental-inspector(+profile)、experimental-session-inspector、
- * experimental-session-search、experimental-translator、experimental-*-bundle 等）、
- * 密钥遮罩与入口定制（client-ui-secret-mask、client-ui-entry-customization）。
- * 0.2.1 起改并集生成：现有种子里的名字一律保留（本轮 dsh-client-store、dsh-webhook、
- * dsh-webhook-github、experimental-schedule-bundle 已不随 0.2.1-rc.5 发行物出现，
- * 仍留档——目录内名字不是信任本身，哈希不符照旧黄牌）。
- * 0.2.0 家族注记：新增遥测三件（client-product-analytics / otel / host-product-telemetry-otel）、
- * 快捷键（client-shortcuts、client-ui-shortcuts）、会话日志设置页（client-ui-settings-session-log）、
- * 自动复核（experimental-auto-review）、日程 bundle（experimental-schedule-bundle）、
- * LLM 账号拆分（llm-deepseek-account、llm-deepseek-api-key）、util-code-language。
- * 注：本机 dsh-src 源码树仍停在 0.1.0-rc.5（GitHub 拉取受阻），本次为「源码树 ∪ 新装家族」
- * 并集（超集语义）：名字真值只增不减；退役名保留不降低安全档——目录内哈希不符与目录外
- * 未收录同为黄牌观察，两者档位一致。
- * 0.1.7 家族注记：新增 plugin-manager / config-editor / dsh-hmr（原 cordis-plugin-hmr 退出
- * 家族）/ lazy-require / ptc-runtime(+node) / session-format-v3-to-v4 / office-to-pdf /
- * skill-office / workspace-changes / libreoffice-kit(+wasm) / experimental agent-team 与
- * voice-input 等；cordis 升 4.0.4、schemastery 3.18.4、node-addon-system 仍 0.1.2。
  * 语义：目录内 = 可信官方名候选（仍要求与官方哈希一致才入内容信任锚）；
  *       目录外多出来的 @deepseek-ai/* = 冒充或官方新包（黄牌观察，不拦）。
  * 运行时在线刷新（registry scope 枚举）结果与种子合并后落盘覆盖层，见 official-catalog.ts。
- */
+${notes} */
 export const OFFICIAL_CATALOG_SEED: readonly string[] = [
 ${lines}
 ]

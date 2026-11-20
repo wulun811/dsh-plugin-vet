@@ -12,6 +12,7 @@
  * 残留边界（逐操作 realpath 成本不可接受，见 contract 同款注释）。
  */
 import { writeFileSync, unlinkSync } from 'node:fs'
+import { isAbsolute, resolve } from 'node:path'
 /** 反斜杠 → 斜杠、折叠重复分隔符、去尾部斜杠（保留根 '/'）、折叠 . / .. 点段。 */
 export function normPath(p: string): string {
   const s = p.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/$/, '')
@@ -33,6 +34,27 @@ export function normPath(p: string): string {
  */
 export function stripMacPrivatePrefix(p: string): string {
   return p.startsWith('/private/') ? p.slice('/private'.length) : p
+}
+
+/**
+ * 判定坐标系归一（round-23，F27 同族）：相对路径按**调用时刻的 cwd** 解析成绝对路径。
+ *
+ * 内核解析 `fs.rmSync('.ssh/id_rsa')` 的规则就是「相对进程当前目录」，判定侧不做这一步，
+ * 同一个动作就会因为拼写不同而得到两种结论：绝对值走族 2 凭据拦截，相对值只发一张
+ * 归因报警——而 `process.chdir(homedir())` 是插件一行代码就能做的事。
+ * （F27 的教训原话：凡是 `resolve()` 生成一侧、原样使用另一侧的代码，都在等一个相对路径调用者。）
+ *
+ * 只解析相对路径：绝对路径不碰 `process.cwd()`（它会 syscall，且 cwd 被删时抛 ENOENT）。
+ * 失败（cwd 已删/不可读）→ 原样返回：那种情况下相对路径本来就解析不到真实文件，
+ * 按「判不了」处理，而不是让判定抛进被包装的 fs 调用。
+ */
+export function resolveAgainstCwd(p: string): string {
+  if (p === '' || isAbsolute(p)) return p
+  try {
+    return resolve(process.cwd(), p)
+  } catch {
+    return p
+  }
 }
 
 /**

@@ -186,6 +186,11 @@ describe('审计 & 蜜罐页承接自检（AuditCenterPanel）', () => {
  * 0.5.20：自检区多了两段——「配置：设了但没生效」（`effectiveConfig`，0.5.12 就推导出来，
  * 但客户端从来没读过）与「投影比对」（`domainProjection`，0.5.18 起三种模式都比对，结果同样
  * 没人读）。两段的口径与前面一致：**只报「你配了但它没照着做」**。
+ *
+ * 0.5.28：投影这一段破例常驻——`active` 与 `shadow` 目前输出逐字段相同，切没切没有任何可观察
+ * 差异；0.5.20 的「差异为 0 就整段不渲染」让这个问题只能靠读源码回答，而源码注释当时还写着
+ * `shadow` 是默认（用户 2026-11-06 反馈）。模式本身是配置事实，不是问题计数，所以它不进入
+ * `selfCheckProblemCount`，但必须一直可见。
  */
 const configWire = (over: Partial<VetEffectiveConfigWire> = {}): VetEffectiveConfigWire => ({
   profile: 'paranoid',
@@ -221,16 +226,30 @@ describe('0.5.20：配置与投影进自检', () => {
     expect(html).toContain('report 模式下没有任何拦截判定')
   })
 
-  it('投影差异为 0 时整段不渲染（没有差异就不该有一行「0 处不一致」）', () => {
+  it('投影模式常驻：active + 0 差异也要有一行（等价期里这是唯一能看出切没切的地方）', () => {
     const html = renderToStaticMarkup(createElement(SelfCheckSection, {
       pal, dark: true, t, coverage: [], posture: [], projection: { mode: 'active', mismatches: 0 },
     }))
-    expect(html).toBe('')
+    expect(html).toContain('投影模式')
+    expect(html).toContain('active')
+    expect(html).toContain('0 处差异')
+    expect(html).not.toContain('投影与旧字面量不一致')
+  })
+
+  it('回滚到 shadow 同样显示模式；差异句子只在真有差异时出现', () => {
+    const quiet = renderToStaticMarkup(createElement(SelfCheckSection, {
+      pal, dark: true, t, coverage: [], posture: [], projection: { mode: 'shadow', mismatches: 0 },
+    }))
+    expect(quiet).toContain('shadow')
+    expect(quiet).not.toContain('投影与旧字面量不一致')
+
     const shown = renderToStaticMarkup(createElement(SelfCheckSection, {
       pal, dark: true, t, coverage: [], posture: [],
       projection: { mode: 'active', mismatches: 2, first: 'severity: 旧="yellow" 投影="red"' },
     }))
     expect(shown).toContain('投影比对')
+    expect(shown).toContain('2 处差异')
+    expect(shown).toContain('投影与旧字面量不一致')
     expect(shown).toContain('severity')
   })
 })

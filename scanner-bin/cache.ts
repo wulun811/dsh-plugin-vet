@@ -84,7 +84,7 @@ function validReport(report: unknown): report is ScanReport {
  * or an official scan's folded report would be served to a third-party scan of the same bytes.
  */
 export function cacheKey(
-  files: CachedFile[],
+  files: Iterable<CachedFile>,
   rules: Record<string, boolean> | undefined,
   context: { targetKind?: 'plugin' | 'generic'; runtime?: string; scanBasis?: 'git' | 'npm'; deps?: string; surface?: { configFiles?: boolean; instructionFiles?: boolean }; officialFamily?: boolean; dshVersion?: string } = {},
 ): string {
@@ -93,6 +93,9 @@ export function cacheKey(
   //    大文件集（~1000×8MB）内存峰值 ≈ 2× 总字节；增量 update 不再复制内容。
   // 2) 无长度 framing 时 `path\u0000content` 拼接可被构造出二阶碰撞（不同文件集
   //    拼出相同串），长度前缀根除该碰撞面（路径与内容都带长度）。
+  // round-25：参数改为 Iterable——调用方传入生成器，内容边读边哈希、随迭代丢弃。
+  // 旧签名要求一个已物化的数组，引擎的 `files.map(...)` 会在进入本函数前把所有文件
+  // 同时读进内存（实测 560×8MB → RSS 4.8GB、预算之外）。
   const h = createHash('sha256')
   for (const f of files) {
     h.update(String(f.path.length))

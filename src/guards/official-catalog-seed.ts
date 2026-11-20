@@ -5,10 +5,21 @@
  * dsh-src（packages+apps+vendor）+ 本机已装 DSH 家族收集的 @deepseek-ai/* 全量包名。
  * 生成方式：node scripts/gen-official-catalog-seed.mjs
  *        （dsh-src 更新或本机 DSH 升级后重跑；收集源：dsh-src/packages、dsh-src/apps、dsh-src/vendor、live:/home/chen/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai）。
- * 0.5.23 随 DSH 0.2.2-rc.1 重生成：356 → 381 名（+25，无删除）。新增 tool-executor-native/ptc
- * （工具执行器拆成两个包）、official-bundles（bundle 元数据独立成包）、fs-patch、action-cards(+client-ui)、
- * forge 与 liveshare 实验族、recommendations 三件（creation/personalized/plugin + client-ui 两项）、
- * plugin-detail、message-quotes、deliverable-file-references、client-ui-context-menu/file-actions/file-drag、
+ * 语义：目录内 = 可信官方名候选（仍要求与官方哈希一致才入内容信任锚）；
+ *       目录外多出来的 @deepseek-ai/* = 冒充或官方新包（黄牌观察，不拦）。
+ * 运行时在线刷新（registry scope 枚举）结果与种子合并后落盘覆盖层，见 official-catalog.ts。
+ * 版本注记（追加式：重生成原样保留；新版本的注记手工加在本块末尾）：
+ * 0.5.28（随 DSH 0.2.2-rc.4 重生成）：381 → 395 名（+14，无删除）。新增 agent-team 三件
+ * （agent-team、client-ui-agent-team、tool-agent-team）、CUA/computer-use 三件
+ * （cua、cua-bundle、computer-use）、office 两件（office-kit、tool-office）、dsh-error
+ * （0.2.2 家族的错误基座，ToolContextUnavailableError 等从这里出）、mcp-manager、
+ * terminal-panel（0.2.2-rc.1 起终端搬到 Web 侧栏的那一支）、util-ripgrep、
+ * deepseek-chat-import、client-ui-account-notifications。
+ * 0.5.23 家族注记（随 DSH 0.2.2-rc.1 重生成）：356 → 381 名（+25，无删除）。新增
+ * tool-executor-native/ptc（工具执行器拆成两个包）、official-bundles（bundle 元数据独立成包）、
+ * fs-patch、action-cards(+client-ui)、forge 与 liveshare 实验族、recommendations 三件
+ * （creation/personalized/plugin + client-ui 两项）、plugin-detail、message-quotes、
+ * deliverable-file-references、client-ui-context-menu/file-actions/file-drag、
  * experimental-client-ui-stats。test/dsh-compat-live.test.ts 逐条对照本机家族目录——缺名即红，
  * 不再等用户先在面板上看见 official-not-in-catalog 黄牌。
  * 0.2.1 家族注记（0.4.2，随 DSH 0.2.1-rc.5 重生成）：新增插件市场三件（plugin-market、
@@ -31,9 +42,6 @@
  * 家族）/ lazy-require / ptc-runtime(+node) / session-format-v3-to-v4 / office-to-pdf /
  * skill-office / workspace-changes / libreoffice-kit(+wasm) / experimental agent-team 与
  * voice-input 等；cordis 升 4.0.4、schemastery 3.18.4、node-addon-system 仍 0.1.2。
- * 语义：目录内 = 可信官方名候选（仍要求与官方哈希一致才入内容信任锚）；
- *       目录外多出来的 @deepseek-ai/* = 冒充或官方新包（黄牌观察，不拦）。
- * 运行时在线刷新（registry scope 枚举）结果与种子合并后落盘覆盖层，见 official-catalog.ts。
  */
 export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/cordis',
@@ -59,6 +67,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-agent-preset-registry',
   '@deepseek-ai/dsh-agent-presets',
   '@deepseek-ai/dsh-agent-spine-demo',
+  '@deepseek-ai/dsh-agent-team',
   '@deepseek-ai/dsh-agent-tool-presentation',
   '@deepseek-ai/dsh-anonymous-user-id',
   '@deepseek-ai/dsh-api-account-controller',
@@ -93,8 +102,10 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-client-shortcuts',
   '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-test-runtime',
+  '@deepseek-ai/dsh-client-ui-account-notifications',
   '@deepseek-ai/dsh-client-ui-action-cards',
   '@deepseek-ai/dsh-client-ui-agent-preset',
+  '@deepseek-ai/dsh-client-ui-agent-team',
   '@deepseek-ai/dsh-client-ui-approval',
   '@deepseek-ai/dsh-client-ui-attachment',
   '@deepseek-ai/dsh-client-ui-brand-official',
@@ -169,18 +180,23 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-compaction-basic',
   '@deepseek-ai/dsh-compaction-image-offload',
   '@deepseek-ai/dsh-compaction-tool-result-pruner',
+  '@deepseek-ai/dsh-computer-use',
   '@deepseek-ai/dsh-config-editor',
   '@deepseek-ai/dsh-cordis-client-runner',
   '@deepseek-ai/dsh-cordis-host-runner',
   '@deepseek-ai/dsh-creation-recommendations',
   '@deepseek-ai/dsh-credentials',
   '@deepseek-ai/dsh-credentials-local',
+  '@deepseek-ai/dsh-cua',
+  '@deepseek-ai/dsh-cua-bundle',
   '@deepseek-ai/dsh-deepseek-account',
   '@deepseek-ai/dsh-deepseek-account-platform',
+  '@deepseek-ai/dsh-deepseek-chat-import',
   '@deepseek-ai/dsh-deepseek-llm-api-extensions',
   '@deepseek-ai/dsh-deliverable-file-references',
   '@deepseek-ai/dsh-deque',
   '@deepseek-ai/dsh-e2b',
+  '@deepseek-ai/dsh-error',
   '@deepseek-ai/dsh-experimental-agent-team',
   '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-api-speech-to-text',
@@ -259,10 +275,12 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-lsp',
   '@deepseek-ai/dsh-lsp-stdio',
   '@deepseek-ai/dsh-mcp-client',
+  '@deepseek-ai/dsh-mcp-manager',
   '@deepseek-ai/dsh-mcp-resources',
   '@deepseek-ai/dsh-message-feedback',
   '@deepseek-ai/dsh-message-quotes',
   '@deepseek-ai/dsh-native-command',
+  '@deepseek-ai/dsh-office-kit',
   '@deepseek-ai/dsh-office-to-pdf',
   '@deepseek-ai/dsh-official-bundles',
   '@deepseek-ai/dsh-otel',
@@ -350,10 +368,12 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-system-prompt',
   '@deepseek-ai/dsh-terminal',
   '@deepseek-ai/dsh-terminal-bash',
+  '@deepseek-ai/dsh-terminal-panel',
   '@deepseek-ai/dsh-time-context',
   '@deepseek-ai/dsh-timeout',
   '@deepseek-ai/dsh-tmux-context',
   '@deepseek-ai/dsh-token-meter',
+  '@deepseek-ai/dsh-tool-agent-team',
   '@deepseek-ai/dsh-tool-ask-user',
   '@deepseek-ai/dsh-tool-bash',
   '@deepseek-ai/dsh-tool-bash-persistent',
@@ -366,6 +386,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-tool-goal',
   '@deepseek-ai/dsh-tool-jobs',
   '@deepseek-ai/dsh-tool-lsp',
+  '@deepseek-ai/dsh-tool-office',
   '@deepseek-ai/dsh-tool-present',
   '@deepseek-ai/dsh-tool-pwsh',
   '@deepseek-ai/dsh-tool-pwsh-persistent',
@@ -392,6 +413,7 @@ export const OFFICIAL_CATALOG_SEED: readonly string[] = [
   '@deepseek-ai/dsh-user-questions',
   '@deepseek-ai/dsh-util-code-language',
   '@deepseek-ai/dsh-util-crypto',
+  '@deepseek-ai/dsh-util-ripgrep',
   '@deepseek-ai/dsh-util-time',
   '@deepseek-ai/dsh-util-values',
   '@deepseek-ai/dsh-util-workspace-path',

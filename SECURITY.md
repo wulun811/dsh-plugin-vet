@@ -27,6 +27,19 @@ README):
 2. The T1/T2 runtime guard does not cover worker_threads' independent realms, native plugins, or
    process.binding.
 3. T2 does not cover ESM named-import snapshots.
+4. **Official identity rests on a plain local file, and first-seen official packages are trusted before
+   verification** (decided 2026-11-20, deliberately unchanged):
+
+   - `~/.dsh/vet/official-catalog.json` is ordinary writable JSON: any process running as the same user can add a
+     name to it and become "official". No anti-forgery layer is added, because a process that can write that file
+     can equally edit vet's code or the DSH profile — the assumption is the standard one, that processes of the
+     same user trust each other.
+   - An official package seen for the first time has no published hash to compare against yet, so it is recorded
+     and trusted, and gets the artifact-noise reduction and deny exemption. The registry comparison on the next
+     load is what exposes an impostor; the first load cannot.
+   - `requireAudit` skips the audit-archive gate for names under `@deepseek-ai/`. Those packages still have the
+     hash baseline as a backstop; requiring an audit record for each official update is pure overhead.
+
 4. **The `/vet` control-plane routes carry no authentication of their own.** This is a statement about where the
    boundary sits, not a claim that it does not exist:
 
@@ -43,6 +56,13 @@ README):
      request `Host`; a POST with no `Origin` at all is rejected (403). That stops a cross-site page from driving
      the control surface. It does **not** stop a same-origin script, or any local process willing to send
      `Origin: http://<host>` — for both, the gateway above is the only real boundary.
+   - **Since 0.5.30 the `Host` header must also name this machine.** `Origin === Host` only proves the *browser*
+     thinks the request is same-origin — both headers come from the caller. After DNS rebinding (`evil.example`
+     resolving to 127.0.0.1, the page served from `evil.example:3456`), a page sends `Origin: http://evil.example:3456`
+     and `Host: evil.example:3456`, they match, and the TCP peer really is loopback. Writes therefore additionally
+     require the `Host` hostname to be `localhost`, a loopback address, or an IP literal on one of this host's
+     interfaces. Consequence: opening the panel by **hostname** (rather than by IP) makes the write endpoints
+     return 403 — use the IP. Read endpoints are unchanged.
    - **`controlLocalOnly` (opt-in, default off) tightens that to a local peer.** With it on, a write is also
      refused unless the TCP peer is loopback (`127.0.0.0/8`, `::1`) or one of this host's own interface
      addresses. The peer address is filled in by the kernel; `Origin`/`Host` can be typed by any client, so on

@@ -29,6 +29,7 @@
 import { existsSync, readFileSync, statSync, renameSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { writeTmpExclusive } from '../guard/path-utils.js'
+import { withVetSelfIo } from '../guard/runtime-denoise.js'
 import { vetStoreRoot } from '../guard/store-root.js'
 import { OFFICIAL_CATALOG_SEED } from './official-catalog-seed.js'
 
@@ -178,14 +179,25 @@ export async function refreshOfficialCatalogFromRegistry(fetchImpl: typeof fetch
   return refreshInflight
 }
 
-/** 原子写覆盖层（tmp+rename，0600；失败静默——下次核对重写）。 */
+/**
+ * 原子写覆盖层（tmp+rename，0600；失败静默——下次核对重写）。
+ *
+ * 0.5.28：全程包在 `withVetSelfIo` 里。此前这次写入会穿过自己的 T2 文件钩子，被判定为
+ * 「敏感路径写入（open flags=wx）：~/.dsh/vet/official-catalog.json.tmp.<pid>」——vet 把
+ * 自己记的账报成了可疑动作，而且只在「目录外出现官方名 → 触发在线核对 → 落盘覆盖层」这条
+ * 路径上出现，也就是每次 DSH 升级都可能自己给自己开一张黄牌（0.2.2-rc.4 实测 1 条）。
+ * 同类写入（scan-summaries / dismissed-alerts / snapshot / archive）早就在 self-io 里，
+ * 这里是漏掉的一处。
+ */
 function persistOverlay(names: string[]): void {
   try {
-    const path = officialCatalogPath()
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-    const tmp = path + '.tmp.' + process.pid
-    writeTmpExclusive(tmp, JSON.stringify({ names, refreshedAt: Date.now() } as CatalogOverlay, null, 2), 0o600)
-    renameSync(tmp, path)
+    withVetSelfIo(() => {
+      const path = officialCatalogPath()
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+      const tmp = path + '.tmp.' + process.pid
+      writeTmpExclusive(tmp, JSON.stringify({ names, refreshedAt: Date.now() } as CatalogOverlay, null, 2), 0o600)
+      renameSync(tmp, path)
+    })
   } catch {
     // fail-open：落盘失败只影响下次核对前的覆盖层记忆，不影响本次判定与种子兜底
   }

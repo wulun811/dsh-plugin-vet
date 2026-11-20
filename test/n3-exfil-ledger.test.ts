@@ -76,6 +76,31 @@ it('量级相近（读 2KB 写 2.5KB）→ 红 n3-exfil-match（疑似整包外�
     const alarms = l.observeNet(netEvt({ plugin: 'a', bytes: 2500 }))
     expect(alarms.some(a => a.kind === 'n3-exfil-match' && a.severity === 'red')).toBe(true)
   })
+  it('零碎遥测（读 2KB 凭据 + 17×50B 网写）→ 不升级为红（0.5.35 收紧：≥1KB 且比值 ≥0.8）', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date(2026, 0, 1, 0, 0, 0))
+      const l = new ExfilLedger({ exfilMinBytes: 512 })
+      l.observeFs(fsEvt({ plugin: 'a', op: 'readFileSync', bytes: 2048 }))
+      let alarms: ReturnType<typeof l.observeNet> = []
+      for (let i = 0; i < 17; i++) {
+        vi.advanceTimersByTime(1000)
+        alarms = l.observeNet(netEvt({ plugin: 'a', bytes: 50 }))
+      }
+      // 850B < 1KB 门槛 → 不升级红（旧口径 850/2048=0.415 落在 [0.4,3.0] 会红）
+      expect(alarms.some(a => a.kind === 'n3-exfil-match')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('比值门槛 0.8：读 2KB 写 1.2KB 不红，写 1.8KB 红', () => {
+    const low = new ExfilLedger({ exfilMinBytes: 512 })
+    low.observeFs(fsEvt({ plugin: 'a', op: 'readFileSync', bytes: 2048 }))
+    expect(low.observeNet(netEvt({ plugin: 'a', bytes: 1200 })).some(a => a.kind === 'n3-exfil-match')).toBe(false)
+    const high = new ExfilLedger({ exfilMinBytes: 512 })
+    high.observeFs(fsEvt({ plugin: 'a', op: 'readFileSync', bytes: 2048 }))
+    expect(high.observeNet(netEvt({ plugin: 'a', bytes: 1800 })).some(a => a.kind === 'n3-exfil-match')).toBe(true)
+  })
   it('量级悬殊（读 2KB 写 1MB）→ 不红（不误报正常大流量上传）', () => {
     vi.useFakeTimers()
     try {

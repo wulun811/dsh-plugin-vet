@@ -110,3 +110,54 @@ describe('VetStatus 合并去重（事件风暴降噪）', () => {
     expect(s.snapshot().alarms.length).toBe(2)
   })
 })
+
+/**
+ * retract 与 dismiss 的分工（0.5.28）：dismiss = 用户的答复（记录留着、进「已忽略」区、可恢复）；
+ * retract = vet 自己的观察被证伪（命题不成立了，留着就是一条已知为假的黄牌）。
+ * 典型场景：目录外出现官方名 → 黄牌 → registry 核对确认是官方包 → 黄牌撤下、补 info。
+ */
+describe('VetStatus.retract（证据推翻时撤下，而非折叠成「已忽略」）', () => {
+  const yellow = (id: string) => ({
+    id,
+    severity: 'yellow' as const,
+    source: 'scan' as const,
+    kind: 'official-not-in-catalog',
+    message: '目录外的官方名',
+    target: 'x',
+    at: Date.now(),
+  })
+
+  it('撤销存活行并返回 true；再次撤销返回 false（幂等，不误删别行）', () => {
+    const s = new VetStatus()
+    s.record(yellow('official-not-in-catalog:a'))
+    s.record(yellow('official-not-in-catalog:b'))
+    expect(s.retract('official-not-in-catalog:a')).toBe(true)
+    expect(s.snapshot().alarms.map(a => a.id)).toEqual(['official-not-in-catalog:b'])
+    expect(s.retract('official-not-in-catalog:a')).toBe(false)
+    expect(s.snapshot().alarmCount).toBe(1)
+  })
+
+  it('已忽略的行照撤——忽略不等于同意把一个错误结论留在「已忽略」区', () => {
+    const s = new VetStatus()
+    s.record(yellow('official-not-in-catalog:c'))
+    s.dismiss('official-not-in-catalog:c')
+    // 忽略后不进可行动列表，但仍留在记录里（折叠进 snapshot().dismissed）
+    expect(s.snapshot().alarms.length).toBe(0)
+    expect(s.snapshot().dismissed?.length).toBe(1)
+    expect(s.retract('official-not-in-catalog:c')).toBe(true)
+    expect(s.snapshot().dismissed?.length ?? 0).toBe(0)
+    // 忽略状态随记录一起失效：同名再次触发时是新的观察，不该继承旧的折叠
+    s.record(yellow('official-not-in-catalog:c'))
+    expect(s.isDismissed('official-not-in-catalog:c')).toBe(false)
+    expect(s.snapshot().alarmCount).toBe(1)
+  })
+
+  it('撤下后盾牌回绿（level 只看存活的可行动报警）', () => {
+    const s = new VetStatus()
+    s.record({ ...yellow('official-not-in-catalog:d'), severity: 'yellow' })
+    expect(s.snapshot().level).not.toBe('green')
+    s.retract('official-not-in-catalog:d')
+    expect(s.snapshot().level).toBe('green')
+    expect(s.snapshot().alarmCount).toBe(0)
+  })
+})

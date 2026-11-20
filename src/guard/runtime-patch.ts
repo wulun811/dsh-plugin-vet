@@ -263,6 +263,22 @@ export function patchModule(
 /**
  * 包装网络模块（独立于 patchModule，因为网络模块的操作名和参数形态与 fs 完全不同）。
  */
+
+/**
+ * 直接调用方是不是 Node 自己的 http/https/tls 内部（round-26）。
+ *
+ * 为什么要问：`http.request` 内部会调用模块导出的 `net.createConnection`，两层包装各报
+ * 一次 —— 一次 4096B 的 POST 在台账里记成 8286B（body + 整条 wire），面板上出现两条
+ * target 不同的 net-egress（`host/path` 与 `host/`）。判定只看**最靠近的几帧**：
+ * 插件在 http 回调里再开 socket 时，最近的是插件自己的帧，不会被误吞。
+ * 认不出来（栈缺失/形态变化）就照旧观测——宁可重复，不可漏。
+ */
+function isInternalHttpTlsFrame(stack: string | undefined): boolean {
+  if (stack === undefined) return false
+  const frames = stack.split('\n').slice(1, 4)
+  return frames.some(f => /node:internal\/(?:_http_agent|_http_client|_http_server|http2|tls)/.test(f))
+}
+
 export function patchNetworkModule(
   mod: Record<string, unknown>,
   moduleName: string,
@@ -288,8 +304,13 @@ export function patchNetworkModule(
       // C4：归因链被篡改 → 网络归因同样不可信（置空归因，操作照报）
       const stackTampered = isStackTraceTampered()
       let hint: string | undefined
+      let stackText: string | undefined
       if (alarm !== null || observe !== undefined || canaryScan !== undefined || cfg.observeLoopback === true) {
-        try { if (!stackTampered) hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
+        try { if (!stackTampered) { stackText = new Error().stack ?? undefined; hint = pluginFromStack(stackText, rootIndex()) } } catch {}
+      }
+      // round-26（双重计量）：http/https/tls 内部的 net 调用交给外层包装——同一请求只观测一次
+      if (moduleName === 'net' && isInternalHttpTlsFrame(stackText)) {
+        return (fn as (...a: unknown[]) => unknown).apply(this, args)
       }
       if (stackTampered && alarm !== null) {
         sink({
@@ -372,5 +393,60 @@ export function patchNetworkModule(
   }
   return () => {
     for (const [opName, fn] of original) mod[opName] = fn
+  }
+}
+
+/**
+ * `new net.Socket()` 旁路（round-26）：`new Socket(); s.connect(port, host); s.write(secret)`
+ * 完全不经过 `net.connect/createConnection`，此前零报警、N3 零字节、N4 金丝雀零命中。
+ * 在 `net.Socket.prototype.write` 上挂一次：第一次写时按 `remoteAddress/remotePort`
+ * 补一条 net-egress 观测，并把字节/内容接进台账与金丝雀。
+ *
+ * 不重复计量：http 请求的 socket 带 `_httpMessage`（外层 http 包装已在计数），
+ * 走 `net.connect()` 的 socket 已被模块包装挂上自有 write（自有属性遮蔽本原型方法）。
+ */
+const SOCKET_WRITE_HOOKED = Symbol('vet.net.socket.write')
+const SOCKET_SEEN = Symbol('vet.net.socket.seen')
+export function patchNetSocketPrototype(
+  mod: Record<string, unknown>,
+  cfg: HookConfig,
+  sink: (alarm: HookAlarm) => void,
+  rootIndex: () => Map<string, string>,
+  observe?: (evt: LedgerNetEvent) => void,
+  canaryScan?: (hint: string | undefined, text: string, where: 'url' | 'body') => void,
+): () => void {
+  type SymRecord = Record<symbol, unknown>
+  const proto = (mod.Socket as { prototype?: SymRecord & { write?: unknown } } | undefined)?.prototype
+  if (proto === undefined || typeof proto.write !== 'function') return () => {}
+  if (proto[SOCKET_WRITE_HOOKED] === true) return () => {}
+  proto[SOCKET_WRITE_HOOKED] = true
+  const originalWrite = proto.write as (...a: unknown[]) => unknown
+  proto.write = function (this: unknown, chunk: unknown, ...rest: unknown[]): unknown {
+    const socket = this as { _httpMessage?: unknown; remoteAddress?: unknown; remotePort?: unknown } & SymRecord
+    try {
+      if (!isRootIndexing() && !isVetSelfIo() && socket !== null && typeof socket === 'object'
+        && socket._httpMessage === undefined && socket[SOCKET_SEEN] !== true) {
+        socket[SOCKET_SEEN] = true
+        const host = typeof socket.remoteAddress === 'string' ? socket.remoteAddress : ''
+        const port = typeof socket.remotePort === 'number' ? socket.remotePort : undefined
+        if (host !== '') {
+          const hint = pluginFromStack(new Error().stack ?? undefined, rootIndex())
+          const target = port !== undefined ? `${host}:${port}` : host
+          const alarm = classifyNetworkOp('net', 'connect', [{ host, port }], cfg)
+          if (alarm !== null && (hint === undefined || !isOfficialTrusted(hint))) {
+            sink({ ...alarm, message: alarm.message + '（new net.Socket 形态）', pluginHint: hint })
+          }
+          if (observe !== undefined && isTrackedNetHost(host, cfg)) observe({ plugin: hint, module: 'net', op: 'write', hostname: host, bytes: 0 })
+          if (canaryScan !== undefined) canaryScan(hint, target, 'url')
+        }
+      }
+    } catch {
+      // 观测失败绝不影响真实写入
+    }
+    return originalWrite.apply(this, [chunk, ...rest])
+  }
+  return () => {
+    proto.write = originalWrite
+    delete proto[SOCKET_WRITE_HOOKED]
   }
 }

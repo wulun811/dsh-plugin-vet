@@ -211,7 +211,7 @@ export function AuditCenterPanel({ pal, dark, t, audit, coverage, posture, cover
         {/* —— 3. 自检详情（vet 自己看到了多少，不是机器上发生了什么）—— */}
         {(coverage.length > 0 || posture.length > 0
           || (config?.keys ?? []).some((k) => k.status !== 'active')
-          || (projection?.mismatches ?? 0) > 0) && (
+          || projection !== undefined) && (
           <>
             <SectionHead
               pal={pal}

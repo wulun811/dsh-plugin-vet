@@ -169,7 +169,30 @@ function pickBundlePatch(dshField: unknown): string[] | 'invalid' | undefined {
 function pickEntry(pkg: Record<string, unknown>): string | undefined {
   const exp = pkg.exports
   if (typeof exp === 'string' && exp !== '') return exp // round-4：Node 合法形态 "exports": "./index.js"
+  if (Array.isArray(exp)) {
+    // round-23：`"exports": ["./index.mjs"]` 是 Node 合法形态（数组 = 按序回退），
+    // 旧实现不认 → 报「无包入口」medium 假阳性。
+    for (const item of exp) {
+      if (typeof item === 'string' && item !== '') return item
+      if (item !== undefined && typeof item === 'object' && item !== null) {
+        for (const key of ['node', 'import', 'require', 'default']) {
+          const v = (item as Record<string, unknown>)[key]
+          if (typeof v === 'string' && v !== '') return v
+        }
+      }
+    }
+    return undefined
+  }
   if (exp !== undefined && typeof exp === 'object' && exp !== null) {
+    // round-23：顶层条件糖（`"exports": {"import": "./index.mjs"}`）等价于 "." 的条件对象，
+    // 没有 "." 键时不等于「无入口」——旧实现直接落到 main，没有 main 就报假阳性。
+    const sugar = exp as Record<string, unknown>
+    if (!('.' in sugar)) {
+      for (const key of ['node', 'import', 'require', 'default']) {
+        const v = sugar[key]
+        if (typeof v === 'string' && v !== '') return v
+      }
+    }
     const dot = (exp as Record<string, unknown>)['.']
     if (typeof dot === 'string' && dot !== '') return dot
     if (dot !== undefined && typeof dot === 'object' && dot !== null) {

@@ -208,6 +208,25 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
     if (!isDevOpsScriptFile(ctx.filePath ?? sf.fileName, ctx.pkgRoot)) return { severity, message }
     return { severity: 'high', message: 'dev/ops 脚本语境（dev-script）：' + message }
   }
+  /**
+   * `process.kill(target, 0)` 是 POSIX 的**存活探测**，不投递任何信号（0 号信号没有处理器，
+   * 只做「进程是否存在 + 我们能否向它发信号」的权限检查）。它和 READONLY_MEMBERS 里的
+   * `process.pid` 一样是只读能力触达面，不是副作用。
+   *
+   * 0.5.29（static-v32）：此前一律按 SIDE_EFFECT_MEMBERS 判 high——DSH 自己的
+   * `dsh-plugin-manager`（run-tree 的 treeAlive）、`dsh-atomic-write`（锁持有者存活判定）、
+   * `dsh-subprocess-local` 都用这个形态，前者因为同时发布 `src/` 而把这条 high 留在了
+   * verdict 里（`lib/` 那一份被官方包产物降噪折掉，`src/` 那一份不降噪）——于是 vet 给
+   * 一个只做 liveness 探测的官方包挂了一张黄牌，每次升级重扫一次。
+   *
+   * 只认**字面量 0**：`process.kill(pid)`（默认 SIGTERM）、`process.kill(pid, signal)`
+   * （变量，可能是 0 也可能是 SIGKILL）都保持 high——判不了的形态站在报的一方。
+   */
+  const isSignalZeroProbe = (call: ts.Node | undefined, member: string | undefined): boolean => {
+    if (member !== 'kill' || call === undefined || !ts.isCallExpression(call)) return false
+    const signal = call.arguments[1]
+    return signal !== undefined && ts.isNumericLiteral(signal) && signal.text === '0'
+  }
   walk(sf, n => {
     if (!ts.isIdentifier(n) || n.text !== 'process') return
     if (isShadowed('process', n)) return
@@ -241,6 +260,9 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
         // round-7.1：只读成员是能力触达面（读 cwd/env/pid 不是逃逸通道）→ info 不进 verdict
         severity = 'info'
         message = '只读 process 成员（能力触达面）：process.' + member
+      } else if (isSignalZeroProbe(parent.parent, member)) {
+        severity = 'info'
+        message = 'process.kill 信号 0（存活探测，未投递任何信号）：process.kill'
       } else {
         // SIDE_EFFECT_MEMBERS 与未知成员：保持 high（kill/abort/权限/原生加载有真实副作用；
         // 未知成员保守判定）
@@ -270,6 +292,9 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
       } else if (READONLY_MEMBERS.has(member)) {
         severity = 'info'
         message = '只读 process 成员（能力触达面）：' + parent.expression.text + '.process.' + member
+      } else if (isSignalZeroProbe(gp?.parent, member)) {
+        severity = 'info'
+        message = 'process.kill 信号 0（存活探测，未投递任何信号）：' + parent.expression.text + '.process.kill'
       } else {
         severity = 'high'
         message = '直接访问 ' + parent.expression.text + '.process.' + member
@@ -285,6 +310,9 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
       } else if (member !== undefined && READONLY_MEMBERS.has(member)) {
         severity = 'info'
         message = '只读 process 成员（能力触达面）：process[\'' + member + '\']'
+      } else if (member === 'kill' && isSignalZeroProbe(parent.parent, member)) {
+        severity = 'info'
+        message = 'process[\'kill\'] 信号 0（存活探测，未投递任何信号）'
       } else {
         severity = 'high'
         message = '直接访问 process[...]（动态成员）'
@@ -369,34 +397,47 @@ export function run(sf: ts.SourceFile, ctx: RuleContext): Finding[] {
   // round-22：`const { exit } = process; exit(1)` 解构成员形态——调用点是匿名标识符，
   // 与 process.exit 同一条逃逸通道，按解构成员分级（与属性访问同口径）。
   const destructured = destructuredProcessMembers(sf)
-  for (const [name, member] of destructured) {
+  if (destructured.size > 0) {
+    // round-25（复杂度）：旧实现对**每个**解构成员各走一遍全文件 AST——k 个成员就是 k 次
+    // 遍历，199KB / 8000 个成员实测 42s，远超 15s 扫描预算（整包 scan-fail）。
+    // 改成一次遍历、按名字分桶；判定逻辑逐字不变。
+    const hits = new Map<string, ts.Identifier[]>()
     walk(sf, n => {
-      if (!ts.isIdentifier(n) || n.text !== name) return
+      if (!ts.isIdentifier(n)) return
+      if (!destructured.has(n.text)) return
       if (n.parent !== undefined && ts.isBindingElement(n.parent)) return // 声明位本身（解构名）
-      if (isShadowedForStringy(name, n)) return
-      // 成员使用即访问（exit() 调用 / 裸引用都算）；与属性形态同分级：
-      // 只读成员 info（能力触达面），critical 成员 critical，其余 high（含副作用成员）。
-      let severity: Severity = 'high'
-      let message = 'process 解构成员访问：' + member
-      if (CRITICAL_MEMBERS.has(member)) {
-        severity = 'critical'
-        message = 'process 解构成员调用/访问：' + member + '（Node 能力逃逸通道）'
-      } else if (READONLY_MEMBERS.has(member)) {
-        severity = 'info'
-        message = '只读 process 成员（能力触达面，解构）：' + member
-      }
-      if (severity === 'critical' && ctx.runtime === 'sandbox') severity = 'high'
-      const d = degrade(severity, message)
-      const cap = devOpsCap(d.severity, d.message, member)
-      found.push({
-        rule: 'R3',
-        severity: cap.severity,
-        confidence: 'certain',
-        message: cap.message,
-        evidence: n.getText(sf),
-        line: lineOf(sf, n),
-      })
+      if (isShadowedForStringy(n.text, n)) return
+      const list = hits.get(n.text)
+      if (list === undefined) hits.set(n.text, [n])
+      else list.push(n)
     })
+    for (const [name, nodes] of hits) {
+      const member = destructured.get(name) as string
+      for (const n of nodes) {
+        // 成员使用即访问（exit() 调用 / 裸引用都算）；与属性形态同分级：
+        // 只读成员 info（能力触达面），critical 成员 critical，其余 high（含副作用成员）。
+        let severity: Severity = 'high'
+        let message = 'process 解构成员访问：' + member
+        if (CRITICAL_MEMBERS.has(member)) {
+          severity = 'critical'
+          message = 'process 解构成员调用/访问：' + member + '（Node 能力逃逸通道）'
+        } else if (READONLY_MEMBERS.has(member)) {
+          severity = 'info'
+          message = '只读 process 成员（能力触达面，解构）：' + member
+        }
+        if (severity === 'critical' && ctx.runtime === 'sandbox') severity = 'high'
+        const d = degrade(severity, message)
+        const cap = devOpsCap(d.severity, d.message, member)
+        found.push({
+          rule: 'R3',
+          severity: cap.severity,
+          confidence: 'certain',
+          message: cap.message,
+          evidence: n.getText(sf),
+          line: lineOf(sf, n),
+        })
+      }
+    }
   }
   return found
 }

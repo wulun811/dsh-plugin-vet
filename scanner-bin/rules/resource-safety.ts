@@ -105,7 +105,7 @@ export function isRedosPattern(pattern: string): boolean {
       used += body.length
       if (used > REDOS_WORK_BUDGET) return false
       if (body.startsWith('?:') || body.startsWith('?=') || body.startsWith('?!')) body = body.slice(2)
-      if (hasAlternation(body) && !branchesDisjoint(body)) return true
+      if (hasAlternation(body) && !branchesDisjoint(body, n => { used += n; return used <= REDOS_WORK_BUDGET })) return true
     }
   }
   return false
@@ -130,7 +130,7 @@ function hasAlternation(body: string): boolean {
  * 集合不相交 → 互斥（线性）。首字符支持：字面量、. \\d \\w \\s、
  * 字符类 [...]（^ 否定类无法近似 → 保守视为不互斥）。无法分析 → 不互斥（保守报）。
  */
-function branchesDisjoint(body: string): boolean {
+function branchesDisjoint(body: string, charge?: (work: number) => boolean): boolean {
   const branches: string[] = []
   let depth = 0
   let cur = ''
@@ -146,6 +146,12 @@ function branchesDisjoint(body: string): boolean {
   }
   branches.push(cur)
   if (branches.length < 2) return false
+  // round-25（预算）：两两比较是 O(b²)，而预算只按 body 字符数计——10KB 的 `(|…) +` 用
+  // 5000 个分支就能在 500k 预算内跑完 1250 万次比较（实测 287ms；40000 分支 14.4s）。
+  // 按比较次数计费；超预算按「不互斥」处理（保守 → 报），不是「判定完成」。
+  if (branches.length > 512) return false
+  const comparisons = (branches.length * (branches.length - 1)) / 2
+  if (charge !== undefined && !charge(comparisons)) return false
   const charSets = branches.map(firstCharSet)
   for (let i = 0; i < charSets.length; i++) {
     for (let j = i + 1; j < charSets.length; j++) {

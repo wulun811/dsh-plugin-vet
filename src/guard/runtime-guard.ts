@@ -30,8 +30,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { VetConfig } from '../config.js'
 import { VetStatus } from './status.js'
 import type { WatchAlarm } from './runtime-watch.js'
-import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, setRootIndexing, classifyNetworkOp, extractNetworkTarget, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, isOfficialTrusted, chunkBytes, isTrackedNetHost, isLoopbackHost, isControlPlanePath, hookHeartbeat, registerHookTarget, brandVetHook } from './runtime-hooks.js'
+import { DEFAULT_HOOK_CONFIG, patchModule, patchNetworkModule, patchNetSocketPrototype, setRootIndexing, classifyNetworkOp, extractNetworkTarget, isVetSelfIo, isRootIndexing, pluginFromStack, isOfficial, isOfficialTrusted, chunkBytes, isTrackedNetHost, isLoopbackHost, isControlPlanePath, hookHeartbeat, registerHookTarget, brandVetHook } from './runtime-hooks.js'
 import { isStackTraceTampered } from './runtime-denoise.js'
+import { attachWriteCounter, attachCanaryScanner } from './runtime-count.js'
 import { resolvePackageRoot } from '../scanner/package-sources.js'
 import { PACKAGE_NAME } from '../package-meta.js'
 import { isVetSelfPath } from '../pkg-root.js'
@@ -462,6 +463,45 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
     disposers.push(patchNetworkModule(http as unknown as Record<string, unknown>, 'http', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
     disposers.push(patchNetworkModule(https as unknown as Record<string, unknown>, 'https', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
     disposers.push(patchNetworkModule(net as unknown as Record<string, unknown>, 'net', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
+    // round-26：`new net.Socket()` 不经过模块函数（NET_OPS 全是工厂）——原型 write 补一道，
+    // 否则一行 `new Socket().connect(...).write(secret)` 就是完全静默的外传通道。
+    disposers.push(patchNetSocketPrototype(net as unknown as Record<string, unknown>, hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
+    // round-27：http2 的数据在 `session.request()` 返回的流上——模块包装只看见 connect 的
+    // 目标主机，流里的字节既不进台账、也不进金丝雀（`session.request().write(secret)` 静默）。
+    // 在 connect 返回的 session 上包一层 request，把 write 计数与 canary 挂到流上。
+    const originalHttp2Connect = http2.connect
+    const patchedSessions = new WeakSet<object>()
+    const http2ConnectWrapped = function (this: unknown, ...args: unknown[]): unknown {
+      const session = (originalHttp2Connect as (...a: unknown[]) => unknown).apply(this, args)
+      if (session === null || typeof session !== 'object' || patchedSessions.has(session)) return session
+      patchedSessions.add(session)
+      const target = session as { request?: unknown }
+      const originalRequest = target.request
+      if (typeof originalRequest !== 'function') return session
+      target.request = function (this: unknown, ...requestArgs: unknown[]): unknown {
+        const stream = (originalRequest as (...a: unknown[]) => unknown).apply(this, requestArgs)
+        try {
+          const t = extractNetworkTarget(requestArgs) ?? extractNetworkTarget(args)
+          if (stream !== null && typeof stream === 'object' && t !== null && !isRootIndexing() && !isVetSelfIo()) {
+            let hint: string | undefined
+            try { hint = pluginFromStack(new Error().stack ?? undefined, rootIndex()) } catch {}
+            if (isTrackedNetHost(t.hostname, hookCfg)) {
+              attachWriteCounter(stream as { write?: unknown; end?: unknown }, (bytes) => {
+                ledgerNetObserver({ plugin: hint, module: 'http2', op: 'request', hostname: t.hostname, bytes })
+              })
+            }
+            netCanaryScan(hint, typeof requestArgs[0] === 'string' ? requestArgs[0] : t.hostname + t.path, 'url')
+            attachCanaryScanner(stream as { write?: unknown; end?: unknown }, (text) => netCanaryScan(hint, text, 'body'))
+          }
+        } catch {
+          // 观测失败不影响真实请求
+        }
+        return stream
+      }
+      return session
+    }
+    http2.connect = http2ConnectWrapped as typeof http2.connect
+    disposers.push(() => { http2.connect = originalHttp2Connect })
     disposers.push(patchNetworkModule(http2 as unknown as Record<string, unknown>, 'http2', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
     disposers.push(patchNetworkModule(tls as unknown as Record<string, unknown>, 'tls', hookCfg, sink, rootIndex, ledgerNetObserver, netCanaryScan))
     
@@ -584,7 +624,16 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
           //   - 但 clone() 不消费原流：同步 clone 后异步 .text()，观测不阻塞原调用。
           //   拿到文本后补跑金丝雀/密钥扫描（异步观测 = 出站后确认，同网络模块 chunk 语义）。
           const initBody = (args[1] as { body?: unknown } | undefined)?.body
+          // round-23（OOM）：字符串 body 此前**没有**上限就被全文扫描（密钥检测 + 金丝雀 +
+          // base64 解码各来一遍），而同一函数里流式 Request body 明写了 4MB 上限与 OOM 风险
+          // 注释。32MB 的 AKIA 形状 body 实测 815ms / +328MB（matchAll 展开百万个 match），
+          // 500MB 就是秒级阻塞 + GB 级峰值——守卫自身的失败变成了宿主挂掉。
+          // 与流式路径同值：只扫前缀，超出部分不参与内容判定（字节数仍按全长记账）。
           const stringBody = typeof initBody === 'string' ? initBody : undefined
+          const BODY_SCAN_LIMIT_STR = 4 * 1024 * 1024
+          const scanBody = stringBody !== undefined && stringBody.length > BODY_SCAN_LIMIT_STR
+            ? stringBody.slice(0, BODY_SCAN_LIMIT_STR)
+            : stringBody
           let requestBodyPromise: Promise<string> | undefined
           const first = args[0]
           if (stringBody === undefined && typeof first === 'object' && first !== null &&
@@ -639,8 +688,8 @@ function installT2(ctx: Context, config: VetConfig, status: VetStatus, disposers
           // N3/N4：fetch URL 与 body 走统一 netCanaryScan（密钥外泄内容匹配 + 金丝雀）
           const urlText = typeof args[0] === 'string' ? args[0] : (target !== null ? target.hostname + target.path : '')
           netCanaryScan(hint, urlText, 'url')
-          if (stringBody !== undefined) {
-            netCanaryScan(hint, stringBody, 'body')
+          if (scanBody !== undefined) {
+            netCanaryScan(hint, scanBody, 'body')
           } else if (requestBodyPromise !== undefined) {
             // Request 形态：body 异步补观测（clone 已隔离，不消费原流；失败静默——观测是增强不是防线）
             requestBodyPromise.then((text) => {

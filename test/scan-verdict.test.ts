@@ -76,8 +76,12 @@ describe('scan-verdict：文案', () => {
   })
 
   it('官方与非官方给不同的处置建议', () => {
-    expect(scanVerdictMessage(base())).toContain('随 DSH 升级修复')
-    expect(scanVerdictMessage(base({ official: false }))).not.toContain('随 DSH 升级修复')
+    // 0.5.29：官方包的命中不一定是上游依赖——旧文案写死「通常来自上游依赖，随 DSH 升级修复」，
+    // 而 2026-11-18 那条黄牌来自 dsh-plugin-manager 自己源码里的 liveness 探测。
+    const official = scanVerdictMessage(base())
+    expect(official).toContain('可能是官方包自身源码里的能力调用')
+    expect(official).not.toContain('通常来自上游依赖')
+    expect(scanVerdictMessage(base({ official: false }))).not.toContain('官方包自身源码')
     expect(scanVerdictMessage(base({ official: false }))).toContain('忽略')
   })
 })

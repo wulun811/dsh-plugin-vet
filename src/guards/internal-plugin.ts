@@ -291,10 +291,13 @@ function recordMismatchAlarm(
  * 与 deny/requireAudit 叠加才有完整语义。无论结果如何都**不跳过静态扫描**（与官方包
  * exempt 语义不同——第三方包仍要过 verdict）。
  */
-export function checkThirdPartyBaseline(packageName: string, packageRoot: string, version: string | undefined, config: VetConfig, status?: VetStatus): 'ok' | 'mismatch' | 'acknowledged' | 'first-seen' {
+export function checkThirdPartyBaseline(packageName: string, packageRoot: string, version: string | undefined, config: VetConfig, status?: VetStatus): 'ok' | 'mismatch' | 'acknowledged' | 'first-seen' | 'unverifiable' {
   if (config.thirdPartyBaseline !== true) return 'ok'
   const hashResult = computePackageHash(packageRoot)
-  if (hashResult === null) return 'ok' // 超限/超时：不参与（静默，不阻断）
+  // round-25：算不出哈希（超预算/超文件数/超时）不是「对得上」——旧实现返回 'ok'，
+  // 相当于「P7 在这类包上静默关闭」。返回独立状态，由调用方记一条 info：不阻断加载，
+  // 但面板上看得见「这个包的内容基线没验成」。
+  if (hashResult === null) return 'unverifiable'
   const v = version ?? 'unknown'
   const store = getBaseline()
   const result = checkBaseline(packageName, v, hashResult.hash, store)
@@ -674,6 +677,9 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
       if (config.mode !== 'deny') {
         void refreshOfficialCatalogFromRegistry().then((merged) => {
           if (!merged.has(entryName)) return
+          // 0.5.28：核对确认 = 黄牌的前提被证伪（名字确实在官方全集里）。撤下它，别让用户
+          // 手动点掉一个已经被自己否掉的结论——每次 DSH 升级都会新开一批这样的黄牌。
+          const retracted = status?.retract('official-not-in-catalog:' + entryName) ?? false
           // 核对后已纳入目录：补首见验证（哈希一致 → 本进程入锚）或 info 提示
           if (official.kind === 'exempt' && (official.reason === 'first-seen' || official.reason === 'match')
             && official.hash !== undefined && official.version !== undefined) {
@@ -684,7 +690,7 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
               severity: 'info',
               source: 'scan',
               kind: 'official-catalog-merged',
-              message: `官方包 ${entryName} 已通过 registry 核对确认并在官方目录中登记（覆盖层）——此前 official-not-in-catalog 黄牌可忽略`,
+              message: `官方包 ${entryName} 已通过 registry 核对确认并在官方目录中登记（覆盖层）——此前 official-not-in-catalog 黄牌${retracted ? '已自动撤下' : '可忽略'}`,
               target: entryName,
               pluginHint: entryName,
               at: Date.now(),
@@ -711,10 +717,15 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // 0.3.5（M2）注：集外官方名（冒充/未核对）不额外新增拦截——deny 升级豁免沿用 round-16
     // 语义（first-seen/match 豁免 deny 升级），用户口径「本来就不拦」：冒充由「不入内容信任锚
     // + 黄牌观察 + 静态扫描」暴露，不靠运行时拦截。
-    const officialDenyExempt = official.kind === 'exempt'
+    // round-25（信任模型的方向性）：suspected = registry 已坐实「本机字节 ≠ 官方 tarball」。
+    // 这种记录此前仍拿到 deny 豁免与产物降噪——「查出来不对，但照旧当官方」。豁免的前提
+    // 是身份成立；suspected 正是身份**不成立**的证据，必须一票否决。
+    const recordSuspected = inCatalog && installedVersion !== undefined && installedVersion !== 'unknown'
+      && isRecordSuspected(entryName, installedVersion)
+    const officialDenyExempt = official.kind === 'exempt' && !recordSuspected
     // 官方家族（0.3.13）：官方目录成员 + 字节可信（first-seen/match）。两处共用同一判据——
     // 产物降噪位（request.officialFamily，见下方扫描请求）与扫描失败降噪（scan-fail 档位）。
-    const officialTrustedFamily = inCatalog && official.kind === 'exempt'
+    const officialTrustedFamily = inCatalog && official.kind === 'exempt' && !recordSuspected
       && (official.reason === 'first-seen' || official.reason === 'match')
     if (official.kind === 'mismatch') {
       if (official.acknowledged) {
@@ -753,7 +764,17 @@ export function installInternalPluginGuard(ctx: Context, config: VetConfig, stat
     // round-13（Phase 4）：第三方安装后完整性基线（默认关）——非官方包也做内容哈希对账，
     // 但**不豁免扫描**（第三方包仍要静态 verdict；与官方 exempt 语义不同）
     if (official.kind === 'not-official' && config.thirdPartyBaseline === true && root !== undefined) {
-      checkThirdPartyBaseline(entryName, root, installedVersion, config, status)
+      const baselineState = checkThirdPartyBaseline(entryName, root, installedVersion, config, status)
+      if (baselineState === 'unverifiable') {
+        status?.record({
+          id: `p7-unverifiable:${entryName}`,
+          severity: 'info',
+          source: 't2',
+          kind: 'baseline',
+          message: `内容基线未验成（包过大/文件过多，超出哈希预算）：${entryName} — 本次加载没有拿到「字节与上次一致」的证据`,
+          at: Date.now(),
+        })
+      }
     }
 
     // D30 审计门槛（requireAudit）已前移到 `autoScan` 早退之前（0.5.19，F19）——见 auditGate()。

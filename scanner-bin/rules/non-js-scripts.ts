@@ -14,13 +14,13 @@ import type { Finding } from '../protocol.js'
 const DOWNLOAD_EXEC: { re: RegExp; desc: string; sev?: 'high' | 'medium' }[] = [
   // round-16：curl/wget/|sh 三式补 /i——round-8.1 声称"大小写不敏感"但这三式漏了 /i
   // （Windows cmd 大小写不敏感，Setup.SH 内 CURL|SH 此前整体绕过）。
-  { re: /curl[^\n|]*\|\s*(ba|z)?sh\b/i, desc: 'curl|sh 远程代码执行' },
-  { re: /wget[^\n|]*\|\s*(ba|z)?sh\b/i, desc: 'wget|sh 远程代码执行' },
-  { re: /(iwr|Invoke-WebRequest|DownloadString)[^\n]*\|/i, desc: 'PowerShell 下载管道' },
+  { re: /curl[^\n|]{0,256}\|\s*(ba|z)?sh\b/i, desc: 'curl|sh 远程代码执行' },
+  { re: /wget[^\n|]{0,256}\|\s*(ba|z)?sh\b/i, desc: 'wget|sh 远程代码执行' },
+  { re: /(iwr|Invoke-WebRequest|DownloadString)[^\n]{0,512}\|/i, desc: 'PowerShell 下载管道' },
   { re: /powershell[^\r\n]{0,120}-enc(odedcommand)?\b/i, desc: '编码 PowerShell（隐藏载荷）' },
   { re: /\b(IEX|Invoke-Expression)\b/i, desc: 'PowerShell Invoke-Expression' },
   { re: /\b(certutil|bitsadmin|mshta|regsvr32|scrobj|rundll32)\b/i, desc: '系统下载/执行原语' },
-  { re: /curl[^\n]*-o\s+\S+/i, desc: 'curl 下载落盘', sev: 'medium' },
+  { re: /curl[^\n]{0,512}-o\s+\S+/i, desc: 'curl 下载落盘', sev: 'medium' },
   // round-9（0.1.16 加固）：解释器 -c/-e 内联脚本中的网络下载+执行原语
   { re: /\bpython[0-9]?\s+-[cC]\b[^\n]{0,220}\b(urllib|requests|urlopen|urlretrieve|exec)\b/i, desc: 'Python -c 网络/执行脚本' },
   { re: /\bruby\s+-[eE]\b[^\n]{0,160}\b(Net::HTTP|open-uri|system|exec)\b/i, desc: 'Ruby -e 网络/执行脚本' },
@@ -46,6 +46,9 @@ function lineOfText(text: string, index: number): number {
 export function runNonJsScript(content: string, file: string, targetKind?: 'plugin' | 'generic'): Finding[] {
   const found: Finding[] = []
   for (const p of DOWNLOAD_EXEC) {
+    // round-23（ReDoS）：量词全部改成有界 `{0,N}`（旧 `[^\n|]*` 是「每个 curl 起点扫到行尾」，
+    // 256KB 全是 "curl " 时实测 27s）；再补一道 O(n) 前置闸：没有 '|' 的文件不可能命中管道形态。
+    if (p.re.source.includes('\\|') && !content.includes('|')) continue
     // 保留原字面量 flags（/i 等）——只传 'g' 会丢弃大小写不敏感标志
     const re = new RegExp(p.re.source, p.re.flags)
     const m = re.exec(content)

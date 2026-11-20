@@ -29,7 +29,7 @@
  * -> ~/1q/plugin-vet`），"一键升级"在该形态下无意义。本模块只**显示**事实与可复制的命令。
  * @module dsh-plugin-vet/update-check
  */
-import { readFileSync, renameSync, mkdirSync, existsSync, lstatSync, openSync, readSync, closeSync } from 'node:fs'
+import { readFileSync, renameSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -38,6 +38,7 @@ import { vetStoreRoot } from './store-root.js'
 import { resolvePkgRoot } from '../pkg-root.js'
 import { withVetSelfIo } from './runtime-denoise.js'
 import { writeTmpExclusive } from './path-utils.js'
+import { readSmallRegularFile } from './fs-read.js'
 
 /** 在线层的结论状态。`unknown` = 还没查到/查失败（不弹任何升级提示）。 */
 export type UpdateStatus = 'up-to-date' | 'update-available' | 'unknown'
@@ -204,29 +205,6 @@ export function compatStatus(dshVersion: string, testedRange: string): CompatSta
   // 否则会弹一张假的兼容性告警——与「离线层不可能误报」的承诺相反。
   if (parseSemver(dshVersion) === null) return 'unknown'
   return satisfiesRange(dshVersion, testedRange) ? 'ok' : 'out-of-range'
-}
-
-/**
- * 只读**普通文件**且限长：`lstat`（不跟随符号链接）+ 大小上限 + 有界 `read`。
- * 反例（审查实测）：`update-check.json` 被换成指向 FIFO 的符号链接时，同步读会永久阻塞，
- * 而它就在 /vet/status.json 的同步路径上——整个 DSH web 事件循环冻住；指向大文件则是无界读。
- * 写侧早已用 'wx' 防同名 tmp 预埋，读侧此前完全没有对应防护。
- */
-function readSmallRegularFile(path: string, maxBytes: number): string | null {
-  try {
-    const st = lstatSync(path)
-    if (!st.isFile() || st.size > maxBytes) return null
-    const fd = openSync(path, 'r')
-    try {
-      const buf = Buffer.alloc(Math.min(st.size, maxBytes))
-      const n = readSync(fd, buf, 0, buf.length, 0)
-      return buf.subarray(0, n).toString('utf8')
-    } finally {
-      closeSync(fd)
-    }
-  } catch {
-    return null
-  }
 }
 
 function loadPersisted(): Persisted {

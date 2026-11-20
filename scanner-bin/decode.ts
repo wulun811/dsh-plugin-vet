@@ -70,6 +70,10 @@ export function tryDecodeLiteral(node: ts.Expression, sf: ts.SourceFile, depth =
       codes.push(v)
     }
     if (codes.length === 0) return undefined
+    // round-23：`String.fromCodePoint(...codes)` 的实参个数无上限——25 万个码点就
+    // RangeError（同样的「一个文件关掉整个规则面」）。超出直接放弃该字面量解码，
+    // 不影响同文件其余规则继续跑。
+    if (codes.length > 4096) return undefined
     const text = String.fromCodePoint(...codes)
     if (text.length > MAX_DECODED_BYTES) return undefined
     return { text, method: "charCode" }

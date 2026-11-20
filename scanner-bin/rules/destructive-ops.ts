@@ -30,6 +30,13 @@ function fsBase(callee: ts.PropertyAccessExpression, fsRefs: Set<string>): strin
   if (ts.isPropertyAccessExpression(base)
     && ts.isIdentifier(base.expression) && base.expression.text === 'fs'
     && base.name.text === 'promises') return 'fs.promises'
+  // round-23（漏检）：`require('fs').promises.rm('/etc/passwd')` —— callee 的 expression 是
+  // 属性访问链 `require('fs').promises`，上面两个分支都不认（既非 Identifier 也非
+  // require 直调），R11 对这条写法整体失明。递归到链上的 require('fs') 即可。
+  if (ts.isPropertyAccessExpression(base) && base.name.text === 'promises') {
+    const inner = fsBase(base as unknown as ts.PropertyAccessExpression, fsRefs)
+    if (inner !== undefined) return 'fs.promises'
+  }
   if (ts.isCallExpression(base)) {
     const c = base.expression
     if (ts.isIdentifier(c) && c.text === 'require' && base.arguments.length > 0) {

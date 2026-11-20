@@ -28,4 +28,4 @@ export {
 export { classifyOp } from './runtime-classify.js'
 export { pluginFromStack, isOfficial, isOfficialTrusted, markOfficialTrusted, resetOfficialTrustForTest } from './runtime-attrib.js'
 export { isTrackedNetHost, extractNetworkTarget, classifyNetworkOp, isLoopbackHost, isControlPlanePath } from './runtime-net.js'
-export { patchModule, patchNetworkModule } from './runtime-patch.js'
+export { patchModule, patchNetworkModule, patchNetSocketPrototype } from './runtime-patch.js'

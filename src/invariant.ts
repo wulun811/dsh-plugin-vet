@@ -30,6 +30,12 @@ export function watchInvariantMessage(platform: NodeJS.Platform, spawned: boolea
 /**
  * 包级运行时 invariant（B2）：断言 scanner 子进程关系——scanner-bin 可执行、空扫返回 ok。
  * 存在性检查按仓库约定改为"事件/数据关系"：插件可用 ⟺ scanner 子进程可产出报告。
+ *
+ * 0.5.28 事实核对：`@deepseek-ai/dsh-invariants` 已不在 0.2.2 家族的发行物里（0.2.2-rc.4 的
+ * `node_modules/@deepseek-ai/*` 无此包），所以宿主不再注入 `ctx.invariants`，这条 invariant
+ * 在新家族上是**静默空转**——feature-detect 让它是无害的，但「vet 注册了 invariant」这句话
+ * 在 0.2.2 上不成立。peer 已标 optional（否则 npm install 会报 unmet peer），保留代码是为了
+ * 兼容仍带 invariants 服务的旧宿主。
  */
 export function installInvariant(ctx: Context, config?: VetConfig): void {
   let invariants: InvariantRegistryLike | undefined

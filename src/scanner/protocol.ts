@@ -96,11 +96,17 @@ export interface CapabilityManifest {
  * 0.5.26 起 static-v30：发布前自查修正——`^1.2` caret 边界、engines.dsh 与 peer 的判定顺序、
  * 非法范围形态（非对象 / 空 / dist-tag / 逗号）补报。
  * 0.5.27 起 static-v31：x-range（`0.2.x`）与 `~>` 进入求值；任一 OR 组确证非法 → 整段不满足。
+ * 0.5.29 起 static-v32：R3 把 `process.kill(pid, 0)` 认成存活探测（info，0 号信号不投递）。
+ * 0.5.30 起 static-v33：R11 认 `require('fs').promises.<op>`；R12 认 exports 数组/顶层条件糖；
+ * R13/R14/R20 去嵌套量词（诊断器自己被 ReDoS 打死）；预算跳过时逐文件留 R8（skippedFiles 计数）。
+ * 0.5.31 起 static-v34：自报元数据不能自我降级——插件包的 bin/scripts 指向模块入口不再降级，
+ * 入口（沿相对 import）可达的 test/ 文件不再按测试文件降级。
+ * 0.5.32 起 static-v35：R3 解构成员单次遍历（不再 k×n）；R9 alternation 比较按次数计预算。
  */
-export const CURRENT_ENGINE = 'static-v31' as const
+export const CURRENT_ENGINE = 'static-v35' as const
 
 export interface ScanReport {
-  /** 与 scanner-bin/protocol.ts 同步；0.3.3 起 static-v19，round-22 起 static-v20，0.3.8（C4 原生二进制感知）起 static-v21，0.3.9（审查修复批次）起 static-v22，0.3.10（R13 误报治理）起 static-v23，0.3.11（R3 dev/ops 脚本中间态）起 static-v24，0.3.12（R3 根级判定审查修正：相对包根平铺）起 static-v25，0.3.13（DSH 0.1.7-rc.1 同步：R12 数组 patch + 官方包产物降噪）起 static-v26；0.5.3（C2 盲区精确化：capabilities 增 esmNamedBuiltinModules，规则判定未改）起 static-v27；0.5.24（DSH 0.2.2 适配：R12 需求闸门 + 测试/CI 路径降级让位给声明入口）起 static-v28；0.5.25（需求闸门支持部分版本范围 >=0.2 / <0.3）起 static-v29；0.5.26（发布前自查：^1.2 caret 边界、engines.dsh 存在时不看 peer、非法范围形态补报）起 static-v30；0.5.27（x-range/`~>` 求值；OR 组整体失效）起 static-v31。 */
+  /** 与 scanner-bin/protocol.ts 同步；0.3.3 起 static-v19，round-22 起 static-v20，0.3.8（C4 原生二进制感知）起 static-v21，0.3.9（审查修复批次）起 static-v22，0.3.10（R13 误报治理）起 static-v23，0.3.11（R3 dev/ops 脚本中间态）起 static-v24，0.3.12（R3 根级判定审查修正：相对包根平铺）起 static-v25，0.3.13（DSH 0.1.7-rc.1 同步：R12 数组 patch + 官方包产物降噪）起 static-v26；0.5.3（C2 盲区精确化：capabilities 增 esmNamedBuiltinModules，规则判定未改）起 static-v27；0.5.24（DSH 0.2.2 适配：R12 需求闸门 + 测试/CI 路径降级让位给声明入口）起 static-v28；0.5.25（需求闸门支持部分版本范围 >=0.2 / <0.3）起 static-v29；0.5.26（发布前自查：^1.2 caret 边界、engines.dsh 存在时不看 peer、非法范围形态补报）起 static-v30；0.5.27（x-range/`~>` 求值；OR 组整体失效）起 static-v31；0.5.29（R3 信号 0 存活探测降 info）起 static-v32；0.5.30（R11 fs.promises 链、R12 exports 形态、R13/R14/R20 去嵌套量词、跳过标记逐文件）起 static-v33；0.5.31（自报 bin/scripts 不得降级模块入口；入口可达的 test/ 不降级）起 static-v34；0.5.32（R3 解构遍历线性化；R9 分支比较计预算）起 static-v35。 */
   engine: typeof CURRENT_ENGINE
   sourceCount: number
   findings: Finding[]

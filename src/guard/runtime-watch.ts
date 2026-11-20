@@ -72,10 +72,21 @@ export function readProcSample(pid: number): ProcSample | null {
     const status = readFileSync(`/proc/${pid}/status`, 'utf8')
     const rss = /VmRSS:\s*(\d+)\s*kB/.exec(status)
     if (rss === null) return null
+    // round-27：只读主线程的 children 会漏掉 worker 线程里 fork 的进程（`/proc/<pid>/task/<tid>/children`
+    // 是**每线程**的）。并集所有线程的 children 才是这个进程真正的子进程集合。
     let childCount = -1
     try {
-      const children = readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim()
-      childCount = children === '' ? 0 : children.split(/\s+/).length
+      const tids = readdirSync(`/proc/${pid}/task`)
+      const seen = new Set<string>()
+      for (const tid of tids) {
+        try {
+          const text = readFileSync(`/proc/${pid}/task/${tid}/children`, 'utf8').trim()
+          if (text !== '') for (const child of text.split(/\s+/)) seen.add(child)
+        } catch {
+          // 线程刚退出：忽略这一条
+        }
+      }
+      childCount = seen.size
     } catch {
       childCount = -1
     }

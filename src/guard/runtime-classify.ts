@@ -5,6 +5,7 @@
 import { DESTROY_OPS, WRITE_OPS, READ_OPS, PROBE_OPS, PROC_OPS } from './runtime-ops.js'
 import type { HookAlarm, HookConfig, HookOp } from './runtime-ops.js'
 import { isPersistenceWriteTarget, isInstallWriteTarget } from './confirm-block.js'
+import { resolveAgainstCwd } from './path-utils.js'
 import {
   firstString, allStrings, commandString, hitsShellToken, pathTokens, redirectTarget,
   isSensitivePath, isHoneypotPath, isIntegrityPath, isLockSiblingPath, isSessionLogFile,
@@ -13,6 +14,16 @@ import {
 
 /** P1-8：破坏性命令词——命中且命令里出现敏感路径（参数或重定向目标）才报警，避免 rm -rf /tmp 这类常规清理误报。 */
 const DESTRUCTIVE_TOKENS = new Set(['rm', 'mv', 'cp', 'dd', 'mkfs', 'mkfs.ext4', 'mkfs.xfs', 'shred', 'truncate'])
+/**
+ * round-27：读取工具与解释器——它们能让「读一个敏感文件」完全不经过 fs 面。
+ * 只用于「工具 + 敏感路径」组合判定（命令里出现 cat 不报警，cat 一个 ~/.ssh 文件才报）。
+ * 解释器（node/python/sh…）覆盖 `-e/-c` 内联代码里的敏感路径：spawn('node',['-e',…])。
+ */
+const READ_TOOL_TOKENS = new Set([
+  'cat', 'head', 'tail', 'less', 'more', 'xxd', 'od', 'strings', 'base64', 'grep', 'awk', 'sed',
+  'tar', 'zip', 'scp', 'rsync', 'curl', 'wget',
+  'node', 'nodejs', 'python', 'python3', 'perl', 'ruby', 'php', 'bash', 'sh', 'zsh', 'dash', 'busybox',
+])
 /**
  * round-16（SA2-2）：相对裸 token 判定的破坏头（DESTRUCTIVE_TOKENS 的子集）——
  * rm/shred/truncate/dd/mkfs 族。排除 cp/mv：`cp id_rsa.pub backup/` 的相对裸名
@@ -37,14 +48,20 @@ function relativeSensitiveHit(full: string, cfg: HookConfig, destr: boolean): bo
 /** 危险操作分类（纯函数）：返回报警候选（pluginHint 由调用方经栈归因补全）。 */
 export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
   const { module, op: name, args } = op
-  const target = firstString(args) ?? ''
+  // round-23（F27 同族）：fs 面的判定一律在**绝对路径坐标系**里做。内核把相对路径按 cwd
+  // 解析，判定侧若原样比对绝对的前缀清单（sensitiveRoots / integrityRoots / honeypotRoots /
+  // 凭据清单），`chdir(home)` 之后写 `.dsh/integrity.json`、`etc/hosts` 这类写法就整体失明。
+  // 命令串面（child_process）不解析：那里的相对路径由被 spawn 的子进程按它自己的 cwd 解析，
+  // 拿宿主 cwd 去猜只会制造假命中。
+  const fsPath = (p: string): string => (module === 'fs' ? resolveAgainstCwd(p) : p)
+  const target = fsPath(firstString(args) ?? '')
   // round-4 review（M5 补漏）：成对路径操作（cp/rename/copyFile）的第二个参数是目标侧——
   // 蜜罐/完整性判定此前只查首参（源侧），`cp(/tmp/x, 诱饵文件)` / `rename(x, 金丝雀)` 的
   // 目标侧触碰全部漏报（N7 族 3/4 与 fs-write 早已用 allStrings 查双路径，蜜罐/完整性是
   // 两条高置信 red 信号，不应盲区）。成对操作=触碰判定候选取全部字符串参数。
   const pairOp = (name === 'cp' || name === 'cpSync' || name === 'rename' || name === 'renameSync'
     || name === 'copyFile' || name === 'copyFileSync')
-  const candTargets: string[] = pairOp ? allStrings(args) : [target]
+  const candTargets: string[] = pairOp ? allStrings(args).map(fsPath) : [target]
   if (module === 'child_process' && PROC_OPS.has(name)) {
     const cmd = commandString(args)
     // 命令全貌（含 spawn argv 数组的元素）：exec('rm -rf ~/.ssh') 与 spawn('rm', ['-rf', '/home/u/.ssh'])
@@ -56,16 +73,25 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
     const destr = hitsShellToken(full, [...DESTRUCTIVE_TOKENS])
     const redirect = redirectTarget(full)
     const redirectSensitive = redirect !== undefined && isSensitivePath(redirect, cfg, 'mutate')
+    // round-27（读取面）：`exec('cat ~/.ssh/id_rsa')` / `spawn('node', ['-e', 'readFileSync(...)'])`
+    // 此前零报警——同一件事走 fs.readFileSync 是 yellow，走子进程就看不见。读取工具与
+    // 解释器（cat/head/base64/tar/scp/node/python…）出现在命令里、且命令带敏感路径时，
+    // 按「子进程读取敏感路径」报 yellow。破坏性词与重定向的判定不变（它们本来就查路径）。
+    const readTool = hitsShellToken(full, [...READ_TOOL_TOKENS])
+    const readSensitive = readTool && pathTokens(full).some(p => isSensitivePath(p, cfg, 'read'))
     if (!hitsShellToken(cmd, cfg.shellTokens)) {
-      // 触发条件：破坏性命令 + 敏感路径参数，或 shell 重定向到敏感路径（echo x > /etc/passwd）
-      if (!destr && !redirectSensitive) return null
+      // 触发条件：破坏性命令 + 敏感路径参数，或 shell 重定向到敏感路径（echo x > /etc/passwd），
+      // 或读取工具/解释器 + 敏感路径（cat ~/.ssh/id_rsa）。
+      if (!destr && !redirectSensitive && !readSensitive) return null
       const paths = [...pathTokens(full), redirect].filter((p): p is string => p !== undefined)
-      if (!paths.some(p => isSensitivePath(p, cfg, 'mutate')) && !relativeSensitiveHit(full, cfg, destr)) return null
+      if (!paths.some(p => isSensitivePath(p, cfg, 'mutate')) && !readSensitive && !relativeSensitiveHit(full, cfg, destr)) return null
     }
     return {
       severity: 'yellow',
       kind: 'spawn',
-      message: `子进程 spawn：${name}(${cmd.slice(0, 120)})`,
+      message: readSensitive && !destr
+        ? `子进程读取敏感路径：${name}(${cmd.slice(0, 120)})`
+        : `子进程 spawn：${name}(${cmd.slice(0, 120)})`,
       target: cmd.slice(0, 120),
     }
   }
@@ -123,7 +149,7 @@ export function classifyOp(op: HookOp, cfg: HookConfig): HookAlarm | null {
     }
     // cp/rename 是成对路径：src 敏感（拷贝密钥出局）或 dest 敏感（覆盖系统文件/密钥落位）都要报
     if (name === 'cp' || name === 'cpSync' || name === 'rename' || name === 'renameSync' || name === 'copyFile' || name === 'copyFileSync') {
-      const paths = allStrings(args)
+      const paths = allStrings(args).map(fsPath)
       const sensitive = paths.find(p => isSensitivePath(p, cfg, 'mutate'))
       if (sensitive !== undefined) {
         return { severity: 'yellow', kind: 'fs-write', message: `敏感路径写入（${name}）：${sensitive.slice(0, 120)}`, target: sensitive.slice(0, 120) }

@@ -935,6 +935,45 @@ describe('目标身份分级（targetKind，§14.3 边界落地）', () => {
     }
   })
 
+  it('0.5.29（static-v32）：process.kill(pid, 0) 是存活探测 → info，不进 verdict（其余形态仍 high）', () => {
+    // 最初的红灯：DSH 自己的 dsh-plugin-manager 用 `process.kill(target, 0)` 做 liveness 探测，
+    // 却被 R3 当成副作用 high；它同时发布 src/，lib/ 那份被官方包产物降噪折掉、src/ 这份没有，
+    // 于是一个只做存在性探测的官方包常年挂一张黄牌。
+    const dir = tmpPkg({
+      'package.json': JSON.stringify({ name: 'probe-plugin', dependencies: { '@deepseek-ai/cordis': '^4.0.1' } }),
+      'index.js': 'const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }',
+    })
+    try {
+      const { request } = buildRequest({ target: 'package', packagePath: dir })
+      const res = scan(request)
+      const r3 = res.report!.findings.filter(f => f.rule === 'R3')
+      expect(r3.length).toBeGreaterThan(0)
+      expect(r3.every(f => f.severity === 'info')).toBe(true)
+      expect(r3.some(f => f.message.includes('信号 0'))).toBe(true)
+      expect(res.report!.verdict).toBe('clean')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('0.5.29：kill 的非 0 形态保持 high——无参（默认 SIGTERM）/ 变量信号 / 字符串信号', () => {
+    for (const code of ['process.kill(1234)', 'process.kill(1234, sig)', "process.kill(1234, '0')"]) {
+      const dir = tmpPkg({
+        'package.json': JSON.stringify({ name: 'kill-plugin', dependencies: { '@deepseek-ai/cordis': '^4.0.1' } }),
+        'index.js': code,
+      })
+      try {
+        const { request } = buildRequest({ target: 'package', packagePath: dir })
+        const res = scan(request)
+        const r3 = res.report!.findings.find(f => f.rule === 'R3')
+        expect(r3, code).toBeDefined()
+        expect(r3!.severity, code).toBe('high')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }
+  })
+
   it('vet 自豁免按 realpath 验证（round-7.1 P-3）：自身目录 → generic；冒名包（同名不同目录）→ 最严格 plugin', () => {
     // 真实 vet 实例：当前运行代码所在包根 → 信任锚豁免 generic
     const selfRoot = join(import.meta.dirname, '..')

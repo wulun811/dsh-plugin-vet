@@ -13,6 +13,7 @@ import { setCapabilitiesDirForTest } from '../lib/guard/version-diff.js'
 import { setSummariesDirForTest } from '../lib/guard/scan-summaries.js'
 import { installInternalPluginGuard } from '../lib/guards/internal-plugin.js'
 import { isOfficialTrusted, resetOfficialTrustForTest } from '../lib/guard/runtime-attrib.js'
+import { isVetSelfIo } from '../lib/guard/runtime-denoise.js'
 import { VetStatus } from '../lib/guard/status.js'
 import type { VetConfig } from '../lib/config.js'
 
@@ -119,6 +120,20 @@ describe('official-catalog：官方全集判据（M1）', () => {
     expect(isOfficialPackageName('@deepseek-ai/dsh-brand-new-2026')).toBe(true)
   })
 
+  it('覆盖层落盘在 self-io 里完成，且不会把 self-io 标志漏出去（0.5.28）', async () => {
+    // persistOverlay 曾裸写：穿过自己的 T2 钩子 → 「敏感路径写入 open flags=wx」黄牌，
+    // 也就是 vet 把自己的记账报成可疑动作。修法是包进 withVetSelfIo。
+    // 这里守两件事：落盘真的发生了；标志最终复位（漏出去 = 整个 T2 监控静默失明）。
+    const discovered = ['@deepseek-ai/dsh-selfio-check']
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const body = JSON.stringify({ objects: discovered.map(n => ({ package: { name: n } })) })
+      return new Response(body, { status: 200, headers: { 'content-length': String(body.length) } })
+    }))
+    await refreshOfficialCatalogFromRegistry()
+    expect(existsSync(officialCatalogPath())).toBe(true)
+    expect(isVetSelfIo()).toBe(false)
+  })
+
   it('核对失败 fail-open：网络异常/非 JSON 响应 → 目录维持现状（绝不误伤）', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
     const merged = await refreshOfficialCatalogFromRegistry()
@@ -211,6 +226,47 @@ describe('official-catalog × internal-plugin（M2 扫描侧接线）', () => {
     expect(kinds).toContain('official-not-in-catalog')
     expect(isOfficialTrusted(OUT_CATALOG)).toBe(false) // 目录外不入内容信任锚
     rmSync(profile, { recursive: true, force: true })
+  })
+
+  it('目录外官方名经 registry 核对确认 → 黄牌自动撤下，只留 info 记录（0.5.28）', async () => {
+    // 升级当天最常见的形态：新拆的官方包第一次出现 → 黄牌先落地 → 核对确认 → 黄牌消失。
+    // 旧行为是「黄牌留着 + 一条 info 建议你点忽略」：每次 DSH 升级都要用户手工清一遍。
+    // 夹具刻意不给盘上包（root 解析失败 → not-official）：这样核对成功后走 info 分支；
+    // 真装上的包走 verifyFirstSeenOfficial 分支（同样先撤黄牌，只是补一条 official-verified）。
+    setCatalogAutoRefresh(true)
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+      const u = String(url)
+      if (u.includes('/-/v1/search')) {
+        const body = JSON.stringify({ objects: [{ package: { name: OUT_CATALOG } }] })
+        return new Response(body, { status: 200, headers: { 'content-length': String(body.length) } })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+    const status = new VetStatus()
+    const ctx = new FakeCtx()
+    const profile = mkdtempSync(join(tmpdir(), 'vet-ocat-prof-merge-'))
+    ctx.baseUrl = profile
+    try {
+      installInternalPluginGuard(ctx as never, cfg(), status)
+      ctx.handlers.get('internal/plugin')![0]({ uid: 'f-merge', entry: { options: { name: OUT_CATALOG } } })
+      expect(status.snapshot().alarms.map(a => a.kind)).toContain('official-not-in-catalog')
+      for (let i = 0; i < 80; i++) {
+        if (status.snapshot().alarms.some(a => a.kind === 'official-catalog-merged')) break
+        await new Promise(r => setTimeout(r, 50))
+      }
+      const kinds = status.snapshot().alarms.map(a => a.kind)
+      expect(isOfficialPackageName(OUT_CATALOG)).toBe(true)
+      expect(kinds).not.toContain('official-not-in-catalog')
+      expect(kinds).toContain('official-catalog-merged')
+      const merged = status.snapshot().alarms.find(a => a.kind === 'official-catalog-merged')!
+      expect(merged.severity).toBe('info')
+      expect(merged.message).toContain('已自动撤下')
+      // 黄牌撤下后盾牌回到绿（撤的是可行动报警，不是「折叠」）
+      expect(status.snapshot().level).toBe('green')
+    } finally {
+      setCatalogAutoRefresh(false)
+      rmSync(profile, { recursive: true, force: true })
+    }
   })
 
   it('目录内官方包 first-seen：registry 字节一致 → 首见即入锚（official-verified info），不再等二次 match', async () => {
