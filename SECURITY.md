@@ -53,9 +53,13 @@ README):
      read scan conclusions, alarm targets and plugin metadata. Keep the loopback binding if that matters.
    - **`POST /vet/*` (dismiss/restore, guard toggle, tier switch) has same-origin protection, not authentication.**
      A state-changing request is accepted only when its `Origin` header is present *and* its host matches the
-     request `Host`; a POST with no `Origin` at all is rejected (403). That stops a cross-site page from driving
-     the control surface. It does **not** stop a same-origin script, or any local process willing to send
-     `Origin: http://<host>` — for both, the gateway above is the only real boundary.
+     request `Host`; a POST with no `Origin` at all is rejected (403), **unless** it carries the panel's
+     `x-vet-panel: 1` marker. The DSH desktop app serves this page from the `dsh-app://` custom protocol, whose
+     requests carry no `Origin`; without the marker every write button (dismiss/restore, guard toggle, tier)
+     returned 403 there while GET polling kept working. The marker is not a secret — a cross-site page cannot
+     set it without a CORS preflight the web server never grants, and a local process could already send
+     `Origin: http://<host>`. It does **not** stop a same-origin script; the gateway above is still the only
+     real boundary.
    - **Since 0.5.30 the `Host` header must also name this machine.** `Origin === Host` only proves the *browser*
      thinks the request is same-origin — both headers come from the caller. After DNS rebinding (`evil.example`
      resolving to 127.0.0.1, the page served from `evil.example:3456`), a page sends `Origin: http://evil.example:3456`
