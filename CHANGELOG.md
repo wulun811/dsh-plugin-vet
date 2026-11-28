@@ -3,6 +3,18 @@
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed — Windows shield panel CPU was a hard-coded 0
+
+`readHostMetrics` only sampled CPU on Linux (`/proc/<pid>/stat`) and macOS (`ps` TIME). On `win32`
+`cpuPct` stayed at its initial `0`, so the shield's CPU ring read a permanent "0%" — while
+`childCount`/`fdCount`/disk-I/O correctly fall back to `—`. The win32 branch now diffs Node's
+built-in `process.cpuUsage()` (user+system µs) between polls: synchronous, zero spawn, same
+host-process semantics as the other platforms. The first sample still reads `0` by design (a diff
+needs two points). `childCount`/`fdCount`/disk-I/O remain `—` on Windows (no low-cost data source),
+exactly as the platform matrix says.
+
 ## [0.5.35] - 2026-11-20
 
 ### Changed — the "whole-package exfiltration" red now needs a real amount

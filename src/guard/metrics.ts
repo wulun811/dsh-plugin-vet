@@ -10,9 +10,11 @@
  *   同步 execFile 会卡宿主事件循环——故走"异步快照缓存 + TTL 触发后台刷新"：readHostMetrics
  *   只读缓存，永不 spawn 同步子进程；面板不轮询 = 不刷新（零成本）。首轮数据未到时
  *   childCount=-1（面板画 —）、其余字段 0/-1 回退，后续轮询自动补齐。
- * - Windows/其他：无 stock 等价数据源（见 README 平台支持），OS 侧字段保持 -1/0 回退
- *   （childCount 自 round-21 起也如实 -1——宿主必然可能有子进程，伪 0 比 — 更误导），
- *   仅 V8 侧数字（rss/heap/external）真实——与 0.1.x 行为一致。
+ * - Windows：CPU 用 Node 内建 `process.cpuUsage()`（user+system 微秒）做差分——同步、
+ *   零 spawn，与 Linux/macOS 的宿主进程 CPU 同口径；child/fd/io 仍无低开销数据源，
+ *   保持 -1/0 回退（childCount 自 round-21 起也如实 -1——宿主必然可能有子进程，伪 0
+ *   比 — 更误导）。仅 V8 侧数字（rss/heap/external）真实。
+ * - 其他平台：全部保持回退值（仅 V8 侧数字真实）。
  * io：仅 Linux 可得；macOS 无低开销的按进程字节计数（stock CLI 拿不到），明确 -1（面板画 —），
  * 不再伪装 0。任何失败只回退，绝不抛错。
  */
@@ -315,6 +317,8 @@ function readChildren(): ChildInfo[] {
 }
 
 let prevCpu: { total: number; at: number } | undefined
+/** win32 的 CPU 差分基线（process.cpuUsage：user+system 微秒，与 linux/darwin 的宿主进程口径一致）。 */
+let prevWinCpu: { total: number; at: number } | undefined
 
 /** 测试注入点（与 sidecarMain 的 deps 同一纪律）：platform/runAsync/now 默认取真实环境。 */
 export interface MetricsDeps {
@@ -396,8 +400,29 @@ export function readHostMetrics(deps: MetricsDeps = {}): HostMetrics {
     } catch {
       // stat 不可读
     }
+  } else if (platform === 'win32') {
+    // win32：Node 内建 process.cpuUsage()（user+system 微秒）差分，与 linux/darwin 的
+    // 宿主进程 CPU 差分同口径。同步调用、零 spawn——不违反本模块「面板不轮询就不采样」
+    // 的设计（此前 win32 直接落到回退 0，面板 CPU 环恒显示 0% 却看不出是「未采集」）。
+    try {
+      const u = process.cpuUsage()
+      const total = u.user + u.system
+      const now = nowFn()
+      if (prevWinCpu !== undefined) {
+        const dtMs = now - prevWinCpu.at
+        const dtUs = total - prevWinCpu.total
+        if (dtMs > 0 && dtUs >= 0) {
+          // 微秒 → 毫秒；cpuPct 可 >100（多核），与 linux 口径一致
+          cpuPct = Number(((dtUs / 1000) / dtMs * 100).toFixed(1))
+        }
+      }
+      prevWinCpu = { total, at: now }
+    } catch {
+      // cpuUsage 不可用（极旧 Node / 受限宿主）→ 保持回退 0
+    }
   }
-  // win32/其他：保持上方回退值（仅 V8 侧数字真实），零 spawn、零噪音——设计如此。
+  // win32：CPU 已在上方差分；childCount/fd/io 无低开销数据源 → 保持 -1 回退（面板画 —）。
+  // 其他平台：全部保持回退值（仅 V8 侧数字真实）。
   const at = nowFn()
   // 采样入历史（环形）：跨进程总占用与触发器 RAM 同口径（rss+mcp+vet）
   recordMetricsSample({

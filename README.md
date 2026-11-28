@@ -694,7 +694,7 @@ shield); panel = live host-metrics display (`metrics.js`).
 | Static scan (scan_plugin, R1–R20, OSV) | ✅ | ✅ | ✅ |
 | T2 runtime hooks + honeypot + shield | ✅ full | ✅ full | ✅ (system-root prefix check is POSIX-shaped; segment-name/keyword checks still hit) |
 | T1 sentinel (out-of-process resource sampling) | ✅ `/proc`, every tick | ✅ `ps` + `lsof`, fd ~every 6s (since round-19) | ⛔ skipped via explicit platform gate (zero noise) |
-| Live metrics panel (`metrics.js`) | ✅ full | ✅ async `ps`/`lsof` sampling (since round-20); disk-I/O shows `—` | ⚠️ V8-side numbers only (rss/heap); OS counters show `—`/0 fallbacks (by design; since round-21 even `childCount` is honest `—`, never a fake 0) |
+| Live metrics panel (`metrics.js`) | ✅ full | ✅ async `ps`/`lsof` sampling (since round-20); disk-I/O shows `—` | ⚠️ CPU is real (`process.cpuUsage` diff); child count / fd / disk-I/O show `—` (no low-cost source; honest, never a fake 0) |
 
 macOS floor and CI: GitHub Actions retired the older hosted macOS images (12 fully gone, 13/14 on
 the deprecation path; `macos-latest` = macOS 15 Sequoia), so only modern macOS is ever CI-tested —
@@ -781,7 +781,8 @@ between server and client bundle).
     the T1 sentinel runs on Linux (`/proc`) and macOS 11+ (`ps`/`lsof`, fd ~every 6s, since round-19)
     and is explicitly skipped on other platforms including Windows; the `metrics.js` host panel covers
     macOS since round-20 (async snapshot cache — never blocks the host; disk-I/O stays Linux-only and
-    shows `—`, never a fake 0); on Windows only the V8-side numbers (rss/heap/external) are real.
+    shows `—`, never a fake 0); on Windows CPU is real (`process.cpuUsage` diff, zero spawn) while
+    child count / fd / disk-I/O stay `—`; the V8-side numbers (rss/heap/external) are real everywhere.
 
 ## Development
 

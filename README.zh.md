@@ -468,7 +468,7 @@ R16 依赖对账 · R17 单动词 !!js · R18 指令注入观测 · R19 typosqua
 | 静态扫描（scan_plugin、R1–R20、OSV） | ✅ | ✅ | ✅ |
 | T2 运行时钩子 + 蜜罐 + 盾牌 | ✅ 全功能 | ✅ 全功能 | ✅（"系统根前缀"判定为 POSIX 形态；段名/密钥特征判定照常命中） |
 | T1 哨兵（进程外资源采样） | ✅ `/proc`，每拍全量 | ✅ `ps` + `lsof`，fd 约 6s 一刷 | ⛔ 显式平台门跳过（零噪音） |
-| 实时指标面板 | ✅ 全量 | ✅ `ps`/`lsof` 异步采样；磁盘 I/O 显示 `—` | ⚠️ 仅 V8 侧数字真实；OS 计数器显示 `—` |
+| 实时指标面板 | ✅ 全量 | ✅ `ps`/`lsof` 异步采样；磁盘 I/O 显示 `—` | ⚠️ CPU 为真实值（`process.cpuUsage` 差分）；子进程/fd/磁盘 I/O 显示 `—`（无低开销数据源，不伪装成 0） |
 
 面板在 macOS 上刻意走**异步快照缓存**（TTL 4s、lsof 15s）：面板每 5s 从**宿主进程内部**轮询，同步 execFile
 会卡死宿主事件循环——故读取永不阻塞，首轮显示 `—`、下一轮自愈。面板还**拒绝渲染可解析的非快照 JSON**
@@ -492,7 +492,7 @@ R16 依赖对账 · R17 单动词 !!js · R18 指令注入观测 · R19 typosqua
 13. **盾牌激活需要 `dsh web` 重启**：client-modules 在启动时扫描 `dsh.client` 声明；重启前浏览器不会加载盾牌。
 14. **运行时守卫默认关闭**：包装 fs/child_process 有性能与稳定代价，opt-in 开启。
 15. **`process.kill` 保持 high**（有意设计）：静态区分 `process.kill(child.pid)` 与任意 pid 需要数据流分析，成本高收益低——维持现状，由 agent 按 vet-audit-protocol 审计时人工排除。
-16. **平台支持**：见上方矩阵。一句话：静态扫描、T2 钩子、盾牌全平台可跑；T1 哨兵跑 Linux 与 macOS 11+，其余平台显式跳过；磁盘 I/O 仅 Linux 可得，绝不伪装成 0。
+16. **平台支持**：见上方矩阵。一句话：静态扫描、T2 钩子、盾牌全平台可跑；T1 哨兵跑 Linux 与 macOS 11+，其余平台显式跳过；CPU 在 Windows 用 `process.cpuUsage` 差分可得；磁盘 I/O 仅 Linux 可得，绝不伪装成 0。
 
 17. **medium 洪水与「0 分 clean」**：medium 只扣分不升级 verdict，200 条 medium 会让 staticScore 归 0 而 verdict 仍是 `clean`。评分卡上两个数字必须一起看；后续版本会给出聚合阈值。
 
