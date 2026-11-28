@@ -52,6 +52,10 @@ export type { MorandiPalette } from './theme.ts'
 /** 主弹层宽度（用户反馈 2026-08-25：mock 的 420 太宽，回到原 340 紧凑宽）。 */
 const PANEL_W = 340
 
+/** 面板写请求标记：DSH 桌面端用 `dsh-app://` 自定义协议加载页面，其 fetch 不带 `Origin`；
+ *  服务端 `sameOrigin()` 在 Origin 缺失时只认这个头（见 guard/status-route.ts 的桌面端例外）。 */
+const PANEL_WRITE_HEADERS = { 'content-type': 'application/json', 'x-vet-panel': '1' }
+
 /** 次级/三级面板统一宽度（与主面板同宽；层间并排级联，永不叠放）。 */
 const SUB_W = 340
 
@@ -264,7 +268,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
     try {
       const res = await fetch('/vet/runtime-guard', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: PANEL_WRITE_HEADERS,
         body: JSON.stringify({ enable }),
       })
       const body = await res.json() as { ok?: boolean; note?: string; profile?: string }
@@ -293,7 +297,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
     try {
       const res = await fetch('/vet/profile', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: PANEL_WRITE_HEADERS,
         body: JSON.stringify({ tier }),
       })
       const body = await res.json() as { ok?: boolean; note?: string; profile?: string }
@@ -317,7 +321,7 @@ export function Shield(props: { t?: T } & Record<string, unknown>): ReactNode {
     try {
       await fetch(url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: PANEL_WRITE_HEADERS,
         body: JSON.stringify({ id }),
       })
       loadRef.current()

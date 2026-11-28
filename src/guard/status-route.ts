@@ -429,10 +429,20 @@ function profileName(): string {
  * round-15 review（scheme 补漏）：旧实现只比 host——`https://` Origin 可被 `http://` Host
  * 接受（协议降级面：DSH web 即便 http 部署，跨协议 POST 也应收紧）。现要求协议一致：
  * Origin 的 scheme 必须与请求 URL 的 scheme 相同（file: 面板场景除外的普通 http/https）。
+ *
+ * 桌面端例外：DSH 桌面端（Electron）用 `dsh-app://` 自定义协议加载面板页面，该页面的
+ * fetch 不携带 Origin，于是忽略/恢复、守卫开关、档位切换这些写操作全部 403（GET 轮询
+ * 走 getOriginMismatch，Origin 缺失放行，所以只有写入口坏）。面板写请求统一携带
+ * `x-vet-panel: 1` 标记，Origin 缺失时只认它。标记不是凭据：跨站网页无法在不触发
+ * CORS 预检的情况下伪造该头（webServer 不放行预检），而同源脚本/本机进程本来就能改
+ * 写面板状态（见 SECURITY.md）。
  */
-function sameOrigin(req: IncomingMessage): boolean {
+export function sameOrigin(req: IncomingMessage): boolean {
   const origin = req.headers.origin
-  if (origin === undefined) return false
+  if (origin === undefined) {
+    // 桌面端自定义协议页面：无 Origin，靠面板写请求标记放行
+    return req.headers['x-vet-panel'] === '1'
+  }
   const host = req.headers.host
   if (host === undefined) return false
   try {
